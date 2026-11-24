@@ -38,6 +38,14 @@
 //! rejection is also kept on the thread's timeline ([`TimelineEntry::Rejected`]), where the ant's own reader finds it
 //! for its dreams.
 //!
+//! # A cancelled prompt
+//!
+//! A prompt cancelled while one of its requests waits (a steer interrupting it, `ants cancel`, a prompt limit) answers
+//! the harness Cancelled and drops the wait. That settles the request too ([`Unsettled`]): the ant publishes it again
+//! on `ants.approvals.<ant>` with `cancelled_at` set, which takes it off every reader's pending requests and makes a
+//! later decision on it refused as on a request gone, tells the thread's status a `decided` update by `cancelled`, and
+//! tells the ants of the chain and the assistant asked that no answer is needed.
+//!
 //! # An assistant's decision
 //!
 //! A human's assistant decides for it as a member does, with an envelope to the ant's inbox, but one claiming to act
@@ -76,7 +84,9 @@ use crate::sync::MutexExt as _;
 
 mod text;
 
-use text::{assistant_text, chain_text, decided_notice, expired_member_notice, expired_notice};
+use text::{
+    assistant_text, cancelled_member_notice, chain_text, decided_notice, expired_member_notice, expired_notice,
+};
 
 /// How long a tool request waits for a human by default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
@@ -293,6 +303,42 @@ impl NatsApprover {
         }
     }
 
+    /// Settle `request` as the cancellation of the prompt that asked does: publish its cancelled copy, which takes it
+    /// off every reader's pending requests, tell the thread's status a `decided` update by `cancelled`, and tell the
+    /// ants `asked` about it, of the chain or the human's assistant, that no answer is needed. Best effort: failing, it
+    /// warns, and the request is left to expire.
+    async fn tell_cancelled(&self, request: &ApprovalRequest, asked: &[UserId]) {
+        tracing::info!(request = %request.id, "the prompt that asked was cancelled; settling the approval request");
+        let cancelled = request.cancelled(chrono::Utc::now());
+        let stored = match serde_json::to_vec(&cancelled) {
+            Ok(payload) => match self.js.publish(request.subject(), payload.into()).await {
+                Ok(ack) => ack.await.map(|_| ()).map_err(anyhow::Error::from),
+                Err(e) => Err(e.into()),
+            },
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = stored {
+            tracing::warn!(request = %request.id, error = format!("{e:#}"), "storing the cancelled approval request");
+        }
+        let decided = StatusUpdate::Decided {
+            request_id: request.id,
+            verdict: Verdict::Reject,
+            by: DecidedBy::Cancelled,
+            decider: None,
+            via: None,
+        };
+        crate::monitoring::status::publish(&self.client, &self.ant, &request.thread_id, decided);
+        let allow = self.answering(&request.thread_id, |e| e.allow.clone()).flatten();
+        for member in asked {
+            let told = cancelled_member_notice(&self.ant, request, member).with_allow(allow.clone());
+            let id = format!("approval-cancelled-{}-{}-{member}", self.ant, request.id);
+            if let Err(e) = bus::store(&self.js, told.subject(), &told, &id).await {
+                let error = format!("{e:#}");
+                tracing::warn!(request = %request.id, to = %member, error, "telling of the cancelled approval request");
+            }
+        }
+    }
+
     /// Keep on the thread's timeline that `request` was rejected as `settled` says, by its decider, via its assistant,
     /// under the message being answered there, for the ant's dreams, whose packets show it
     /// ([`TimelineEntry::Rejected`]). Best effort, stored before the ant goes on.
@@ -436,11 +482,13 @@ impl NatsApprover {
             self.waiting.locked().remove(&id);
         });
         self.store(&request).await?;
+        let mut unsettled = Unsettled { waiting: Some((self.clone(), request.clone())), asked: Vec::new() };
         if let Some((_, asked)) = self.answering.locked().get_mut(&request.thread_id) {
             *asked += 1;
         }
         let mut asked = self.ask_chain_logged(&request, &chain).await;
         asked.extend(self.ask_assistant(&request, &human, &chain).await);
+        unsettled.asked.clone_from(&asked);
         let mut listening = Listening { decisions, inbox, chain, consents, withdrawals, from_chain };
         let waits = StatusUpdate::Approval { request_id: request.id };
         crate::monitoring::status::publish(&self.client, &self.ant, &request.thread_id, waits);
@@ -454,6 +502,7 @@ impl NatsApprover {
                     Some(Settled::expired())
                 }
             };
+        unsettled.waiting = None;
         let verdict = decided.as_ref().map_or(Verdict::Reject, |settled| settled.verdict);
         if let Some(settled) = decided {
             if verdict == Verdict::Reject {
@@ -664,6 +713,24 @@ impl NatsApprover {
             tracing::warn!(%from, %request, "ignoring an approval decision from outside the ant's escalate_to");
         }
         Some((envelope.from, decided?))
+    }
+}
+
+/// A request stored and waiting: dropped while `waiting` still holds it, as the wait is when the prompt that asked is
+/// cancelled, it settles the request as cancelled ([`NatsApprover::tell_cancelled`]), from a task of its own.
+struct Unsettled {
+    /// The approver and the request, until settled otherwise.
+    waiting: Option<(NatsApprover, ApprovalRequest)>,
+    /// The ants of the chain and the assistant asked about it.
+    asked: Vec<UserId>,
+}
+
+impl Drop for Unsettled {
+    fn drop(&mut self) {
+        let Some((approver, request)) = self.waiting.take() else { return };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+        let asked = std::mem::take(&mut self.asked);
+        runtime.spawn(async move { approver.tell_cancelled(&request, &asked).await });
     }
 }
 

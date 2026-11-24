@@ -137,6 +137,56 @@ fn harnesses_defined_in_the_file_run_ants_and_the_builtin_messenger() {
 }
 
 #[test]
+fn a_native_definition_takes_its_protocol_s_defaults_under_any_name() {
+    let (_, harnesses) = parse_with_harnesses(
+        r#"
+            [harnesses.cc]
+            command = "claude"
+            protocol = "claude"
+
+            [harnesses.cx]
+            command = "codex"
+            protocol = "codex"
+            memory_files = []
+            review = { mode = "workspace-write" }
+
+            [harnesses.cp]
+            command = "copilot"
+            protocol = "copilot-sdk"
+
+            [harnesses.agy]
+            command = "agy"
+            protocol = "antigravity"
+            window = 1000
+
+            [harnesses.acp]
+            command = "custom-acp"
+            "#,
+    )
+    .unwrap();
+    let harness = |name: &str| harnesses.get(name).unwrap();
+    let builtin = |name: &str| Harnesses::builtin().get(name).unwrap();
+    let settings = crate::harness::ModelSettings::default();
+
+    let cc = harness("cc");
+    assert_eq!(cc.memory_files(), builtin("claude").memory_files(), "Claude Code's memory files");
+    assert_eq!(cc.unheld_review(), None, "a sage on it reviews");
+    assert_eq!(cc.reviewing().unwrap().mode.as_deref(), Some("plan"));
+    assert_eq!(cc.history_budget(&settings), builtin("claude").history_budget(&settings), "Claude's window");
+
+    let cx = harness("cx");
+    assert!(cx.memory_files().is_empty(), "what it sets wins");
+    assert_eq!(cx.reviewing().unwrap().mode.as_deref(), Some("workspace-write"));
+    assert_eq!(harness("cp").memory_files(), builtin("copilot").memory_files());
+    assert!(harness("cp").unheld_review().is_some(), "copilot-sdk has no read-only review of its own");
+    let agy = harness("agy");
+    assert_eq!(agy.memory_files(), builtin("antigravity").memory_files());
+    assert_eq!(agy.window, Some(1000));
+    assert!(harness("acp").memory_files().is_empty(), "an ACP definition has no protocol defaults");
+    assert_eq!(harness("acp").review, None);
+}
+
+#[test]
 fn unknown_harness_references_and_bad_definitions_fail_to_load() {
     let err = |text: &str| format!("{:#}", parse_here(text).unwrap_err());
     let top = err("harness = \"my-agent\"");

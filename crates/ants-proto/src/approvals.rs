@@ -56,7 +56,9 @@ pub struct ToolCall {
 
 /// A tool request outside an ant's allowlist, published to `ants.approvals.<ant>`. It is pending until a
 /// [`ApprovalDecision`] arrives on [`ApprovalRequest::decision_subject`] or `expires_at` passes; then the ant
-/// rejects it.
+/// rejects it. A prompt cancelled while it waits settles it too: the ant publishes the request again on the same
+/// subject, the same but for its `cancelled_at` ([`ApprovalRequest::cancelled`]), and readers take the request as
+/// that copy says.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub id: Uuid,
@@ -77,6 +79,10 @@ pub struct ApprovalRequest {
     /// The ant's stand-in, who also gets the request while that human is away, in place of the human's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stand_in: Option<UserId>,
+    /// When the prompt that asked was cancelled while the request waited, the harness answered so and the request
+    /// needs no decision: set only on the copy the ant publishes then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_at: Option<DateTime<Utc>>,
 }
 
 impl ApprovalRequest {
@@ -106,6 +112,7 @@ impl ApprovalRequest {
             expires_at,
             human: None,
             stand_in: None,
+            cancelled_at: None,
         }
     }
 
@@ -152,6 +159,12 @@ impl ApprovalRequest {
 
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         now >= self.expires_at
+    }
+
+    /// The copy telling that the prompt asking was cancelled at `at`, which settles the request.
+    #[must_use]
+    pub fn cancelled(&self, at: DateTime<Utc>) -> Self {
+        Self { cancelled_at: Some(at), ..self.clone() }
     }
 
     /// The human's answer. A verdict the harness did not offer counts as [`Verdict::Reject`].

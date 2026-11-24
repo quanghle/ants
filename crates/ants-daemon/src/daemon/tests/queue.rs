@@ -427,6 +427,42 @@ async fn a_steer_the_harness_refuses_waits_for_the_prompt_and_runs_next() {
     assert_eq!(bus.unacked().await, 0);
 }
 
+/// An ant's message narrowed to its own tool rules does not join a prompt running under the ant's full rules: it waits
+/// for the prompt and runs next, narrowed.
+#[tokio::test]
+async fn a_narrowed_message_does_not_join_a_prompt_running_unnarrowed() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
+    let (launch, log, gate) = fake::launch();
+    log.locked().knobs.steers = true;
+    let pool = Pool::new(launch.with_policy(PermissionPolicy::allow_all()), SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let (a, _) = bus.send(&t1, "hold a").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        let narrowed = Envelope::on_thread(t1.clone(), "dev-b".parse().unwrap(), bus.dev.clone(), "ask send")
+            .with_allow(Some(vec!["read:*".to_owned()]));
+        bus::publish_json(&bus.js, narrowed.subject(), &narrowed, None).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(log.locked().steered.is_empty(), "it does not join");
+        gate.add_permits(1);
+        let first = next_envelope(&mut replies).await;
+        assert_eq!((first.in_reply_to, first.text), (Some(a.id), "s1: hold a".to_owned()));
+        let next = next_envelope(&mut replies).await;
+        assert_eq!(next.in_reply_to, Some(narrowed.id));
+        assert!(next.text.ends_with("asked send: reject"), "under its own rules: {}", next.text);
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    {
+        let log = log.locked();
+        assert_eq!((log.prompted, log.cancelled, log.steered.len()), (2, 0, 0));
+    }
+    assert_eq!(bus.unacked().await, 0);
+}
+
 #[tokio::test]
 async fn a_message_with_no_prompt_running_or_an_ants_reply_waits_its_turn() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };

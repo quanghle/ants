@@ -69,7 +69,10 @@ subject is forged.
 ### `ApprovalRequest` on `ants.approvals.<ant>`
 
 A tool call outside an ant's allowlist, stored by the ant's daemon. It waits for a decision until `expires_at`, then
-the ant rejects it; no decision is stored for an expired request.
+the ant rejects it; no decision is stored for an expired request. A prompt cancelled while its request waits (a steer
+interrupting it, `ants cancel`, a prompt limit) answers the harness Cancelled and settles the request: the daemon
+stores it again on the same subject, the same but for `cancelled_at` (RFC 3339), and readers take the request as that
+copy says: pending no more, a decision on it refused as on a request gone.
 
 ```json
 {"id": "019a7d2e-…", "ant": "dev-a", "thread_id": "019a7d2c-…",
@@ -83,8 +86,8 @@ the ant rejects it; no decision is stored for an expired request.
 `switch_mode`, `other`); `locations` and `input` may be absent. `labels`, absent when empty, maps offered verdicts to
 the harness's names of them, for showing only (Claude Code names `allow_always` `Yes, and don't ask again for git push
 commands in /path`): each one line of 1-200 characters, redacted as the input is; readers drop any other. `human` names the human the request waits for and
-`stand_in` the ant's stand-in, each absent when there is none (see [webhooks.md](webhooks.md#stand-in)). Check:
-`subject == "ants.approvals." + ant`.
+`stand_in` the ant's stand-in, each absent when there is none (see [webhooks.md](webhooks.md#stand-in)).
+`cancelled_at` is present only on the cancelled copy. Check: `subject == "ants.approvals." + ant`.
 
 ### `ApprovalDecision` on `ants.approvals.<ant>.<request id>`
 
@@ -177,6 +180,7 @@ of the message, which repeats the questions and their numbered options, is not p
 Each tool request settled is told as a `decided` update on the status of the requesting ant, on the request's thread,
 just before its `working` state, however the decision arrived: a human's stored on `ants.approvals.<ant>.<request id>`,
 a decision of an ant of its chain sent to its inbox (which observers cannot read), or the request expiring unanswered.
+A request the cancellation of its prompt settled is told too, with no `working` state of its own after it.
 
 ```json
 {"ant": "dev-a", "thread_id": "019a7d2c-…", "type": "decided", "request_id": "019a7d2e-…", "verdict": "allow_once",
@@ -184,8 +188,9 @@ a decision of an ant of its chain sent to its inbox (which observers cannot read
 ```
 
 `verdict` is what the ant goes on with (`allow_once`, `allow_always`, `reject`), a verdict the harness did not offer
-counting as `reject`. `by` is `human`, `chain` (an ant of the requester's `escalate_to`, named by `decider`) or
-`expiry` (rejected unanswered). A human's decision names its human in `decider` when its `ApprovalDecision` names one
+counting as `reject`. `by` is `human`, `chain` (an ant of the requester's `escalate_to`, named by `decider`),
+`expiry` (rejected unanswered) or `cancelled` (the prompt that asked was cancelled while the request waited, the
+harness told so, with `verdict` `reject`; its cancelled copy is stored as above). A human's decision names its human in `decider` when its `ApprovalDecision` names one
 (`by`, as the deciding client claims it); the `ApprovalDecision` feed holds it. A decision an assistant made for its
 human and the human confirmed or pre-allowed ([auth.md](auth.md#confirming-an-assistants-acts)) is `by: human` with
 the human in `decider` and the assistant in `via`; no `ApprovalDecision` is stored for it.

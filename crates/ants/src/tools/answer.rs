@@ -55,6 +55,13 @@ pub(super) async fn check(js: &jetstream::Context, stream: &Stream, answer: &Ans
         (State::Expired, _) => {
             bail!("request {} expired at {}; {} rejected it", qualified(request), request.expires_at, request.ant)
         }
+        (State::Cancelled(at), _) => {
+            bail!(
+                "request {} is gone: the prompt of {} that asked was cancelled at {at}",
+                qualified(request),
+                request.ant
+            )
+        }
     };
     if !request.options.contains(&verdict) {
         bail!("{} is not offered for request {}; answer {}", spelling(verdict), qualified(request), commands(request));

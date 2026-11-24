@@ -11,7 +11,13 @@
 # `memory_files` lists globs of the files the harness keeps memories and instructions in, which an admin's read of an
 # ant's memories shows (`ants ant memories`): relative to the ant's workdir, or under `~`; `*` and `?` match within a
 # path component and `**` any directories. A [harnesses.<name>] table replacing a built-in keeps its memory_files
-# unless it sets them.
+# unless it sets them. A table of a native protocol takes that protocol's memory_files, review and window instead
+# (protocols.toml).
+#
+# `reports` says what the harness reports of a prompt's spend, which spending caps count: "tokens", "cost", both or
+# neither ([]). A cap counting what it does not report never trips, which the daemon and `ants doctor` warn of. Unset,
+# nothing is known and nothing is warned of. A [harnesses.<name>] table replacing a built-in keeps its reports unless
+# it sets them; one of a native protocol takes its protocol's.
 #
 # Every built-in runs in its most permissive native setting, through `args` or `mode`, and so runs its own tools
 # without asking ants: `bypass_permissions` says so, and makes the daemon and `ants doctor` warn of allow rules and
@@ -56,6 +62,7 @@ memory_files = [
     "GEMINI.md",
     "~/.copilot/copilot-instructions.md",
 ]
+reports = []
 
 [harnesses.copilot.context]
 default = { args = ["--context", "default"] }
@@ -90,6 +97,7 @@ quota_exhausted = [
 context_overflow = ["exceed context limit"]
 window = 200000
 memory_files = ["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md", "~/.claude/CLAUDE.md"]
+reports = ["tokens", "cost"]
 
 [harnesses.claude.context]
 default = {}
@@ -107,6 +115,7 @@ ask = { mode = "agent" }
 review = { mode = "read-only" }
 sign_in = "codex-acp login"
 memory_files = ["AGENTS.md", "AGENTS.override.md", "~/.codex/AGENTS.md", "~/.codex/AGENTS.override.md"]
+reports = ["tokens"]
 
 # Google Antigravity CLI. Sign-in: `agy` once (or `agy acp --login`), or a Gemini API key.
 # `--dangerously-skip-permissions` approves every tool request; without it, Antigravity still applies workspace reads
@@ -121,3 +130,4 @@ sign_in = "agy"
 quota_exhausted = ["daily quota", "ai credits balance is too low"]
 context_overflow = ["exceeds the maximum number of tokens allowed"]
 memory_files = ["GEMINI.md", "AGENTS.md", ".agent/rules/*.md", "~/.gemini/GEMINI.md"]
+reports = []

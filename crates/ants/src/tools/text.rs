@@ -83,6 +83,7 @@ pub(crate) fn details(request: &ApprovalRequest, state: &State, now: DateTime<Ut
             write!(out, "answered {} by {by} at {at}", spelling(d.verdict))
         }
         State::Expired => write!(out, "expired  at {}, rejected", request.expires_at.format("%Y-%m-%d %H:%M:%S")),
+        State::Cancelled(at) => write!(out, "gone     at {}, its prompt cancelled", at.format("%Y-%m-%d %H:%M:%S")),
     };
     out
 }

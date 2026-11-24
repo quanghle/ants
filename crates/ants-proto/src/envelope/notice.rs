@@ -33,6 +33,9 @@ pub enum NoticeKind {
     InPlace,
     /// A tool request an ant of the chain was asked to decide expired unanswered.
     RequestExpired,
+    /// A tool request an ant of the chain was asked to decide was settled by the cancellation of the prompt that
+    /// asked.
+    RequestCancelled,
     /// A later message steered the prompt answering a message, so the answer goes to that one.
     Steered,
     /// An MCP server the ant's harness signs in to as its sessions open needs a browser sign-in, or failed to sign
@@ -66,6 +69,7 @@ impl NoticeKind {
             Self::Assistant => "assistant",
             Self::InPlace => "in_place",
             Self::RequestExpired => "request_expired",
+            Self::RequestCancelled => "request_cancelled",
             Self::Steered => "steered",
             Self::McpSignIn => "mcp_sign_in",
             Self::RunSpent => "run_spent",

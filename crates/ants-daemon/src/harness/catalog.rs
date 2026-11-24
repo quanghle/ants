@@ -7,10 +7,32 @@ use std::sync::{Arc, LazyLock};
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 
-use super::Harness;
+use super::definition::Variant;
+use super::{Harness, Reported};
 
 /// The built-in definitions, in the same form as a config file's `[harnesses.<name>]` tables.
 pub const BUILTIN_HARNESSES: &str = include_str!("../harnesses.toml");
+
+/// What a definition of a native protocol takes for what it does not set, by protocol name.
+const PROTOCOL_DEFAULTS: &str = include_str!("../protocols.toml");
+
+/// A native protocol's defaults ([`PROTOCOL_DEFAULTS`]).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Defaults {
+    memory_files: Option<Vec<String>>,
+    review: Option<Variant>,
+    window: Option<u64>,
+    reports: Option<Vec<Reported>>,
+}
+
+static DEFAULTS: LazyLock<BTreeMap<String, Defaults>> = LazyLock::new(|| {
+    #[derive(Deserialize)]
+    struct Tables {
+        protocols: BTreeMap<String, Defaults>,
+    }
+    toml::from_str::<Tables>(PROTOCOL_DEFAULTS).expect("protocol defaults parse").protocols
+});
 
 /// The harnesses ants can run, by name: the built-in ones and those a config file defines.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,13 +65,21 @@ impl Harnesses {
         BUILTIN.clone()
     }
 
-    /// These harnesses with `definitions` added, each replacing a harness of the same name whole.
+    /// These harnesses with `definitions` added, each replacing a harness of the same name whole. A definition of a
+    /// native protocol takes that protocol's memory files, review, window and reports for those it does not set; one of
+    /// ACP keeps the memory files and reports of the harness it replaces unless it sets them.
     pub fn define(&self, definitions: BTreeMap<String, Harness>) -> Result<Self> {
         let mut all = (*self.0).clone();
         for (name, mut harness) in definitions {
             harness.name.clone_from(&name);
-            if harness.memory_files.is_none() {
-                harness.memory_files = all.get(&name).and_then(|h| h.memory_files.clone());
+            if let Some(defaults) = DEFAULTS.get(harness.protocol.name()) {
+                harness.memory_files = harness.memory_files.or_else(|| defaults.memory_files.clone());
+                harness.review = harness.review.or_else(|| defaults.review.clone());
+                harness.window = harness.window.or(defaults.window);
+                harness.reports = harness.reports.or_else(|| defaults.reports.clone());
+            } else if let Some(replaced) = all.get(&name) {
+                harness.memory_files = harness.memory_files.or_else(|| replaced.memory_files.clone());
+                harness.reports = harness.reports.or_else(|| replaced.reports.clone());
             }
             harness.validate()?;
             all.insert(name, Arc::new(harness));

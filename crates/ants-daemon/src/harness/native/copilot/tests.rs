@@ -527,6 +527,53 @@ async fn copilot_permission_requests_go_to_ants_when_the_ant_asks() {
     );
 }
 
+#[tokio::test]
+async fn copilot_asking_runs_the_ants_tools_unasked_and_matches_other_mcp_tools_by_name() {
+    let mut answered = 0;
+    let played = Played::new("copilot-asking-mcp", "tools = \"ask\"", move |method, params| {
+        let id = &params["sessionId"];
+        let asked = |request: &str, server: &str, tool: &str| {
+            let ask = json!({
+                "kind": "mcp", "toolCallId": request, "serverName": server, "toolName": tool,
+                "toolTitle": tool, "args": {}, "readOnly": false
+            });
+            event(id, "permission.requested", json!({ "requestId": request, "permissionRequest": ask }))
+        };
+        let asks =
+            vec![asked("p1", "ants", "send_message"), asked("p2", "github", "search"), asked("p3", "github", "merge")];
+        match method {
+            "session.send" => Some(default_answer(method, params).then(asks)),
+            "session.permissions.handlePendingPermissionRequest" => {
+                answered += 1;
+                let then = if answered == 3 { idle(id, false) } else { Vec::new() };
+                Some(Answer::ok(json!({ "success": true })).then(then))
+            }
+            _ => None,
+        }
+    });
+    let servers = vec![McpServer::Stdio(McpServerStdio::new("ants", "/bin/ants").args(vec!["mcp".to_owned()]))];
+    let policy = PermissionPolicy::new(Allowlist::parse(&["other:search"]).unwrap(), None);
+    let launch = played
+        .launch(ModelSettings::default())
+        .with_mcp(Arc::new(move |_: &crate::harness::McpSession<'_>| servers.clone()))
+        .with_policy(policy)
+        .for_thread(&"t1".parse().unwrap());
+    let session = Session::start(&launch, None).await.unwrap();
+    assert_eq!(session.prompt("tell dev-b").await.unwrap(), "");
+    session.close().await;
+    let mut decisions: Vec<_> = played
+        .requests("session.permissions.handlePendingPermissionRequest")
+        .iter()
+        .map(|a| (a["requestId"].clone(), a["result"]["kind"].clone()))
+        .collect();
+    decisions.sort_by_key(|(request, _)| request.to_string());
+    assert_eq!(
+        decisions,
+        [(json!("p1"), json!("approve-once")), (json!("p2"), json!("approve-once")), (json!("p3"), json!("reject"))],
+        "send_message of the ants server unasked, github/search by other:search, github/merge with no approver"
+    );
+}
+
 /// A `session.error` ending a turn.
 fn failing(params: &Value, error: Value) -> Answer {
     let id = &params["sessionId"];

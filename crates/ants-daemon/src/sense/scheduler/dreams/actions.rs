@@ -145,11 +145,12 @@ async fn within<T>(deadline: Instant, read: impl Future<Output = Result<T>>) -> 
     }
 }
 
-/// The ant's tool request `rejection` rejected, and by whom: none when it expired unanswered.
+/// The ant's tool request `rejection` rejected, and by whom: none when it expired unanswered or its prompt was
+/// cancelled.
 fn rejected(rejection: &MergedRejection) -> Action {
     let MergedRejection { rejection, at, .. } = rejection;
     let by = match (rejection.by, &rejection.decider, &rejection.via) {
-        (DecidedBy::Expiry, _, _) => None,
+        (DecidedBy::Expiry | DecidedBy::Cancelled, _, _) => None,
         (DecidedBy::Human, Some(human), Some(assistant)) => Some(format!("human {human} via {assistant}")),
         (DecidedBy::Human, Some(human), None) => Some(format!("human {human}")),
         (DecidedBy::Human, None, _) => Some("a human".to_owned()),

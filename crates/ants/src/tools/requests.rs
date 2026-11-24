@@ -15,7 +15,8 @@ use chrono::{DateTime, Utc};
 use super::State;
 use super::assisted::{HeldAct, InboxDecisions, ant_decisions, consented};
 
-/// Every approval request in the stream, oldest first, with its stream sequence.
+/// Every approval request in the stream, oldest first, with its stream sequence. A cancelled copy of one stored
+/// before it sets its `cancelled_at`, and is no request of its own.
 pub async fn requests(stream: &Stream) -> Result<Vec<(u64, ApprovalRequest)>> {
     let mut requests = Vec::new();
     let mut from = 1;
@@ -32,6 +33,13 @@ pub async fn requests(stream: &Stream) -> Result<Vec<(u64, ApprovalRequest)>> {
         }
         match serde_json::from_slice::<ApprovalRequest>(&msg.payload) {
             Ok(request) => match request.check_subject(&msg.subject) {
+                Ok(()) if request.cancelled_at.is_some() => {
+                    let same = |(_, r): &&mut (u64, ApprovalRequest)| r.ant == request.ant && r.id == request.id;
+                    match requests.iter_mut().rev().find(same) {
+                        Some((_, earlier)) => earlier.cancelled_at = request.cancelled_at,
+                        None => tracing::debug!(seq = msg.sequence, "skipping the cancellation of a request not kept"),
+                    }
+                }
                 Ok(()) => requests.push((msg.sequence, request)),
                 Err(e) => tracing::warn!(seq = msg.sequence, error = %e, "skipping a request for another ant"),
             },
@@ -120,6 +128,13 @@ pub(super) async fn standing(
     now: DateTime<Utc>,
 ) -> Result<(State, u64, Vec<HeldAct>)> {
     let (decision, last) = decisions(stream, request).await?;
+    let cancelled = match request.cancelled_at {
+        Some(at) => Some(at),
+        None => cancellation(stream, request, seq).await?,
+    };
+    if let Some(at) = cancelled {
+        return Ok((State::Cancelled(at), last, Vec::new()));
+    }
     // A chain ant's decision counts only before a human's: the ant takes the first.
     let until = decision.is_some().then_some(last);
     let chain = chain_of(js, &request.ant).await?;
@@ -139,8 +154,32 @@ pub(super) async fn standing(
     Ok((state, last, held))
 }
 
+/// When the prompt that asked `request`, stored at stream sequence `seq`, was cancelled, as a cancelled copy stored
+/// after it tells.
+async fn cancellation(stream: &Stream, request: &ApprovalRequest, seq: u64) -> Result<Option<DateTime<Utc>>> {
+    let mut from = seq + 1;
+    loop {
+        let msg = match stream.get_first_raw_message_by_subject(&request.subject(), from).await {
+            Ok(msg) => msg,
+            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("reading the copies of request {}", qualified(request))),
+        };
+        from = msg.sequence + 1;
+        if relayed::stored_relayed(Some(&msg.headers), &msg.payload, Read::Consumer) {
+            continue;
+        }
+        if let Ok(copy) = serde_json::from_slice::<ApprovalRequest>(&msg.payload)
+            && copy.id == request.id
+            && copy.cancelled_at.is_some()
+        {
+            return Ok(copy.cancelled_at);
+        }
+    }
+}
+
 /// The requests still waiting for a decision at `now`, oldest first: neither expired nor decided by a human, an ant
-/// of the ant's escalate_to or an assistant for its human who consented.
+/// of the ant's escalate_to or an assistant for its human who consented, nor settled by the cancellation of their
+/// prompt.
 pub async fn pending(js: &jetstream::Context, stream: &Stream, now: DateTime<Utc>) -> Result<Vec<ApprovalRequest>> {
     Ok(pending_at(js, stream, now).await?.into_iter().map(|(_, request, _)| request).collect())
 }
@@ -164,7 +203,7 @@ pub(super) async fn pending_at(
     let mut undecided = Vec::new();
     for (seq, request) in requests(stream).await? {
         // Expired ones need no decision lookup.
-        if !request.is_expired(now) && decision(stream, &request).await?.is_none() {
+        if request.cancelled_at.is_none() && !request.is_expired(now) && decision(stream, &request).await?.is_none() {
             undecided.push((seq, request));
         }
     }

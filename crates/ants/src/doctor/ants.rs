@@ -560,6 +560,18 @@ pub(super) fn responder(responder: ReactionsResponder) -> &'static str {
     }
 }
 
+/// A warning for each ant with a spending cap that its harness or a fallback of it cannot count, reporting no spend of
+/// what the cap counts.
+pub(super) fn check_caps(loaded: &config::Loaded) -> Vec<Check> {
+    let mut checks = Vec::new();
+    for ant in &loaded.ants {
+        for (detail, harness) in ant.uncounted_caps(&loaded.harnesses) {
+            checks.push(Check::warn(format!("ant {} spending caps", ant.name), detail, vec![harness.uncounted_fix()]));
+        }
+    }
+    checks
+}
+
 /// A warning for each ant whose harness, with the ant's `tools`, runs its tools unasked while the ant gates them: with allow rules or tool
 /// approvals by its `escalate_to` ants, or as the destination of schedules or webhooks narrowing the threads they
 /// start; and, for a sage, for each harness that declines its reviews, running its tools unasked with no review set.

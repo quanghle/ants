@@ -202,8 +202,13 @@ impl Parser {
                 self.requests.insert((r.ant.clone(), r.id), r.thread_id.clone());
             }
             let options = r.options.iter().map(|v| spelling(*v)).collect::<Vec<_>>().join("|");
-            let note = Some(format!("{}/{} ({options})", r.ant, r.id));
-            let text = format!("{}: {}", r.tool.kind, r.tool.title);
+            let (note, text) = match r.cancelled_at {
+                Some(_) => {
+                    (format!("{}/{} (gone)", r.ant, r.id), format!("cancelled with its prompt: {}", r.tool.title))
+                }
+                None => (format!("{}/{} ({options})", r.ant, r.id), format!("{}: {}", r.tool.kind, r.tool.title)),
+            };
+            let note = Some(note);
             return Some(Entry { from: Some(r.ant), note, text, forged, ..entry(Kind::Approval, r.thread_id) });
         }
         if let Some(ant) = subject::parse_dead(subject) {

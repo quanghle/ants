@@ -246,6 +246,7 @@ impl Printer {
                 let verdict = spelling(*verdict);
                 let outcome = match (by, decider, via) {
                     (DecidedBy::Expiry, ..) => format!("expired: {verdict}"),
+                    (DecidedBy::Cancelled, ..) => "gone: its prompt was cancelled".to_owned(),
                     (DecidedBy::Human, Some(decider), Some(via)) => format!("decided {verdict} by {decider} via {via}"),
                     (_, Some(decider), _) => format!("decided {verdict} by {decider}"),
                     (DecidedBy::Human, None, _) => format!("decided {verdict} by a human"),

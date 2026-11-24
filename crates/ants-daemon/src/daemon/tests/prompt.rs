@@ -20,6 +20,122 @@ async fn replies_are_redacted() {
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
 }
 
+#[test]
+fn the_structured_fields_an_ant_sends_are_redacted() {
+    use ants_proto::{Answer, Pick, Question, QuestionOption, Questions};
+
+    let redactor = Redactor::default().with_env([("DEPLOY_TOKEN", "d3pl0y-s3cret"), ("SHORT_TOKEN", "k3y-v4lue")]);
+    let options = vec![QuestionOption::described("d3pl0y-s3cret", "use d3pl0y-s3cret"), QuestionOption::new("no")];
+    let text = "Deploy with d3pl0y-s3cret?".to_owned();
+    let question = Question { text, header: None, options, multi_select: false, free_text: false };
+    let mut sent = Envelope::asking(ThreadId::generate(), "dev-a".parse().unwrap(), ants_test_support::human(), {
+        Questions::new(vec![question.headed("k3y-v4lue")]).unwrap()
+    });
+    sent.title = Some("Ship d3pl0y-s3cret".to_owned());
+    sent.answer = Some(Answer { question: uuid::Uuid::nil(), picks: vec![Pick::Typed("d3pl0y-s3cret".to_owned())] });
+    super::super::redacting::redact_sent(&redactor, &mut sent);
+    let json = serde_json::to_string(&sent).unwrap();
+    assert!(!json.contains("d3pl0y-s3cret") && !json.contains("k3y-v4lue"), "{json}");
+    let asked = &sent.question.as_ref().expect("still a valid question").questions[0];
+    assert_eq!(asked.text, "Deploy with [redacted]?");
+    assert_eq!(asked.header.as_deref(), Some("[redacted]"));
+    assert_eq!(
+        (asked.options[0].label.as_str(), asked.options[0].description.as_deref()),
+        ("[redacted]", Some("use [redacted]"))
+    );
+    assert_eq!(sent.title.as_deref(), Some("Ship [redacted]"));
+    assert_eq!(sent.answer.unwrap().picks, [Pick::Typed("[redacted]".to_owned())]);
+
+    let long = Redactor::default().with_env([("DEPLOY_TOKEN", "s3cr3t-12")]);
+    let mut grown = Envelope::asking(ThreadId::generate(), "dev-a".parse().unwrap(), ants_test_support::human(), {
+        Questions::new(vec![
+            Question::new("Which?", &["a".to_owned(), "b".to_owned()], false).unwrap().headed("s3cr3t-12!!!"),
+        ])
+        .unwrap()
+    });
+    super::super::redacting::redact_sent(&long, &mut grown);
+    assert_eq!(grown.question, None, "a header grown past its limit: the text alone goes");
+    assert!(!grown.text.contains("s3cr3t-12"), "{}", grown.text);
+}
+
+#[test]
+fn the_redactor_knows_the_env_of_the_fallback_harnesses() {
+    let dir = ants_test_support::scratch_dir("redact-fallbacks");
+    let text = "messenger = false\nsage = \"none\"\nhuman = \"human\"\nharness = \"claude\"\n\
+                [harnesses.backup]\ncommand = \"backup-acp\"\nenv = { BACKUP_API_KEY = \"b4ckup-k3y-value\" }\n\
+                [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nfallback = [\"backup\"]\n";
+    let loaded = crate::config::parse(text, &dir.join("config.toml"), &dir).unwrap();
+    let ant = loaded.ants.into_iter().next().unwrap();
+    let config = ant.into_config("nats://unused", &loaded.harnesses).unwrap();
+    let redactor = super::super::redacting::redactor(true, &config.harness);
+    assert_eq!(redactor.redact("the key is b4ckup-k3y-value"), "the key is [redacted]");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_error_of_a_dead_letter_is_redacted() {
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    bus.redactor = Redactor::default().with_env([("DEPLOY_TOKEN", "d3pl0y-s3cret")]);
+    let (launch, _, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (_, seq) = bus.send(&ThreadId::generate(), "leaks d3pl0y-s3cret").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let letters = dead::list(&bus.stream).await.unwrap();
+    assert_eq!(letters.len(), 1, "{letters:?}");
+    let error = &letters[0].1.error;
+    assert!(error.contains("failed on: ") && error.contains("[redacted]"), "{error}");
+    assert!(!error.contains("d3pl0y-s3cret"), "{error}");
+}
+
+#[tokio::test]
+async fn a_suggested_title_is_redacted() {
+    use agent_client_protocol::v1::schema::McpServer;
+    use rmcp::ServiceExt as _;
+    use rmcp::model::{CallToolRequestParams, ClientConfig};
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+    let Some((mut bus, mut replies)) = Bus::start().await else { return };
+    bus.redactor = Redactor::default().with_env([("DEPLOY_TOKEN", "d3pl0y-s3cret")]);
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let home = bus._server.dir().join("title");
+    std::fs::create_dir_all(&home).unwrap();
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
+    bus.mcp = Some(mcp.unwrap());
+    let thread = ThreadId::generate();
+    bus.send(&thread, "hold on").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        let session = crate::harness::McpSession::test(&thread, std::path::Path::new("/"), true);
+        let servers = bus.mcp.as_ref().unwrap().servers()(&session);
+        let [McpServer::Http(server)] = &servers[..] else { panic!("one HTTP server") };
+        let token = server.headers[0].value.strip_prefix("Bearer ").unwrap();
+        let config = StreamableHttpClientTransportConfig::with_uri(server.url.as_str()).auth_header(token);
+        let client = ClientConfig::default().serve(StreamableHttpClientTransport::from_config(config)).await.unwrap();
+        let serde_json::Value::Object(args) = serde_json::json!({"title": "Rotate d3pl0y-s3cret"}) else {
+            unreachable!()
+        };
+        let call = CallToolRequestParams::new("suggest_thread_title").with_arguments(args);
+        assert_ne!(client.call_tool(call).await.unwrap().is_error, Some(true));
+        gate.add_permits(1);
+        let reply = next_envelope(&mut replies).await;
+        assert_eq!((&reply.thread_id, reply.title.as_deref()), (&thread, Some("Rotate [redacted]")));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}
+
 #[tokio::test]
 async fn a_review_nothing_holds_to_read_only_tools_is_declined_unprompted() {
     let Some((bus, _)) = Bus::start().await else { return };

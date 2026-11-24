@@ -1,5 +1,5 @@
 //! Tests of tool request escalation: decisions by the humans, the chain and assistants, the first decision winning,
-//! silence rejecting, and expired requests told to the owner or chain.
+//! silence rejecting, expired requests told to the owner or chain, and requests a cancelled prompt settles.
 
 use std::collections::BTreeMap;
 
@@ -292,6 +292,58 @@ fn chain(escalate_to: &[&UserId]) -> Chain {
 /// Publish `envelope` on `subject` and wait for the stream to store it.
 async fn send(js: &jetstream::Context, subject: String, envelope: &Envelope) {
     js.publish(subject, serde_json::to_vec(envelope).unwrap().into()).await.unwrap().await.unwrap();
+}
+
+/// A wait dropped, as a cancelled prompt drops it, settles the request: its cancelled copy stored, a `decided` update
+/// by `cancelled`, and the ant of the chain asked told no answer is needed.
+#[tokio::test]
+async fn a_wait_dropped_settles_the_request_as_cancelled() {
+    let Some(server) = Server::start() else { return };
+    let (ant, lead): (UserId, UserId) = ("dev-a".parse().unwrap(), "lead".parse().unwrap());
+    let thread: ThreadId = "t1".parse().unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
+    let stream = bus::ensure_stream(&js).await.unwrap();
+    let (human, human_js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "human").await.unwrap();
+    let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
+    let mut asked = human.subscribe(subject::inbox_of(&lead)).await.unwrap();
+    let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
+    subscribed(&human_js).await;
+
+    let approver = NatsApprover::new(client, js, ant.clone(), WAIT, Registry::new(ants_test_support::human()))
+        .with_chain(chain(&[&lead]));
+    let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));
+    let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+    let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
+    let msg = timeout(WAIT, asked.next()).await.unwrap().unwrap();
+    assert!(serde_json::from_slice::<Envelope>(&msg.payload).unwrap().escalation.is_some(), "the lead is asked");
+    let mut next_status = async || {
+        let msg = timeout(WAIT, statuses.next()).await.unwrap().unwrap();
+        serde_json::from_slice::<ants_proto::StatusEvent>(&msg.payload).unwrap().update
+    };
+    // Told once the ant knows whom it asked.
+    while next_status().await != (StatusUpdate::State { state: State::WaitingApproval }) {}
+    decided.abort();
+
+    let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+    let copy: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
+    assert!(copy.cancelled_at.is_some());
+    assert_eq!(copy, ApprovalRequest { cancelled_at: copy.cancelled_at, ..request.clone() });
+    let update = loop {
+        if let StatusUpdate::Decided { verdict, by, decider, .. } = next_status().await {
+            break (verdict, by, decider);
+        }
+    };
+    assert_eq!(update, (Verdict::Reject, DecidedBy::Cancelled, None));
+    let msg = timeout(WAIT, asked.next()).await.unwrap().unwrap();
+    let told: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+    assert_eq!(
+        (told.notice, &told.escalation, &told.thread_id),
+        (Some(ants_proto::NoticeKind::RequestCancelled), &None, &thread)
+    );
+    assert!(told.text.contains(&format!("Approval request {} on thread t1 is gone", request.id)), "{}", told.text);
+    assert!(approver.waiting.locked().is_empty(), "nothing waits once cancelled");
+    let stored = stream.get_last_raw_message_by_subject(&request.subject()).await.unwrap();
+    assert_eq!(serde_json::from_slice::<ApprovalRequest>(&stored.payload).unwrap(), copy, "stored");
 }
 
 #[tokio::test]
@@ -599,6 +651,7 @@ async fn a_request_goes_to_the_human_s_assistant_too_while_it_can_act() {
     let (human, human_js) = bus::connect(&server.url, None, None, &alice, "human").await.unwrap();
     let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
     let mut assistant = human.subscribe(subject::inbox_of(&pa)).await.unwrap();
+    let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
     subscribed(&human_js).await;
 
     let device = TestDevice::default();
@@ -640,7 +693,20 @@ async fn a_request_goes_to_the_human_s_assistant_too_while_it_can_act() {
     assert_eq!((escalation.reason, escalation.request_id), (EscalationReason::Approval, Some(request.id)));
     assert_eq!((&escalation.leader, &escalation.assistant_of), (&pa, &Some(alice.clone())));
     assert!(asked.text.contains(&format!("decide_for_human {ant}/{}", request.id)), "{}", asked.text);
+    let waiting = StatusUpdate::State { state: State::WaitingApproval };
+    while timeout(WAIT, statuses.next())
+        .await
+        .unwrap()
+        .map(|msg| serde_json::from_slice::<ants_proto::StatusEvent>(&msg.payload).unwrap().update)
+        != Some(waiting.clone())
+    {}
     decided.abort();
+    // Its wait dropped, the request is gone, and the assistant asked is told so.
+    let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
+    assert!(serde_json::from_slice::<ApprovalRequest>(&msg.payload).unwrap().cancelled_at.is_some());
+    let msg = timeout(WAIT, assistant.next()).await.unwrap().unwrap();
+    let told: Envelope = serde_json::from_slice(&msg.payload).unwrap();
+    assert_eq!((told.notice, &told.escalation), (Some(ants_proto::NoticeKind::RequestCancelled), &None));
 
     // A paused assistant is not asked.
     listed.lock().unwrap()[0].paused = Some(ants_proto::Paused { since: chrono::Utc::now(), by: None });

@@ -18,8 +18,8 @@ use async_nats::jetstream;
 use serde::Serialize;
 
 use self::ants::{
-    check_ants, check_bypassed, check_host, check_machine_name, check_mcp_sockets, check_open_files, check_reactions,
-    check_sense_kept, check_sense_logs, check_shared_workdirs, check_trail_saves, check_watchers,
+    check_ants, check_bypassed, check_caps, check_host, check_machine_name, check_mcp_sockets, check_open_files,
+    check_reactions, check_sense_kept, check_sense_logs, check_shared_workdirs, check_trail_saves, check_watchers,
 };
 use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
@@ -209,6 +209,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let webhooks = webhooks.as_ref().map_or_default(|c| c.webhooks.as_slice());
     if let Some(loaded) = &loaded {
         checks.extend(check_bypassed(loaded, webhooks));
+        checks.extend(check_caps(loaded));
     }
     checks.push(worker);
     checks.extend(check_runs(connected.as_ref(), chrono::Utc::now()).await);

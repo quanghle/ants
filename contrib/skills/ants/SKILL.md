@@ -197,7 +197,8 @@ rather than answering unasked.
 ## Approvals
 
 An ant waiting on a tool call asks humans and, at level 1, its `escalate_to` chain (`decide_approval(verdict)`). Every
-human sees every request and the first decision wins; decided or expired requests drop off the pending list.
+human sees every request and the first decision wins; decided or expired requests drop off the pending list, and so
+does one whose prompt was cancelled (by a steer, `ants cancel` or a limit), refusing a later decision as gone.
 
 ```sh
 ants tools list [--follow] [--json]   # pending requests: <ant>/<id>, thread, tool, files, options, time left

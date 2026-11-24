@@ -141,6 +141,15 @@ pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts, provide
     if let Some(detail) = harness.unenforced(&config.policy.allow, !config.policy.escalation.escalate_to.is_empty()) {
         tracing::warn!(ant = %config.ant, fix = harness.gated_fix(), "{detail}");
     }
+    let fallbacks = config.harness.fallbacks.iter().map(|fallback| &*fallback.harness);
+    let spending = &config.spending;
+    for (detail, harness) in crate::limits::caps::uncounted(
+        &spending.caps,
+        spending.pool.as_ref(),
+        std::iter::once(&**harness).chain(fallbacks),
+    ) {
+        tracing::warn!(ant = %config.ant, fix = harness.uncounted_fix(), "{detail}");
+    }
     let config = settle_worktrees(config).await;
     let (mut retry, mut failed_since) = (RETRY_FIRST, None);
     loop {

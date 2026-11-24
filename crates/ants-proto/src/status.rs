@@ -52,6 +52,8 @@ pub enum DecidedBy {
     Chain,
     /// Nobody: the request expired unanswered and was rejected.
     Expiry,
+    /// Nobody: the prompt that asked was cancelled while the request waited, and the harness was told so.
+    Cancelled,
 }
 
 impl DecidedBy {
@@ -61,6 +63,7 @@ impl DecidedBy {
             Self::Human => "human",
             Self::Chain => "chain",
             Self::Expiry => "expiry",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -159,10 +162,11 @@ pub enum StatusUpdate {
         message: Uuid,
         question: Questions,
     },
-    /// The tool request `<ant>/<request_id>` was settled, `by` a human, an ant of the chain or its expiry (`decider`
-    /// names the ant, or the human as its decision names it), and the ant goes on with `verdict`, a verdict the
-    /// harness did not offer counting as a rejection. Sent just before the [`State::Working`] state, however the
-    /// decision arrived.
+    /// The tool request `<ant>/<request_id>` was settled, `by` a human, an ant of the chain, its expiry or the
+    /// cancellation of the prompt that asked (`decider` names the ant, or the human as its decision names it), and the
+    /// ant goes on with `verdict`, a verdict the harness did not offer counting as a rejection. Sent just before the
+    /// [`State::Working`] state, however the decision arrived; a cancelled one, with the prompt ending, is followed by
+    /// none of its own.
     Decided {
         request_id: Uuid,
         verdict: Verdict,

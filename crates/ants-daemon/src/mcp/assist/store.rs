@@ -143,7 +143,11 @@ impl HumanStore for JetStreamStore {
                 if let Ok(request) = serde_json::from_slice::<ApprovalRequest>(payload)
                     && request.check_subject(subject).is_ok()
                 {
-                    requests.push(request);
+                    // A cancelled copy settles the request it repeats.
+                    match request.cancelled_at {
+                        Some(_) => drop(decided.insert(request.id)),
+                        None => requests.push(request),
+                    }
                 } else if let Ok(decision) = serde_json::from_slice::<ApprovalDecision>(payload)
                     && subject == decision.subject()
                 {

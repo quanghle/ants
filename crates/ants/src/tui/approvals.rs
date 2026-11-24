@@ -95,6 +95,7 @@ pub fn how(state: &State, ant: &ants_proto::UserId) -> String {
             format!("{} by {} at {}", verdict(d.verdict), crate::tools::deciders(by, d), hm(d.decided_at))
         }
         State::Expired => format!("expired unanswered: {ant} rejected it"),
+        State::Cancelled(at) => format!("gone at {}: the prompt of {ant} that asked was cancelled", hm(*at)),
     }
 }
 

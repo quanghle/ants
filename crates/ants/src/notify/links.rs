@@ -231,6 +231,7 @@ pub(super) fn settled(state: &tools::State) -> String {
             format!("Already answered by {}: {}.", tools::deciders(by, d), spelling(d.verdict))
         }
         tools::State::Expired => "Expired: its ant rejected it.".to_owned(),
+        tools::State::Cancelled(_) => "Gone: the prompt that asked was cancelled.".to_owned(),
     }
 }
 

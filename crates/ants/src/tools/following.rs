@@ -27,7 +27,7 @@ pub enum Update {
     /// The decisions assistants made on a request reported pending for their humans, which wait for the humans'
     /// consent: all of them, in place of those reported before.
     Held(ApprovalRequest, Vec<HeldAct>),
-    /// How a request reported pending ended: decided, or expired.
+    /// How a request reported pending ended: decided, expired, or gone with its cancelled prompt.
     Resolved(ApprovalRequest, State),
 }
 
@@ -106,7 +106,13 @@ pub async fn follow(
         tokio::select! {
             msg = asked.next() => {
                 let Some(msg) = msg else { return Ok(()) };
-                watch.fresh.extend(live_request(&msg).map(|request| (None, request, Vec::new())));
+                match live_request(&msg) {
+                    Some(copy) if copy.cancelled_at.is_some() => {
+                        watch.cancelled(&copy);
+                        named = Some((copy.ant, copy.id));
+                    }
+                    request => watch.fresh.extend(request.map(|request| (None, request, Vec::new()))),
+                }
             }
             msg = decided.next() => {
                 let Some(msg) = msg else { return Ok(()) };
@@ -169,6 +175,14 @@ impl Watch<'_> {
             self.open.push(Open { seq, request, recheck, held });
         }
         Ok(())
+    }
+
+    /// Note that `copy`, a cancelled copy heard live, settles the request it repeats.
+    fn cancelled(&mut self, copy: &ApprovalRequest) {
+        let same = |r: &ApprovalRequest| r.ant == copy.ant && r.id == copy.id;
+        for open in self.open.iter_mut().filter(|o| same(&o.request)) {
+            open.request.cancelled_at = copy.cancelled_at;
+        }
     }
 
     /// When a request open is next due a look: when rechecked, else when it expires.
@@ -313,6 +327,7 @@ pub fn render(update: &Update, now: DateTime<Utc>) -> String {
                     (d.decided_at, format!("was answered by {}: {}", deciders(by, d), spelling(d.verdict)))
                 }
                 State::Expired => (r.expires_at, format!("expired unanswered: {} rejected it", r.ant)),
+                State::Cancelled(at) => (*at, "is gone: the prompt that asked was cancelled".to_owned()),
             };
             format!("{}  request {} of {} {how}\n", local(at), qualified(r), r.ant)
         }

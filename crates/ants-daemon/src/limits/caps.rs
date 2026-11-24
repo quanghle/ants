@@ -32,7 +32,7 @@ use ants_proto::{ThreadId, UserId, Uuid, daily_spend_key, escalation_deadlines_k
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::harness::Spend;
+use crate::harness::{Harness, Reported, Spend};
 use crate::records::direct_kv::DirectKv;
 use crate::sync::{MutexExt as _, RwLockExt as _};
 
@@ -60,6 +60,14 @@ pub struct Caps {
 }
 
 impl Caps {
+    /// The caps set, by config key, with what each counts.
+    pub fn counted(&self) -> Vec<(&'static str, Reported)> {
+        let tokens = [("max_thread_tokens", self.thread_tokens), ("max_daily_tokens", self.daily_tokens)];
+        let cost = [("max_thread_cost", self.thread_cost), ("max_daily_cost", self.daily_cost)];
+        let tokens = tokens.into_iter().filter_map(|(key, cap)| cap.map(|_| (key, Reported::Tokens)));
+        tokens.chain(cost.into_iter().filter_map(|(key, cap)| cap.map(|_| (key, Reported::Cost)))).collect()
+    }
+
     fn any(&self) -> bool {
         self.thread_tokens.is_some()
             || self.thread_cost.is_some()
@@ -119,6 +127,27 @@ struct DaySpend {
     /// The pool caps whose warning was given, by this ant or another member.
     #[serde(default, skip_serializing_if = "Warned::none")]
     pool_warned: Warned,
+}
+
+/// Why caps of an ant, its own `caps` and those of its template's `pool`, never trip on `harnesses`, its own and its
+/// fallbacks': one line for each harness not reporting what one of them counts ([`Harness::uncounted`]), with the
+/// harness.
+pub fn uncounted<'a>(
+    caps: &Caps,
+    pool: Option<&Pool>,
+    harnesses: impl IntoIterator<Item = &'a Harness>,
+) -> Vec<(String, &'a Harness)> {
+    let mut counted = caps.counted();
+    if let Some(pool) = pool {
+        counted.extend(pool.daily_tokens.map(|_| ("pool_daily_tokens", Reported::Tokens)));
+        counted.extend(pool.daily_cost.map(|_| ("pool_daily_cost", Reported::Cost)));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    harnesses
+        .into_iter()
+        .filter(|harness| seen.insert(harness.name().to_owned()))
+        .filter_map(|harness| harness.uncounted(&counted).map(|why| (why, harness)))
+        .collect()
 }
 
 /// Daily caps on what the ants added from one template spend together.
@@ -645,6 +674,35 @@ mod tests {
             ledger.record_on(&t, &cost("s2", 0.3), DAY).await.unwrap().reached.expect("a new session adds it all");
         assert!(reached.starts_with("Thread cost cap reached (1.05 of 1.00"), "{reached}");
         assert_eq!(ledger.reached_on(&thread(2), DAY).await.unwrap(), None, "other threads have their own");
+    }
+
+    #[test]
+    fn caps_a_harness_does_not_report_are_named_once_per_harness() {
+        let harnesses = crate::harness::Harnesses::builtin();
+        let ran: Vec<_> = ["claude", "copilot", "codex", "copilot"].map(|name| harnesses.get(name).unwrap()).into();
+        let caps = Caps { thread_tokens: Some(10), daily_cost: Some(1.0), ..Caps::default() };
+        let pool =
+            Pool { template: "t".to_owned(), daily_tokens: None, daily_cost: Some(5.0), members: Members::default() };
+        let found: Vec<_> = uncounted(&caps, Some(&pool), ran.iter().map(|h| &**h))
+            .into_iter()
+            .map(|(why, harness)| (why, harness.name().to_owned()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "harness copilot reports neither tokens nor cost, so max_thread_tokens, max_daily_cost and \
+                     pool_daily_cost never trip on it"
+                        .to_owned(),
+                    "copilot".to_owned()
+                ),
+                (
+                    "harness codex reports no cost, so max_daily_cost and pool_daily_cost never trip on it".to_owned(),
+                    "codex".to_owned()
+                ),
+            ]
+        );
+        assert!(uncounted(&Caps::default(), None, ran.iter().map(|h| &**h)).is_empty(), "no caps");
     }
 
     #[tokio::test]

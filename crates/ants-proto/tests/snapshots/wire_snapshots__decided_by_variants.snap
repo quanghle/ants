@@ -5,5 +5,6 @@ expression: value
 [
   "human",
   "chain",
-  "expiry"
+  "expiry",
+  "cancelled"
 ]

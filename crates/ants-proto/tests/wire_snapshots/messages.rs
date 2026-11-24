@@ -267,8 +267,10 @@ fn approvals() {
         expires_at: at(5),
         human: None,
         stand_in: None,
+        cancelled_at: None,
     };
     snap("approval_request", &request);
+    snap("approval_request_cancelled", &request.cancelled(at(2)));
     let always = "Yes, and don't ask again for git push commands in /work";
     snap("approval_request_labelled", &request.clone().labelled([(Verdict::AllowAlways, always.to_owned())].into()));
     snap("approval_request_for_human", &request.for_human(Some(user("alice")), Some(user("bob"))));
