@@ -314,7 +314,11 @@ A run reports on the thread it started with, as its conductor:
   characters). Notices and escalations arriving on a step's thread, and replies the run no longer waits on, are
   quoted in notes too. Notes wake nobody and spend no turn.
 - **Step threads:** each step's thread is a spin-off of the run thread, keeps the run's owner and carries a
-  `trail_step`; its recipient answers it as any message, and the first reply answers the call. The invitation to rate
+  `trail_step`; its recipient answers it as any message, and the first reply answers the call. A human may write on
+  a step's thread too: a message steering the prompt answering the step takes the answer, which goes to the human, and
+  the recipient's daemon tells the conductor with a `steered` notice on the step's thread, so the call raises
+  `RuntimeError: <ant> never answered: <human> steered the prompt answering the step with message <id>, which takes
+  the answer.` in the script. The invitation to rate
   a run started on the thread of a step to the conductor itself, which names the run in `rating_of`, answers no call:
   it prompts the conductor to rate the run.
 - **Status events:** a `step` event (`run`, `call`, `label`, `to`, `step_thread`, `stage`: `started`, `answered`,

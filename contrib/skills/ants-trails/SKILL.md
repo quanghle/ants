@@ -154,16 +154,16 @@ checks = await command(f"gh pr checks {args['pr']}")
 
 ### Errors
 
-A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor
-advertises, a `tips=` key that is not one line of 1-120 characters, malformed questions, a reply still off its schema
-after two retries, the step's message withdrawn from its
-recipient's queue, the recipient at one of its spending caps or the step's thread out of turns, an unknown trail, ancestor cycle or failed child run in `trail()`, the run's step limit reached)
-raises `RuntimeError` with the reason where the step is awaited. A step to an ant no daemon serves raises nothing: it
-waits in that ant's queue, as any message does, until the run ends or a human stops it. An exception the script does
-not catch fails the run with
-its traceback, lines numbered as in the file. Inside `parallel` or `pipeline`, an uncaught exception of one coroutine
-fails the whole gather, and the run abandons the other steps. Catch a step's error inside the per-item coroutine when
-the trail can go on without that item, and log what was lost.
+A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor advertises, a
+`tips=` key that is not one line of 1-120 characters, malformed questions, a reply still off its schema after two
+retries, the step's message withdrawn from its recipient's queue, the recipient at one of its spending caps or the
+step's thread out of turns, a human steering the recipient's answer to the step, an unknown trail, ancestor cycle or
+failed child run in `trail()`, the run's step limit reached) raises `RuntimeError` with the reason where the step is
+awaited. A step to an ant no daemon serves raises nothing: it waits in that ant's queue, as any message does, until the
+run ends or a human stops it. An exception the script does not catch fails the run with its traceback, lines numbered as
+in the file. Inside `parallel` or `pipeline`, an uncaught exception of one coroutine fails the whole gather, and the run
+abandons the other steps. Catch a step's error inside the per-item coroutine when the trail can go on without that item,
+and log what was lost.
 
 ## The sandbox
 

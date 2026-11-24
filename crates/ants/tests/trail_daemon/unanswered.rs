@@ -49,3 +49,24 @@ async fn a_step_its_ant_turns_away_at_a_cap_or_out_of_turns_raises_in_the_script
         assert_eq!(step_status(&mut status).await.1, StepStage::Failed);
     }
 }
+
+#[tokio::test]
+async fn a_step_a_human_steered_raises_in_the_script_naming_the_human() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let thread = ThreadId::generate();
+    let run = lead.start_on(CAUGHT, TrailLimits::default(), thread.clone()).await;
+    let step = lead.step().await;
+    let steered = format!(
+        "{} steered the prompt answering the step with message {}, which takes the answer.",
+        ants_test_support::human(),
+        ants_proto::Uuid::now_v7()
+    );
+    let text = format!("[ants] {steered}");
+    let notice = step.step_notice(ant("dev"), NoticeKind::Steered, &text);
+    assert!(lead.trails.take(&notice).await.unwrap(), "a notice prompts no conductor");
+    let RunState::Done { result } = lead.ended(&run).await else { panic!("not done") };
+    assert_eq!(result, json!(format!("raised: dev never answered: {steered}")));
+    assert_eq!(lead.notes(&thread, 2).await[1], noted(&run, &step, NoticeKind::Steered, &text));
+}
