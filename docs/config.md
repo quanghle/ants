@@ -298,6 +298,14 @@ Allowed per-ant overrides within template bounds:
 
 A template's `fallback` list ([Fallbacks](#fallbacks)) is the fallback list of every ant added from it: a request cannot set or change it, and the template's `harnesses` and `models` bound what a manager picks, not the fallbacks. Its entries must name a known harness, name a model after a colon and appear once; anything else fails config loading. Each ant leaves out an entry naming the harness and model it runs (such as `":claude-haiku-4-5"` for an ant whose manager picked that model) or a fallback an earlier entry names for its harness, and keeps the rest in order.
 
+A template's `env` is fixed, but for two placeholders in its values: `<ant>` becomes the added ant's name and `<manager>` its manager's, so that each ant gets an identity or credentials of its own while a request still sets no `env`:
+
+```toml
+env = { GIT_CONFIG_COUNT = "2", GIT_CONFIG_KEY_0 = "user.name", GIT_CONFIG_VALUE_0 = "<ant>",
+        GIT_CONFIG_KEY_1 = "user.email", GIT_CONFIG_VALUE_1 = "<ant>@example.com",
+        FORGE_TOKEN_FILE = "/srv/tokens/<ant>.token" }
+```
+
 Removing a manager from `managers` blocks new additions while keeping existing workers.
 
 ## Manager ants
