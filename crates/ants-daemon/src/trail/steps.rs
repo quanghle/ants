@@ -41,6 +41,17 @@ pub(super) fn unanswered(call: &PendingCall, message: &Envelope) -> Option<Strin
     Some(format!("{} never answered: {text}", call.to))
 }
 
+/// Whether `message`, on its step's thread, is the notice of `call`'s recipient, replying to the step's last message,
+/// that the recipient asked a human with ask_human ([`NoticeKind::Asked`]): the step waits on the human.
+pub(super) fn asked(call: &PendingCall, message: &Envelope) -> bool {
+    message.notice == Some(NoticeKind::Asked) && message.from == call.to && message.in_reply_to == Some(call.message)
+}
+
+/// Whether `call` waits on a human: a human() call, or a step whose recipient asked one ([`asked`]).
+pub(super) fn on_a_human(call: &PendingCall) -> bool {
+    call.function == TrailFunction::Human || call.asked
+}
+
 /// Most characters of a notice's text the error of a step its recipient does not answer quotes.
 const MAX_UNANSWERED: usize = 1000;
 

@@ -30,7 +30,7 @@ fn every_wire_enum_s_as_str_is_the_name_serde_writes() {
     named_as_on_the_wire!(Following: Inbox, Approvals);
     named_as_on_the_wire!(NoticeKind:
         Spend, SignedOut, Quota, Failing, NoFallback, GaveUp, Withdrawn, Expired, Unserved, Assistant, InPlace,
-        RequestExpired, Steered, McpSignIn, RunSpent, Unanswered
+        RequestExpired, Steered, McpSignIn, RunSpent, Unanswered, Asked
     );
     named_as_on_the_wire!(OrderState: Pending, Held, Applied, Refused);
     named_as_on_the_wire!(PromptEnd: Replied, NoReply, Cancelled, Capped, Failed, Unknown);

@@ -2,8 +2,8 @@
 //! messages on the thread of a step the run no longer waits on, or of a run no longer in memory.
 
 use ants_proto::{
-    AgentArgs, CallAnswer, Envelope, JournalEntry, PendingCall, Role, RunId, RunLimit, TipBoard, TrailFunction,
-    TrailRun, UserId,
+    AgentArgs, CallAnswer, Envelope, JournalEntry, PendingCall, Role, RunId, RunLimit, RunState, TipBoard,
+    TrailFunction, TrailRun, UserId,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -42,6 +42,8 @@ impl Trails {
             self.report_stray(stray, message).await;
             if let Some(error) = steps::unanswered(&pending, message) {
                 self.resolve(&slot, &header, &pending, CallAnswer::Error(error), 0).await?;
+            } else if steps::asked(&pending, message) {
+                self.waits_on_a_human(&slot, pending.call).await?;
             }
             return Ok(true);
         }
@@ -114,6 +116,27 @@ impl Trails {
         self.wake(run);
         self.wake_starved(header);
         Ok(())
+    }
+
+    /// Mark the call `call` of the run of `slot` waiting on a human its step's recipient asked ([`steps::asked`]),
+    /// stored with the run's session: the run waits on humans once every call it waits on does and none is queued.
+    async fn waits_on_a_human(&self, slot: &Slot, call: u32) -> Result<()> {
+        {
+            let mut book = slot.book();
+            let Some(pending) = book.pending.iter_mut().find(|pending| pending.call == call) else { return Ok(()) };
+            if pending.asked {
+                return Ok(());
+            }
+            pending.asked = true;
+            if book.header.state == RunState::Running
+                && book.queued.is_empty()
+                && book.pending.iter().all(steps::on_a_human)
+            {
+                book.header.state = RunState::Waiting;
+            }
+        }
+        self.save_session(slot).await?;
+        self.save_header(slot).await
     }
 
     /// Take `message`, on the thread of a step to `to` the run `run` no longer waits on, when it is a notice, an
@@ -203,6 +226,7 @@ impl Trails {
             sent_at: again.sent_at,
             turn_budget: again.turn_budget,
             retries: pending.retries + 1,
+            asked: false,
             sent: false,
             ..pending.clone()
         };

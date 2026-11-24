@@ -30,6 +30,7 @@ fn a_child_run_shows_the_call_it_answers_and_a_trail_call_its_child() {
         sent: true,
         turn_budget: 0,
         retries: 0,
+        asked: false,
     };
     let shown = |run: &TrailRun, pending: Vec<PendingCall>, children: Vec<TrailRun>| {
         let detail = runs::Detail {
@@ -49,6 +50,37 @@ fn a_child_run_shows_the_call_it_answers_and_a_trail_call_its_child() {
     let row = format!("  1  trail  run {}  sent 0s ago  thread {}  trail review\n", child.run, child.thread);
     assert!(text.contains(&row) && !text.contains("child run answering"), "{text}");
     assert!(text.contains(&format!("\nchild runs:\n  {}  review  running  call 1\n", child.run)), "{text}");
+}
+
+#[test]
+fn a_step_whose_ant_asked_a_human_shows_waiting_on_the_human() {
+    let now = Utc::now();
+    let run = record(&p("lead"), Some("release"), RunState::Waiting, now);
+    let thread = ThreadId::generate();
+    let call = PendingCall {
+        call: 1,
+        function: TrailFunction::Agent,
+        args: json!({"prompt": "deploy?", "ant": "dev-a"}),
+        to: p("dev-a"),
+        thread: thread.clone(),
+        message: Uuid::now_v7(),
+        sent_at: now,
+        sent: true,
+        turn_budget: 8,
+        retries: 0,
+        asked: true,
+    };
+    let detail = runs::Detail {
+        run,
+        pending: vec![call],
+        queued: Vec::new(),
+        journal: Vec::new(),
+        children: Vec::new(),
+        ratings: Vec::new(),
+    };
+    let text = runs::render(&detail, now);
+    let row = format!("  1  agent  to dev-a, waiting on a human it asked  sent 0s ago  thread {thread}  ");
+    assert!(text.contains(&row), "{text}");
 }
 
 #[test]
@@ -173,6 +205,7 @@ async fn humans_list_and_show_the_runs_conductors_keep() {
             sent: true,
             turn_budget: 8,
             retries: 0,
+            asked: false,
         }],
         queued: vec![QueuedCall { call: 3, function: TrailFunction::Agent, args: json!({"prompt": "announce"}) }],
         anew: Vec::new(),

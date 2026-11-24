@@ -1,5 +1,7 @@
 //! Trail steps on the inbox of the ant answering them: a step the ant does not answer with a reply ends with a notice
-//! to its conductor on the step's thread, replying to the step, so that the step's call raises in the script.
+//! to its conductor on the step's thread, replying to the step, so that the step's call raises in the script; one
+//! whose turn asked a human tells the conductor so, and the answer after the human's is the step's reply. A re-ask is
+//! answered as the step is.
 
 use super::*;
 
@@ -149,4 +151,66 @@ async fn a_step_whose_prompt_a_human_steered_ends_with_a_steered_notice_to_its_c
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
+}
+
+#[tokio::test]
+async fn a_step_whose_turn_asked_a_human_is_answered_by_the_ant_s_answer_after_the_human_s() {
+    use ants_proto::{NoReplyWhy, TimelineEntry};
+
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let home = bus._server.dir().join("asked");
+    std::fs::create_dir_all(&home).unwrap();
+    let (outbox, colony) = (crate::mcp::jetstream_outbox(bus.js.clone()), crate::mcp::jetstream_colony(bus.js.clone()));
+    let notes = Arc::new(crate::stream::notes::JetStreamNotes::new(bus.js.clone(), bus.dev.clone()));
+    let mcp = Mcp::start(bus.dev.clone(), &home, outbox, colony, notes, bus.humans.clone(), None).await;
+    bus.mcp = Some(mcp.unwrap());
+    let [lead] = ants(["lead"]);
+    let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
+    let step = step_of(&bus, &lead, "hold: deploy?");
+    bus::publish_json(&bus.js, step.subject(), &step, None).await.unwrap();
+    let human = ants_test_support::human();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mcp = bus.mcp.as_ref().unwrap();
+        until("the step's prompt to run", || log.locked().prompted == 1).await;
+        let questions = serde_json::json!({"questions": [{"question": "Ship it?", "options": ["yes", "no"]}]});
+        let asked = call_tool(mcp, &step.thread_id, "ask_human", questions).await;
+        assert_ne!(asked.is_error, Some(true), "{asked:?}");
+        assert!(format!("{asked:?}").contains("This turn sends the trail step no reply"), "{asked:?}");
+        let question = next_envelope(&mut to_human).await;
+        assert!(question.question.is_some(), "{question:?}");
+        gate.add_permits(1);
+        let notice = next_envelope(&mut to_lead).await;
+        assert_step_notice(&bus, &notice, &step, ants_proto::NoticeKind::Asked);
+        assert_eq!(notice.text, format!("[ants] dev-a asked {human} and answers the step once answered."));
+        let (message, entry) = no_reply_on(&bus, &step.thread_id).await;
+        assert_eq!(message, step.id);
+        let TimelineEntry::NoReply { why, reason, .. } = entry else { panic!("{entry:?}") };
+        assert_eq!((why, reason), (NoReplyWhy::Asked, Some(format!("asked {human}"))));
+
+        // The human's answer: the ant's answer to it is the step's reply, to the conductor.
+        bus.send(&step.thread_id, "hold: yes").await;
+        until("the answer's prompt to run", || log.locked().prompted == 2).await;
+        gate.add_permits(1);
+        let reply = next_envelope(&mut to_lead).await;
+        assert_eq!(
+            (&reply.from, &reply.thread_id, reply.in_reply_to, reply.notice, reply.turn_budget),
+            (&bus.dev, &step.thread_id, Some(step.id), None, step.turn_budget - 1),
+            "{reply:?}"
+        );
+        assert!(reply.text.ends_with("hold: yes"), "{}", reply.text);
+
+        // Answered, the step waits no more: the human's next message is answered to the human.
+        bus.send(&step.thread_id, "hold: thanks").await;
+        until("the next prompt to run", || log.locked().prompted == 3).await;
+        gate.add_permits(1);
+        assert_eq!(next_reply(&mut to_human).await, (step.thread_id.clone(), "hold: thanks".to_owned()));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    assert!(timeout(Duration::from_millis(200), to_lead.next()).await.is_err(), "the step has one reply");
 }

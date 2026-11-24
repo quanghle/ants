@@ -185,6 +185,7 @@ fn only_the_recipients_reply_on_the_steps_thread_answers_a_call() {
         sent: true,
         turn_budget: step.turn_budget,
         retries: 0,
+        asked: false,
     };
     let reply = step.reply(p("dev-a"), "built", ants_proto::Role::Ant).unwrap();
     assert!(answered_by(&call, &reply, &reply.from));
@@ -220,6 +221,7 @@ fn a_self_step_is_told_from_its_reply() {
         sent: true,
         turn_budget: step.turn_budget,
         retries: 0,
+        asked: false,
     };
     assert!(!answered_by(&call, &step, &step.from), "the step itself answers nothing");
     let invitation = Envelope {

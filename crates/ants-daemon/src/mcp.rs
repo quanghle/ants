@@ -404,12 +404,14 @@ struct TurnState {
     carried: Option<(Vec<AttachmentHandle>, DateTime<Utc>)>,
     /// The channel post the message being handled was made of, with its stream sequence in the ant's inbox stream.
     post: Option<(ChannelPost, u64)>,
+    /// The human, or the assistant of one, the session asked with `ask_human`, if it did.
+    asked: Option<UserId>,
 }
 
 impl TurnState {
     /// The turn that handles `current`.
     fn of(current: Envelope) -> Self {
-        Self { current, title: None, completed: None, reply_files: None, carried: None, post: None }
+        Self { current, title: None, completed: None, reply_files: None, carried: None, post: None, asked: None }
     }
 }
 

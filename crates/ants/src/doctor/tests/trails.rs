@@ -51,6 +51,7 @@ fn step(to: &str) -> PendingCall {
         sent: true,
         turn_budget: 8,
         retries: 0,
+        asked: false,
     }
 }
 

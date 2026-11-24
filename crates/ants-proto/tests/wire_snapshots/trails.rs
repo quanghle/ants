@@ -51,6 +51,7 @@ fn trail_child_runs() {
         sent: true,
         turn_budget: 0,
         retries: 0,
+        asked: false,
     };
     assert_eq!(call.child(), Some(child.run), "a trail() call's message is its child run's id");
     snap("trail_child_call", &call);
@@ -150,6 +151,7 @@ fn trails() {
                 sent: true,
                 turn_budget: 4,
                 retries: 1,
+                asked: false,
             }],
             queued: vec![QueuedCall { call: 4, function: TrailFunction::Human, args: serde_json::json!(["ship it?"]) }],
             anew: vec![2],

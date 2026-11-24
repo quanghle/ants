@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ants_proto::{Attachment, AttachmentHandle, ChannelPost, Envelope, ThreadId, ThreadTitle, Uuid};
+use ants_proto::{Attachment, AttachmentHandle, ChannelPost, Envelope, ThreadId, ThreadTitle, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -38,6 +38,12 @@ impl Mcp {
     /// Take whether the session of `thread` called `complete` during the turn: then its final answer goes to nobody.
     pub fn take_completed(&self, thread: &ThreadId) -> Option<Completed> {
         self.hub.sessions.locked().turns.get_mut(thread)?.completed.take()
+    }
+
+    /// Take whom the session of `thread` asked with `ask_human` during the turn, if it did: a trail step's turn that
+    /// asked sends the step no reply.
+    pub fn take_asked(&self, thread: &ThreadId) -> Option<UserId> {
+        self.hub.sessions.locked().turns.get_mut(thread)?.asked.take()
     }
 
     /// Whether the session of `thread` called `complete` during the turn so far, left for [`Mcp::take_completed`].

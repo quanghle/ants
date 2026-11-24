@@ -412,6 +412,7 @@ fn no_reply(end: &NoReply, text: &str) -> String {
         (NoReplyWhy::Completed, None) => "completed".to_owned(),
         (NoReplyWhy::Steered, Some(reason)) => format!("steered ({reason})"),
         (NoReplyWhy::Steered, None) => "steered".to_owned(),
+        (NoReplyWhy::Asked, _) => "asked a human, the trail step answered after the answer".to_owned(),
     };
     if text.is_empty() { why } else { format!("{why}: {text}") }
 }

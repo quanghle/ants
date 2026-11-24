@@ -55,6 +55,7 @@ fn a_run_shows_its_phase_error_labels_and_answers_on_their_own_lines() {
         sent: true,
         turn_budget: 8,
         retries: 0,
+        asked: false,
     };
     let journal = vec![JournalEntry {
         call: 0,

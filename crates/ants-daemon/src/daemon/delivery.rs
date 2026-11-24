@@ -12,6 +12,7 @@ use crate::bus;
 use crate::channel::{Context, Earlier, Threads};
 use crate::delivery::attempts::{GivenFiles, Reply, StoredFiles};
 use crate::escalation::{self, Route};
+use crate::limits::caps::AskedStep;
 use crate::monitoring::status;
 use crate::people::humans::Registry;
 use crate::stream::notes;
@@ -95,6 +96,17 @@ impl Inbox<'_> {
         Ok(())
     }
 
+    /// The trail step on the thread of `incoming` whose turn asked a human, when the answer to `incoming`, a human's
+    /// message (or one an assistant sent for its human) that is no step, is the step's reply ([`AskedStep`]).
+    pub(super) async fn asked_step(&self, incoming: &Incoming) -> Result<Option<AskedStep>> {
+        let envelope = &incoming.envelope;
+        let human = envelope.on_behalf_of.is_some() || self.humans.sender_role(envelope).is_human();
+        if !human || incoming.post.is_some() || incoming.resume.is_some() || envelope.trail_step.is_some() {
+            return Ok(None);
+        }
+        self.ledger.asked_step(&envelope.thread_id).await
+    }
+
     /// Who the answer to `incoming` goes to when it goes as a message, outside a channel, as [`Inbox::reply_for`]
     /// addresses it: none for a channel post's or a resumed channel thread's, a trail step's the ant sent itself, a
     /// webhook's with no owner, and one going to an escalation's notes.
@@ -131,12 +143,20 @@ impl Inbox<'_> {
     ) -> Result<Option<Reply>> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
+        let asked = self.asked_step(incoming).await?;
         let reply = match (&incoming.post, read) {
             (Some(posted), Some(read)) => {
                 let Some(post) = self.post_reply(h, &posted.post, read, &text).await? else {
                     return Ok(None);
                 };
                 Reply::Post(post)
+            }
+            // The answer once a human answered what the turn on a trail step asked: the step's reply, to its conductor.
+            _ if let Some(asked) = asked => {
+                let reply = envelope.reply(self.ant.clone(), text, Role::Human)?;
+                let turn_budget = asked.turn_budget.saturating_sub(1);
+                let to = asked.conductor;
+                Reply::Message(Box::new(Envelope { to, in_reply_to: Some(asked.step), turn_budget, ..reply }))
             }
             _ if let Some(channel) = &incoming.resume => {
                 let post = ChannelPost::on_thread(channel.clone(), thread.clone(), self.ant.clone(), text);

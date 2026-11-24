@@ -1,5 +1,6 @@
 //! Steps their recipients settle without a reply: the notice of the recipient's daemon on the step's thread, replying
-//! to the step ([`Envelope::step_notice`]), fails the call, raising in the script, and is noted on the run's thread.
+//! to the step ([`Envelope::step_notice`]), fails the call, raising in the script, and is noted on the run's thread;
+//! but one telling that the recipient asked a human leaves the call waiting on the human, for the recipient's reply.
 
 use super::*;
 
@@ -99,4 +100,24 @@ async fn a_dead_lettered_step_raises_its_error_and_its_replay_s_reply_is_late() 
     assert!(notes.contains(&late), "{notes:?}");
     let RunState::Done { result: still } = lead.header(&run).await.state else { panic!("not done") };
     assert_eq!(still, result);
+}
+
+#[tokio::test]
+async fn a_step_whose_ant_asked_a_human_waits_on_the_human_and_takes_the_ant_s_answer_after() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let thread = ThreadId::generate();
+    let run = lead.start_on(CAUGHT, TrailLimits::default(), thread.clone()).await;
+    let step = lead.step().await;
+    let text = "[ants] dev asked human and answers the step once answered.";
+    let notice = step.step_notice(ant("dev"), NoticeKind::Asked, text);
+    assert!(lead.trails.take(&notice).await.unwrap(), "a notice prompts no conductor");
+    eventually("the run to wait on a human", async || lead.header(&run).await.state == RunState::Waiting).await;
+    assert_eq!(lead.notes(&thread, 2).await[1], noted(&run, &step, NoticeKind::Asked, text));
+
+    // The ant's answer after the human's replies to the step.
+    assert!(lead.reply(&step, "deployed").await, "the reply prompts no conductor");
+    let RunState::Done { result } = lead.ended(&run).await else { panic!("not done") };
+    assert_eq!(result, json!("deployed"));
 }

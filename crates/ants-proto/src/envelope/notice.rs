@@ -44,6 +44,10 @@ pub enum NoticeKind {
     /// The ant turned a trail step away unanswered: it reached a spending cap, or the step's thread has no turns left.
     /// The notice, on the step's thread to its conductor ([`Envelope::step_notice`]), fails the step's call.
     Unanswered,
+    /// The ant answering a trail step asked a human with ask_human: the notice, on the step's thread to its conductor
+    /// ([`Envelope::step_notice`]), tells that the step waits on the human, the ant's answer after the human's
+    /// answering it.
+    Asked,
 }
 
 impl NoticeKind {
@@ -66,6 +70,7 @@ impl NoticeKind {
             Self::McpSignIn => "mcp_sign_in",
             Self::RunSpent => "run_spent",
             Self::Unanswered => "unanswered",
+            Self::Asked => "asked",
         }
     }
 

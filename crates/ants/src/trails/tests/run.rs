@@ -132,6 +132,7 @@ fn pending(call: u32, to: &str, function: TrailFunction) -> PendingCall {
         sent: true,
         turn_budget: 8,
         retries: 0,
+        asked: false,
     }
 }
 

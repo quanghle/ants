@@ -321,9 +321,13 @@ A run reports on the thread it started with, as its conductor:
   script. A step its recipient's daemon gives up on after its deliveries is dead-lettered as any message, and the
   conductor is told too, with a `gave_up` notice on the step's thread: the call raises `RuntimeError: <ant> never
   answered: Gave up on the message from <conductor> after 5 deliveries: <error>…`, and the step replayed later (`ants
-  dead replay`) is answered with a reply the run no longer waits on, noted on the run thread. The invitation to rate a
-  run started on the thread of a step to the conductor itself, which names the run in `rating_of`, answers no call: it
-  prompts the conductor to rate the run.
+  dead replay`) is answered with a reply the run no longer waits on, noted on the run thread. A step's ant may ask the
+  run's owner with `ask_human`: the turn that asked sends the step no reply, its daemon telling the conductor with an
+  `asked` notice (noted on the run thread), the step waits on the human, shown in `ants trail show` as waiting on a
+  human it asked, and the run waits on humans once all its calls do; the ant's answer once the human, or the human's
+  assistant, answered goes to the conductor as the step's reply and answers the call. The run's wall time bounds the
+  wait. The invitation to rate a run started on the thread of a step to the conductor itself, which names the run in
+  `rating_of`, answers no call: it prompts the conductor to rate the run.
 - **Status events:** a `step` event (`run`, `call`, `label`, `to`, `step_thread`, `stage`: `started`, `answered`,
   `failed` or `dropped`) on the conductor's status of the run thread tells each step, and a `leg` event (`run`, `leg`
   counted from 0, `trail` unless inline, `waypoint` when entered at one) each leg's start, the first at the run's start
