@@ -27,11 +27,12 @@ pub(super) fn answered_by(call: &PendingCall, message: &Envelope, answerer: &Use
 /// The error raising in the script for `call` when `message`, on its step's thread, tells that the step's recipient
 /// does not answer it: a notice of the recipient replying to the step's last message that the message was withdrawn
 /// from its queue, that the recipient turned it away ([`NoticeKind::Unanswered`]), or that a later message on the
-/// thread, a human's, steered the prompt answering it and took the answer. The error names the recipient and the
-/// notice's text.
+/// thread, a human's, steered the prompt answering it and took the answer, or that the recipient gave up on it after
+/// its deliveries, its dead letter's error told. The error names the recipient and the notice's text.
 pub(super) fn unanswered(call: &PendingCall, message: &Envelope) -> Option<String> {
     let kind = message.notice?;
-    let ends = matches!(kind, NoticeKind::Withdrawn | NoticeKind::Unanswered | NoticeKind::Steered);
+    let ends =
+        matches!(kind, NoticeKind::Withdrawn | NoticeKind::Unanswered | NoticeKind::Steered | NoticeKind::GaveUp);
     if !ends || message.from != call.to || message.in_reply_to != Some(call.message) {
         return None;
     }

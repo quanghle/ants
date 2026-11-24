@@ -92,6 +92,33 @@ async fn a_re_ask_replying_to_the_ant_s_answer_is_prompted_and_answered() {
 }
 
 #[tokio::test]
+async fn a_dead_lettered_step_tells_its_conductor_with_the_dead_letter_s_error() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let [lead] = ants(["lead"]);
+    let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
+    let step = step_of(&bus, &lead, "doomed");
+    bus::publish_json(&bus.js, step.subject(), &step, None).await.unwrap();
+    gate.add_permits(MAX_ATTEMPTS as usize);
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let notice = next_envelope(&mut to_lead).await;
+        assert_step_notice(&bus, &notice, &step, ants_proto::NoticeKind::GaveUp);
+        let gave_up = format!("Gave up on the message from lead after {MAX_ATTEMPTS} deliveries: ");
+        assert!(notice.text.starts_with(&gave_up) && notice.text.contains("doomed"), "{}", notice.text);
+        assert!(notice.text.contains("`ants dead replay "), "{}", notice.text);
+        let owner = next_envelope(&mut to_human).await;
+        assert_eq!((owner.notice, owner.text), (notice.notice, notice.text), "the owner is told as well");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().doomed_failed, MAX_ATTEMPTS as usize);
+    assert_eq!(dead::list(&bus.stream).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn a_step_whose_prompt_a_human_steered_ends_with_a_steered_notice_to_its_conductor() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
     let (launch, log, gate) = fake::launch();

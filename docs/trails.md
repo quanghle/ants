@@ -314,13 +314,16 @@ A run reports on the thread it started with, as its conductor:
   characters). Notices and escalations arriving on a step's thread, and replies the run no longer waits on, are
   quoted in notes too. Notes wake nobody and spend no turn.
 - **Step threads:** each step's thread is a spin-off of the run thread, keeps the run's owner and carries a
-  `trail_step`; its recipient answers it as any message, and the first reply answers the call. A human may write on
-  a step's thread too: a message steering the prompt answering the step takes the answer, which goes to the human, and
-  the recipient's daemon tells the conductor with a `steered` notice on the step's thread, so the call raises
-  `RuntimeError: <ant> never answered: <human> steered the prompt answering the step with message <id>, which takes
-  the answer.` in the script. The invitation to rate
-  a run started on the thread of a step to the conductor itself, which names the run in `rating_of`, answers no call:
-  it prompts the conductor to rate the run.
+  `trail_step`; its recipient answers it as any message, and the first reply answers the call. A human may write on a
+  step's thread too: a message steering the prompt answering the step takes the answer, which goes to the human, and the
+  recipient's daemon tells the conductor with a `steered` notice on the step's thread, so the call raises `RuntimeError:
+  <ant> never answered: <human> steered the prompt answering the step with message <id>, which takes the answer.` in the
+  script. A step its recipient's daemon gives up on after its deliveries is dead-lettered as any message, and the
+  conductor is told too, with a `gave_up` notice on the step's thread: the call raises `RuntimeError: <ant> never
+  answered: Gave up on the message from <conductor> after 5 deliveries: <error>…`, and the step replayed later (`ants
+  dead replay`) is answered with a reply the run no longer waits on, noted on the run thread. The invitation to rate a
+  run started on the thread of a step to the conductor itself, which names the run in `rating_of`, answers no call: it
+  prompts the conductor to rate the run.
 - **Status events:** a `step` event (`run`, `call`, `label`, `to`, `step_thread`, `stage`: `started`, `answered`,
   `failed` or `dropped`) on the conductor's status of the run thread tells each step, and a `leg` event (`run`, `leg`
   counted from 0, `trail` unless inline, `waypoint` when entered at one) each leg's start, the first at the run's start

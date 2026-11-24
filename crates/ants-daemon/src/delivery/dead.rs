@@ -263,8 +263,9 @@ impl Burying<'_> {
     }
 
     /// Tell the thread's owner, else the default human, that `dead`, stored at stream sequence `dead_seq`, died, when
-    /// it holds an envelope or is of channel post `post`: up the ant's chain first when there is an escalator. The
-    /// notice's message id keeps a second one out of the stream.
+    /// it holds an envelope or is of channel post `post`: up the ant's chain first when there is an escalator; and the
+    /// conductor of a trail step, with a `gave_up` notice on the step's thread ([`Envelope::step_notice`]). The
+    /// notices' message ids keep second ones out of the stream.
     async fn tell(self, dead: &DeadLetter, dead_seq: u64, post: Option<&ChannelPost>) -> Result<()> {
         let Self { js, humans, escalator } = self;
         let (notice, about) = match (&dead.envelope, post) {
@@ -273,10 +274,13 @@ impl Burying<'_> {
             (None, None) => return Ok(()),
         };
         let id = format!("dead-notice-{}", dead.stream_seq);
+        if let Some(step) = about.filter(|e| e.trail_step.is_some()) {
+            Box::pin(tell_conductor(js, step, dead, &notice.text)).await?;
+        }
         match escalator {
             Some(escalator) => {
                 let stuck = Stuck::new(EscalationReason::DeadLetter, notice, id, about);
-                escalator.escalate(Stuck { channel: post.map(|p| p.channel.clone()), ..stuck }).await?;
+                Box::pin(escalator.escalate(Stuck { channel: post.map(|p| p.channel.clone()), ..stuck })).await?;
             }
             None => {
                 let notice = direct(notice, humans);
@@ -285,6 +289,14 @@ impl Burying<'_> {
         }
         Ok(())
     }
+}
+
+/// Tell the conductor of trail step `step`, dead as `dead`, with a `gave_up` notice of `text` on the step's thread, so
+/// that the step's call fails with the dead letter's error. The notice's message id keeps a second one out of the stream.
+async fn tell_conductor(js: &jetstream::Context, step: &Envelope, dead: &DeadLetter, text: &str) -> Result<()> {
+    let told = step.step_notice(dead.ant.clone(), ants_proto::NoticeKind::GaveUp, text);
+    bus::publish_json(js, told.subject(), &told, Some(&format!("dead-step-{}", dead.stream_seq))).await?;
+    Ok(())
 }
 
 /// Finish the burial of `kept`, a dead letter kept in the machine's outbox on its message's last delivery, once the hub

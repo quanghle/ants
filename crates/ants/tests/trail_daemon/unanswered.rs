@@ -70,3 +70,33 @@ async fn a_step_a_human_steered_raises_in_the_script_naming_the_human() {
     assert_eq!(result, json!(format!("raised: dev never answered: {steered}")));
     assert_eq!(lead.notes(&thread, 2).await[1], noted(&run, &step, NoticeKind::Steered, &text));
 }
+
+#[tokio::test]
+async fn a_dead_lettered_step_raises_its_error_and_its_replay_s_reply_is_late() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let thread = ThreadId::generate();
+    let run = lead.start_on(CAUGHT, TrailLimits::default(), thread.clone()).await;
+    let step = lead.step().await;
+    let error = "Gave up on the message from lead after 5 deliveries: the harness failed. Retry it with `ants dead \
+                 replay 7`.";
+    let notice = step.step_notice(ant("dev"), NoticeKind::GaveUp, error);
+    assert!(lead.trails.take(&notice).await.unwrap(), "a notice prompts no conductor");
+    let RunState::Done { result } = lead.ended(&run).await else { panic!("not done") };
+    assert_eq!(result, json!(format!("raised: dev never answered: {error}")));
+    assert_eq!(lead.notes(&thread, 2).await[1], noted(&run, &step, NoticeKind::GaveUp, error));
+
+    // The step replayed from its dead letter: its reply answers nothing, and is noted.
+    assert!(lead.reply(&step, "done after all").await, "the late reply prompts no conductor");
+    let call = step.trail_step.as_ref().unwrap().call;
+    let late = format!(
+        "A reply from dev on the thread {} of step {call} to dev, which the run no longer waits on, run {run}:\ndone \
+         after all",
+        step.thread_id
+    );
+    let notes = lead.notes(&thread, 3).await;
+    assert!(notes.contains(&late), "{notes:?}");
+    let RunState::Done { result: still } = lead.header(&run).await.state else { panic!("not done") };
+    assert_eq!(still, result);
+}
