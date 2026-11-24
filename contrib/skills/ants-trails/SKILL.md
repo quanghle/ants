@@ -103,7 +103,9 @@ Nothing else of the host is reachable: these names are defined before the script
   dicts, each with a `question` (1-500 characters) and 2-9 `options` (labels, or dicts with a `label` and a
   `description`), and optionally a `header`, `multi_select` (default False) and `free_text` (default True). Returns the
   answer as text: for one question, the label picked (labels joined by `, ` with `multi_select`) or the text typed; for
-  several, one line per question, `title: answer`. Set `"free_text": False` to compare the answer with a label.
+  several, one line per question, `title: answer`. Set `"free_text": False` to compare the answer with a label. An
+  owner with an assistant has it asked first, as for `ask_human`: the assistant's answer is its reply's text, whatever
+  `free_text` says, so check it before comparing.
 - `await trail(name, args=None)`: one step, answered by a child run of the saved trail `name`, started at its start
   with `args` as its input, on a thread of its own spun off the run's, for the run's owner; returns its result. Its
   steps and turns count against the run's limits. A trail on the route of a calling run, whichever of its legs entered it,
@@ -256,6 +258,10 @@ A step's message may carry tips from earlier runs of its trail: hints to verify,
 - **Vote on the tips used.** `vote_tip` with `helpful` when a tip helped, `stale` or `wrong` with a `reason` when it
   misled. Voting again replaces the earlier vote; no ant votes on its own tip. When tips of different writers share an
   id, `writer` names the one meant.
+- **Merge the branch a step names.** With worktrees, each step works in a checkout of its own from the repository's
+  `HEAD`. A step ending `[ants] The work of this run's steps so far is on branch NAME, …` builds on the earlier steps'
+  commits only once `NAME` is merged into its own checkout; commits made answering a step are named to the later steps
+  the same way.
 - **Leave a tip when something non-obvious was learnt** that a later step would otherwise rediscover: `leave_tip`, at
   most 1000 characters, specific and checkable, never the step's result nor what any ant would try first. A tip saying
   what a live tip says is refused (vote that one helpful instead); one much like live tips needs `force`.
@@ -1196,9 +1202,10 @@ Args:
 A human starts a run with `ants trail run`, which shows what the run may spend before it starts and takes the limit
 flags `--steps`, `--at-once`, `--turns` and `--wall`; an ant starts one with the `run_trail` MCP tool, from a saved
 trail's `name` or a `script` of its own, on its current thread, getting the run's id at once or, with `wait`, its
-result; a `[[schedule]]` entry with `trail =` (and `args =`, a table) starts a saved trail on its `ant` at each firing.
-`run_trail`'s `limits` (`{"steps", "at_once", "turns", "wall"}`) and a schedule's `limits` table set the same limits as
-those flags. `trail_status` tells how a run the ant conducts stands (state, steps and turns spent of its limits, the
+result; a `[[schedule]]` entry with `trail =` (and `args =`, a table) starts a saved trail on its `ant` at each firing,
+and a `[[webhook]]` entry with `trail =` at each event, the event's text in `args["text"]`. `run_trail`'s `limits`
+(`{"steps", "at_once", "turns", "wall"}`) and a schedule's or webhook's `limits` table set the same limits as those
+flags. `trail_status` tells how a run the ant conducts stands (state, steps and turns spent of its limits, the
 steps it waits on, the result), and `stop_trail` stops one, which only a human resumes. `find_trails` finds saved
 trails for a task by their ratings, and `rate_trail` rates a run once it ends ([Finding and
 rating](#finding-and-rating)). Saved trails are colony-wide:

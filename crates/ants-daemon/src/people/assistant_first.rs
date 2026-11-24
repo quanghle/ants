@@ -1,9 +1,9 @@
 //! Whom what would reach a human goes to first: the human's assistant, while one stands for it and can act.
 //!
-//! Stuck escalations ([`crate::escalation`]), ask_human questions and tool requests ([`crate::approvals`]) that would
+//! Stuck escalations ([`crate::escalation`]), ask_human questions and tool requests (`crate::approvals`) that would
 //! reach a human go first to the ant its grant designates as its assistant, when that ant's record names the human
 //! (the grant honours it) and a daemon serves it now: in the colony, live, not paused, failing, signed out nor held
-//! back by a provider limit ([`crate::mcp::why_unserved`]). Otherwise they go to the human directly.
+//! back by a provider limit (`crate::mcp::why_unserved`). Otherwise they go to the human directly.
 
 use std::sync::Arc;
 use std::time::Duration;

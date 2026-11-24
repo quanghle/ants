@@ -169,7 +169,7 @@ pub struct Pool {
     /// Signalled when a harness becomes free, starts or stops.
     changed: Notify,
     /// The git worktrees of threads, pruned as their sessions expire.
-    worktrees: Option<Worktrees>,
+    worktrees: Option<Arc<Worktrees>>,
     /// Each thread works in its worktree, instead of the shared workdir.
     isolate: bool,
     /// The checkouts of reviews: a thread with some works among them.
@@ -271,7 +271,7 @@ impl Pool {
     /// Each thread works in its own git worktree ([`Worktrees`]).
     #[must_use]
     pub fn with_worktrees(self, worktrees: Worktrees) -> Self {
-        Self { worktrees: Some(worktrees), isolate: true, ..self }
+        Self { worktrees: Some(Arc::new(worktrees)), isolate: true, ..self }
     }
 
     /// A thread under review works among its checkouts ([`Checkouts::workdir`]), not in its worktree or the workdir.
@@ -289,7 +289,7 @@ impl Pool {
     /// ([`Worktrees::left_behind`]).
     #[must_use]
     pub fn with_worktrees_left_behind(self, worktrees: Worktrees) -> Self {
-        Self { worktrees: Some(worktrees), isolate: false, ..self }
+        Self { worktrees: Some(Arc::new(worktrees)), isolate: false, ..self }
     }
 
     /// Remove the worktrees of threads with no live harness whose session is no longer in the store, at once and then
@@ -349,7 +349,12 @@ impl Pool {
 
     /// The worktrees threads work in, if each works in its own.
     pub fn worktrees(&self) -> Option<&Worktrees> {
-        self.worktrees.as_ref().filter(|_| self.isolate)
+        self.worktrees.as_deref().filter(|_| self.isolate)
+    }
+
+    /// [`Pool::worktrees`], shared.
+    pub fn shared_worktrees(&self) -> Option<Arc<Worktrees>> {
+        self.worktrees.clone().filter(|_| self.isolate)
     }
 
     /// Run a prompt in the thread's session, starting or resuming its harness when none is live. Waits while the cap

@@ -40,6 +40,7 @@ fn a_child_run_shows_the_call_it_answers_and_a_trail_call_its_child() {
             journal: Vec::new(),
             children,
             ratings: Vec::new(),
+            spend: None,
         };
         runs::render(&detail, now)
     };
@@ -77,6 +78,7 @@ fn a_step_whose_ant_asked_a_human_shows_waiting_on_the_human() {
         journal: Vec::new(),
         children: Vec::new(),
         ratings: Vec::new(),
+        spend: None,
     };
     let text = runs::render(&detail, now);
     let row = format!("  1  agent  to dev-a, waiting on a human it asked  sent 0s ago  thread {thread}  ");
@@ -97,6 +99,7 @@ fn a_run_started_answering_a_step_shows_the_run_it_spends_from() {
         journal: Vec::new(),
         children: Vec::new(),
         ratings: Vec::new(),
+        spend: None,
     };
     let text = runs::render(&detail, now);
     let line = format!(
@@ -129,6 +132,7 @@ fn a_run_shows_the_legs_of_its_route_and_the_gotos_it_made() {
         journal: vec![refused],
         children: Vec::new(),
         ratings: Vec::new(),
+        spend: None,
     };
     let text = runs::render(&detail, now);
     assert!(text.starts_with(&format!("run {} of trail triage\n", run.run)), "the trail it started: {text}");
@@ -167,6 +171,7 @@ fn a_run_failed_on_a_limit_shows_which() {
                 journal: Vec::new(),
                 children: Vec::new(),
                 ratings: Vec::new(),
+                spend: None,
             },
             now,
         )

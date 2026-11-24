@@ -38,6 +38,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+#[path = "trail_daemon/asked_first.rs"]
+mod asked_first;
 #[path = "trail_daemon/children.rs"]
 mod children;
 #[path = "trail_daemon/ends.rs"]
@@ -72,6 +74,8 @@ mod tips;
 mod tips_carried;
 #[path = "trail_daemon/unanswered.rs"]
 mod unanswered;
+#[path = "trail_daemon/work_branch.rs"]
+mod work_branch;
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": [\"one\"]}\n";
 

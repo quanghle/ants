@@ -6,7 +6,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::toml_string;
-use ants_proto::{ChannelId, Destination, ENROLL_REPEAT, JsDomain, Permissions, UserId};
+use ants_proto::{ChannelId, Destination, ENROLL_REPEAT, JsDomain, Permissions, TrailName, UserId};
 use anyhow::{Context as _, Result, bail};
 use data_encoding::HEXLOWER;
 use nkeys::KeyPair;
@@ -98,6 +98,10 @@ pub struct AddArgs {
     /// making a new one; it is copied to <name>.secret.
     #[arg(long, value_name = "VAR")]
     pub secret_env: Option<String>,
+    /// Start a run of this saved trail at each event, with the --to ant as its conductor and the event's text as its
+    /// argument `text`, instead of prompting the ant; args and limits go in the entry, as a schedule's do.
+    #[arg(long, value_name = "NAME", requires = "to")]
+    pub trail: Option<TrailName>,
     /// The webhooks' config file (default: ~/.ants/webhooks.toml).
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -156,7 +160,7 @@ pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Res
     let secret = given.clone().unwrap_or_else(new_secret);
     auth::write_secret(&secret_file, &format!("{secret}\n"))?;
     let settings = Settings::of(args.preset, args.signing_token);
-    let entry = entry(name, &out, &format!("{name}.secret"), &destination, &settings)?;
+    let entry = entry(name, &out, &format!("{name}.secret"), &destination, &settings, args.trail.as_ref())?;
     let text = appended(&old, &entry);
     check(&text, &entry, &path)?;
 
@@ -284,13 +288,15 @@ fn new_secret() -> String {
     HEXLOWER.encode(&bytes)
 }
 
-/// The `[[webhook]]` entry of webhook `name`, with its credentials at `creds` and its secret in `secret_file`.
+/// The `[[webhook]]` entry of webhook `name`, with its credentials at `creds` and its secret in `secret_file`, starting
+/// a run of `trail` at each event if given.
 fn entry(
     name: &UserId,
     creds: &Path,
     secret_file: &str,
     destination: &Destination,
     settings: &Settings,
+    trail: Option<&TrailName>,
 ) -> Result<String> {
     let creds = creds.to_str().with_context(|| format!("{} is no UTF-8", creds.display()))?;
     let mut lines = vec![
@@ -312,6 +318,9 @@ fn entry(
     });
     if let Some(text) = settings.text {
         lines.push(format!("text = {}", toml_string(text)));
+    }
+    if let Some(trail) = trail {
+        lines.push(format!("trail = {}", toml_string(trail.as_str())));
     }
     Ok(lines.join("\n") + "\n")
 }
@@ -403,7 +412,7 @@ mod tests {
         };
 
         let github = parsed(
-            &entry(&name, &creds, "hook.secret", &ant, &Settings::of(Some(Preset::Github), false)).unwrap(),
+            &entry(&name, &creds, "hook.secret", &ant, &Settings::of(Some(Preset::Github), false), None).unwrap(),
             &dir,
         );
         let hook = &github.webhooks[0];
@@ -419,7 +428,7 @@ mod tests {
         assert_eq!(hook.event_of(&signed, b"{}").0, id, "the delivery identifies the event");
 
         let gitlab = parsed(
-            &entry(&name, &creds, "hook.secret", &ant, &Settings::of(Some(Preset::Gitlab), false)).unwrap(),
+            &entry(&name, &creds, "hook.secret", &ant, &Settings::of(Some(Preset::Gitlab), false), None).unwrap(),
             &dir,
         );
         let hook = &gitlab.webhooks[0];
@@ -436,7 +445,7 @@ mod tests {
 
         auth::write_secret(&dir.join("hook.secret"), "whsec_c2lnbmluZy1rZXk=\n").unwrap();
         let settings = Settings::of(Some(Preset::Gitlab), true);
-        let signed = entry(&name, &creds, "hook.secret", &ant, &settings).unwrap();
+        let signed = entry(&name, &creds, "hook.secret", &ant, &settings, None).unwrap();
         let signed = Config::parse(&signed, &dir.join("webhooks.toml"), &dir, |_| None).unwrap();
         let hook = &signed.webhooks[0];
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().to_string();
@@ -457,7 +466,7 @@ mod tests {
         assert!(hook.event_of(&sent, body).1.starts_with("GitLab Push Hook on g/p\n\n"));
 
         let grafana = parsed(
-            &entry(&name, &creds, "hook.secret", &ant, &Settings::of(Some(Preset::Grafana), false)).unwrap(),
+            &entry(&name, &creds, "hook.secret", &ant, &Settings::of(Some(Preset::Grafana), false), None).unwrap(),
             &dir,
         );
         let hook = &grafana.webhooks[0];
@@ -467,7 +476,8 @@ mod tests {
         assert_eq!(hook.event_of(&sent, body).1, "Grafana: T\n\nM");
 
         let channel = Destination::Channel("ops".parse().unwrap());
-        let bearer = parsed(&entry(&name, &creds, "hook.secret", &channel, &Settings::of(None, false)).unwrap(), &dir);
+        let bearer =
+            parsed(&entry(&name, &creds, "hook.secret", &channel, &Settings::of(None, false), None).unwrap(), &dir);
         let hook = &bearer.webhooks[0];
         assert_eq!(hook.destination, channel);
         assert!(hook.accepts(&headers(&[("authorization", "Bearer s3cret".into())]), body));
@@ -483,6 +493,7 @@ mod tests {
             signing_token: false,
             secret_file: None,
             secret_env: None,
+            trail: None,
             config: Some(config.to_owned()),
             dir: Some(team.to_owned()),
             out: None,
@@ -497,7 +508,8 @@ mod tests {
         let team = dir.join("auth");
         auth::init(&team).unwrap();
         let config = dir.join("hooks/webhooks.toml");
-        add(args("github", &config, &team), "nats://127.0.0.1:4222", None).await.unwrap();
+        let triage = AddArgs { trail: Some("triage".parse().unwrap()), ..args("github", &config, &team) };
+        add(triage, "nats://127.0.0.1:4222", None).await.unwrap();
         let first = std::fs::read_to_string(&config).unwrap();
         assert!(first.starts_with("[[webhook]]\nname = \"github\"\n"), "{first}");
         let edited = format!("# the hub's webhooks\n{first}");
@@ -513,6 +525,9 @@ mod tests {
         assert_eq!(names, ["github", "alerts"]);
         assert_eq!(loaded.webhooks[0].creds.as_deref(), Some(team.join("github.creds").as_path()));
         assert_eq!(loaded.webhooks[1].destination, Destination::Channel("ops".parse().unwrap()));
+        let trails: Vec<Option<&str>> =
+            loaded.webhooks.iter().map(|w| w.trail.as_ref().map(|t| t.trail.as_str())).collect();
+        assert_eq!(trails, [Some("triage"), None], "--trail names the trail each event starts");
 
         let err = add(args("github", &config, &team), "nats://127.0.0.1:4222", None).await.unwrap_err();
         assert!(err.to_string().contains("already listed"), "{err:#}");

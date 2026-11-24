@@ -18,6 +18,9 @@ impl Trails {
     /// reported on the run's thread, a notice that the recipient does not answer the step failing the call
     /// (`steps::unanswered`). True when taken, to be acked without prompting the harness, once this returns.
     pub async fn take(&self, message: &Envelope) -> Result<bool> {
+        if self.escalator_takes(message) {
+            return Ok(false);
+        }
         let step = locked(&self.inner.threads).get(&message.thread_id).cloned();
         let answerer = self.answerer(message);
         let run = match step {
@@ -50,6 +53,7 @@ impl Trails {
         // Charged in memory alone: what a message tells is charged once however often it is taken, and stored with the
         // answer, or the re-ask, it brings.
         self.take_told(&slot, pending.call, &pending.to, message);
+        self.note_work_branch(&slot, &pending, message);
         let header = slot.header();
         let spent = match pending.function {
             TrailFunction::Agent => pending.turn_budget.saturating_sub(message.turn_budget),
@@ -104,6 +108,7 @@ impl Trails {
         }
         self.charge(header, 0, spent);
         self.retire(run, pending);
+        self.end_question(pending).await;
         // What the reply charged, stored before it is acked; one not stored now is stored by the run's next pass.
         let stored = async {
             self.save_ancestors(header).await?;
@@ -190,10 +195,14 @@ impl Trails {
     }
 
     /// Who answers with `message`: the human its `on_behalf_of` names while the human's grant names the sender as its
-    /// assistant, as an answer to ask_human counts for the human, else its sender. The inbox already cleared a claim
-    /// the assistant's own credentials do not back ([`crate::people::behalf::Records::acting`]), so the claim stands
-    /// for them here; the grant is checked again as it stands now.
+    /// assistant, as an answer to ask_human counts for the human, or whose question asked of its assistant first the
+    /// assistant answers ([`Trails::assisted`]), else its sender. The inbox already cleared a claim the assistant's own
+    /// credentials do not back ([`crate::people::behalf::Records::acting`]), so the claim stands for them here; the
+    /// grant is checked again as it stands now.
     fn answerer<'a>(&self, message: &'a Envelope) -> &'a UserId {
+        if let Some(human) = self.assisted(message) {
+            return human;
+        }
         match &message.on_behalf_of {
             Some(human) if self.inner.humans.honours_assistant(human, &message.from, Some(human)) => human,
             _ => &message.from,

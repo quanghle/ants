@@ -4,6 +4,7 @@ mod ratings;
 mod records;
 mod run;
 mod saves;
+mod spend;
 mod steps;
 mod terminal;
 mod tips;

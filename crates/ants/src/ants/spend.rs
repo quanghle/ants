@@ -206,9 +206,33 @@ pub async fn on_threads(
     kv: &DirectKv,
     threads: &HashSet<ThreadId>,
 ) -> Result<HashMap<ThreadId, Vec<(UserId, Spent)>>> {
+    spent_on(js, kv, threads, false).await
+}
+
+/// What each ant spent on each of `threads` in all, whatever humans' messages there gave it fresh allowances, for the
+/// threads it spent anything on.
+pub async fn in_all_on(
+    js: &jetstream::Context,
+    kv: &DirectKv,
+    threads: &HashSet<ThreadId>,
+) -> Result<HashMap<ThreadId, Vec<(UserId, Spent)>>> {
+    spent_on(js, kv, threads, true).await
+}
+
+/// What each ant spent on each of `threads`: in all, or since a human's last message there.
+async fn spent_on(
+    js: &jetstream::Context,
+    kv: &DirectKv,
+    threads: &HashSet<ThreadId>,
+    in_all: bool,
+) -> Result<HashMap<ThreadId, Vec<(UserId, Spent)>>> {
     let found = keys(js, "*.*.spend").await?.into_iter().filter_map(|key| parse_thread_spend_key(&key));
     let reads = futures::stream::iter(found.filter(|(_, thread)| threads.contains(thread)))
-        .map(async |(ant, thread)| Ok::<_, anyhow::Error>((caps::thread_spent(kv, &ant, &thread).await?, ant, thread)))
+        .map(async |(ant, thread)| {
+            let spent = caps::thread_spent_and_total(kv, &ant, &thread).await?;
+            let spent = spent.map(|(since, total)| if in_all { total } else { since });
+            Ok::<_, anyhow::Error>((spent, ant, thread))
+        })
         .buffer_unordered(CONCURRENT);
     let read: Vec<Result<_>> = reads.collect().await;
     let mut spent: HashMap<ThreadId, Vec<(UserId, Spent)>> = HashMap::new();

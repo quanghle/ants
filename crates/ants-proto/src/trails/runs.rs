@@ -131,6 +131,10 @@ pub struct TrailRun {
     pub grants: Vec<StepGrant>,
     /// Where that thread came from, as the conductor's daemon settled it: a run from a webhook's thread is untrusted.
     pub origin: Origin,
+    /// The branch the work of the run's steps so far is on, as the latest reply to an agent() step naming one told it,
+    /// which the agent() steps sent after it name ([`WorkBranch`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_branch: Option<WorkBranch>,
     pub limits: TrailLimits,
     #[serde(flatten)]
     pub state: RunState,
@@ -147,6 +151,17 @@ pub struct TrailRun {
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// A branch an agent() step's reply told its work is on: with worktrees, the recipient's daemon names the branch of
+/// the step's thread when it holds commits the repository's `HEAD` lacks. Each step works in a checkout of its own, so
+/// a later step merges it to build on that work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkBranch {
+    /// The branch, such as `ants/dev-a/<thread>`.
+    pub name: String,
+    /// The ant whose repository holds it: the step's recipient.
+    pub by: UserId,
 }
 
 impl TrailRun {

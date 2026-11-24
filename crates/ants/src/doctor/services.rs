@@ -4,7 +4,7 @@ use std::path::Path;
 
 use hyper::StatusCode;
 
-use super::{Check, NETWORK_TIMEOUT, Setup, Status, same_file};
+use super::{Check, Connected, NETWORK_TIMEOUT, Setup, Status, same_file};
 use crate::notify;
 use crate::service::{Service, Services, State};
 use crate::webhook::{self, SecretSource};
@@ -169,6 +169,42 @@ pub(super) async fn check_webhooks(path: &Path) -> Vec<Check> {
     checks.extend(outline.commands.iter().map(|(what, program)| check_command(what, program)));
     if let Some(public_url) = &outline.public_url {
         checks.push(check_public_url(public_url).await);
+    }
+    checks
+}
+
+/// For each webhook starting a trail, whether the trail is saved: in the colony, read over `connected`, else in
+/// `local`, the directory of this machine's trails, which serves a conductor running here.
+pub(super) async fn check_webhook_trails(
+    webhooks: &[webhook::Webhook],
+    connected: Option<&Connected>,
+    local: &Path,
+) -> Vec<Check> {
+    let mut checks = Vec::new();
+    for hook in webhooks {
+        let Some(start) = &hook.trail else { continue };
+        let (check, trail) = (format!("webhook {} trail", hook.name), &start.trail);
+        let file = local.join(format!("{trail}.py"));
+        let colony = match connected {
+            Some(connected) => crate::trails::saved::get(&connected.js, trail).await.map_err(|e| format!("{e:#}")),
+            None => Err("not connected".to_owned()),
+        };
+        checks.push(match colony {
+            Ok(Some(_)) => Check::ok(check, format!("starts trail {trail}, saved in the colony")),
+            _ if file.is_file() => Check::ok(check, format!("starts trail {trail}, saved in {}", file.display())),
+            Ok(None) => Check::fail(
+                check,
+                format!(
+                    "starts trail {trail}, saved neither in the colony nor in {}: each event's run fails",
+                    local.display()
+                ),
+                vec![format!("ants trail save FILE --name {trail}")],
+            ),
+            Err(e) => Check::skip(
+                check,
+                format!("trail {trail} is not in {}, and the colony's saved trails are unread: {e}", local.display()),
+            ),
+        });
     }
     checks
 }

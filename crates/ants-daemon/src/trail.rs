@@ -7,6 +7,7 @@
 //! This module and its submodules alone name [`ants_trail`] in the daemon.
 
 mod answers;
+mod asking;
 mod children;
 mod control;
 mod driver;
@@ -24,6 +25,7 @@ mod schema;
 mod steps;
 mod store;
 mod tips;
+mod work;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -179,6 +181,9 @@ struct Inner {
     notes: Arc<dyn NotesStore>,
     /// The team directory, naming the leads agent(team=) steps go to; None when it cannot be named.
     teams: Option<DirectKv>,
+    /// The conductor's escalator, asking a human() step's question of the owner's assistant first; unset asks the
+    /// owner ([`Trails::with_escalator`]).
+    escalator: OnceLock<Arc<crate::escalation::Escalator>>,
     /// The runs not finished: running, waiting or stopped.
     runs: Mutex<HashMap<RunId, Arc<Slot>>>,
     /// The threads of steps, to the run waiting on them; or, once answered or given up, to the step's recipient, so
@@ -313,6 +318,7 @@ impl Trails {
             attempts,
             notes,
             teams,
+            escalator: OnceLock::new(),
             runs: Mutex::default(),
             threads: Mutex::default(),
             unrestored: Mutex::default(),

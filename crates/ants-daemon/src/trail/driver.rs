@@ -256,8 +256,9 @@ impl Trails {
         }
     }
 
-    /// Withdraw `call`'s step when the conductor sent it itself.
+    /// Withdraw `call`'s step when the conductor sent it itself; a human() step's question goes on to nobody.
     async fn withdraw_own(&self, header: &TrailRun, call: &PendingCall) {
+        self.end_question(call).await;
         if !call.sent || call.to != self.inner.ant || call.function != TrailFunction::Agent {
             return;
         }
@@ -534,7 +535,7 @@ impl Trails {
             let message = steps::envelope(&header, call, tips.as_ref()).map_err(|e| anyhow!(e))?;
             let message = self.bounded(&header, message);
             self.inner.store.put_step(&call.thread, &thread).await?;
-            (self.inner.outbox)(message).await?;
+            self.send_step(call, message).await?;
             {
                 let mut book = slot.book();
                 if let Some(pending) = book.pending.iter_mut().find(|pending| pending.message == call.message) {

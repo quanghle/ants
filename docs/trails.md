@@ -54,7 +54,7 @@ these names:
 | Name | What it does |
 |---|---|
 | `await agent(prompt, ant=None, capability=None, team=None, schema=None, label=None, tips=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), to the lead of the team `team` names (alone, without `ant` or `capability`; the step carries the team, as a message to a team does, and a team with no lead, nor any above it, no such team or a directory that cannot be read raises), or to the conductor itself. Returns the reply's text, or with `schema` (a JSON Schema, of which `type`, `properties`, `required`, `items`, `enum` and `additionalProperties: false` are checked, any other keyword passing unchecked) its JSON, asked for again at most twice on a mismatch. `tips` is the step's tip key ([Tips](#tips)). |
-| `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does; returns the answer's text. |
+| `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does, its assistant first ([Trust](#trust)); returns the answer's text. |
 | `await trail(name, args=None)` | One step, answered by a child run of the saved trail `name` with `args` as its input; returns its result ([Child runs](#child-runs-trail)). |
 | `await goto(trail=None, at=None, state=None)` | Ends the leg where called and goes on in `trail` (this one without it) at waypoint `at` (its start without it) with `state` as `args`; returns only by raising ([Routes](#routes-goto)). |
 | `phase(title)`, `log(text)`, `print()` | Notes on the run's thread; never wait. The record keeps a phase's first 1000 characters. |
@@ -70,6 +70,14 @@ two re-asks, a step's message withdrawn from its recipient's queue (`<ant> never
 reached. A step to an ant no daemon serves waits in that ant's queue, as any message does, until the run ends or a
 human stops it. An exception the script does not catch fails the run with its traceback, lines numbered as in the
 file (`trail.py`).
+
+With [worktrees](config.md#worktrees) on, each step's thread works in a checkout of its own, from the repository's
+`HEAD`, so a step does not see the commits of the steps before it. A reply whose thread's branch holds commits ends with
+`[ants] Branch NAME holds N commits not in the repository's HEAD.`; the latest such reply to an `agent()` step sets the
+run's work branch, kept in its record (`ants trail show RUN --json`, `work_branch`) and by its child runs, and each
+`agent()` step sent after it ends with `[ants] The work of this run's steps so far is on branch NAME, in the repository
+of ANT: this step works in a checkout of its own, so merge NAME to build on it.` The reply text a script gets keeps the
+`Branch` line.
 
 Each JSON value a run takes or makes nests at most 100 lists and dicts (arrays and objects): a run's args deeper are
 refused at its start, a call's arguments deeper (a goto's `state` among them, one level down) raise `TypeError` where
@@ -237,6 +245,10 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   unknown trail, is told to the thread's owner there. The entry's `limits` table (`steps`, `at_once`, `turns`, `wall`)
   sets what each run may spend, the firing carrying them; a limit left out takes its default, and one of 0 or over its
   maximum fails config loading. Such a run is untrusted ([Trust](#trust)).
+- **A webhook** with `trail = "NAME"` ([webhooks.md](webhooks.md#trail-runs), `ants webhook add --trail NAME`): each
+  event sends `ant`, the conductor, a message `Run of trail NAME for an event of webhook WEBHOOK.` carrying the trail,
+  its `args` with the event's text added as `args.text`, and its `limits`, started as a schedule's firing is, once per
+  event. Such a run is untrusted too.
 
   ```toml
   [[schedule]]
@@ -367,9 +379,14 @@ A run reports on the thread it started with, as its conductor:
 
 `ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s, each with the trail it started (its route
 once it went on by `goto()`); `ants trail show RUN` prints a run (its id or a unique start of one): state, phase,
-spending, args, its route (each leg's trail, waypoint, start and steps), its child runs with their states, the calls
-waiting and queued (none once the run is done or failed), and its journal; `--follow` follows it as `ants trail run
---follow` does. These need human credentials. In `ants chat`, `/trail runs` shows the same list in the pager, and
+spending, what it spent, args, its route (each leg's trail, waypoint, start and steps), its child runs with their
+states, the calls waiting and queued (none once the run is done or failed), and its journal; `--follow` follows it as
+`ants trail run --follow` does. What it spent is what its step threads spent, read from each ant's thread spend in
+`ants_sessions` as `ants spend --thread` reads it, in all rather than since a human's last message: tokens and cost in
+all and by ant, an ant a step's ant asked on the step's thread counting too (`spent on its step threads: N tokens, cost
+C (ANT N tokens, cost C; …)`), then the ants the run's `agent()` steps went to that counted none there, as an ant
+whose harness reports no spend (`counted no spend, as a harness reporting none: ANT, …`). A child run's steps count on
+its own record, and work an ant hands to a thread of its own counts on no step's. These need human credentials. In `ants chat`, `/trail runs` shows the same list in the pager, and
 `/trail show RUN` the run as `ants trail show RUN` prints it.
 
 ## Limits
@@ -471,6 +488,12 @@ those it conducts with `trail_status` and `stop_trail`, resumes none, and saves 
 `save_trail` and `remove_trail` ([auth.md](auth.md)). A `human()` step goes to the run's
 owner, and a step's thread keeps that owner, so replies and escalations of the step's recipient reach the human who owns
 the run.
+
+A `human()` step's questions go to the owner's assistant first, as an `ask_human` question does
+([architecture.md](architecture.md#escalations)), while one acts for the owner: the assistant's answer on the step's
+thread, in words (whatever `free_text` says), is the call's answer; passed on with `escalate`, or left unanswered past the conductor's
+`escalate_after`, the questions reach the owner as questions, whose answer then is. An answer with `answer_for_human`
+counts as the owner's as well. Once the step is answered, or given up, its questions go on to nobody.
 
 ## Tips
 

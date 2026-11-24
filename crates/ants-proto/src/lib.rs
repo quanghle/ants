@@ -181,7 +181,7 @@ pub use trails::{
     MAX_TRAIL_SCRIPT, MAX_TRAIL_WAYPOINTS, PendingCall, QueuedCall, RunState, SavedTrail, Saver, SpendsFrom,
     StepBounds, StepGrant, TRAIL_CLOCK_SKEW, TRAIL_RUN_RETENTION, TrailAction, TrailAnswering, TrailFunction, TrailLeg,
     TrailLimits, TrailOutcome, TrailParent, TrailReply, TrailRequest, TrailRun, TrailRunIndex, TrailSession,
-    TrailSource, TrailSpent, TrailStart, TrailStep, TrailStepThread, WaitingStep, leg_entry,
+    TrailSource, TrailSpent, TrailStart, TrailStep, TrailStepThread, WaitingStep, WorkBranch, leg_entry,
 };
 pub use trails::{
     Counts, FIND_TRAILS_LIMIT, Finder, Found, LATEST_RATINGS, MAX_FIND_TRAILS, MAX_RATING_TASK, MAX_RATING_WHY, Query,

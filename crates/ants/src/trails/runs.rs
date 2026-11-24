@@ -1,14 +1,16 @@
 //! The runs of trails, as their conductors keep them in [`TRAIL_RUNS_BUCKET`]: a human reads every conductor's, by
 //! batched direct gets.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::str::FromStr;
 
+use ants_daemon::limits::caps::Spent;
+use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::provider::Starter;
 use ants_proto::{
-    CallAnswer, GotoArgs, JournalEntry, PendingCall, QueuedCall, RatingOutcome, RunId, RunState, StepStage,
-    TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg, TrailName, TrailRating, TrailRun, TrailSession,
+    CallAnswer, GotoArgs, JournalEntry, PendingCall, QueuedCall, RatingOutcome, RunId, RunState, SESSIONS_BUCKET,
+    StepStage, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg, TrailName, TrailRating, TrailRun, TrailSession,
     TrailStepThread, UserId, Uuid, parse_trail_run_key, subject, trail_run_key, trail_session_key,
     trail_thread_steps_prefix,
 };
@@ -76,6 +78,81 @@ pub(crate) struct Detail {
     /// The conductor's ratings of the run, one per trail.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) ratings: Vec<TrailRating>,
+    /// What its step threads spent; None when it cannot be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) spend: Option<RunSpend>,
+}
+
+/// What the threads of a run's steps spent, as the daemons of the ants on them keep it in [`SESSIONS_BUCKET`]
+/// ([`crate::ants::spend`]): in all, whatever humans' messages there gave fresh allowances, and by ant, an ant a step's
+/// ant asked on its thread included; and the ants its steps went to that counted nothing there, as one whose harness
+/// reports no spend. A child run's steps count on its own record.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub(crate) struct RunSpend {
+    #[serde(flatten)]
+    pub(crate) total: Spent,
+    /// The ants that spent anything, by name.
+    pub(crate) by_ant: Vec<AntSpent>,
+    /// The ants its agent() steps went to that counted no spend on their threads.
+    pub(crate) uncounted: Vec<UserId>,
+}
+
+/// What one ant spent on a run's step threads.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct AntSpent {
+    pub(crate) ant: UserId,
+    #[serde(flatten)]
+    pub(crate) spent: Spent,
+}
+
+/// The run's spend from what each ant spent on each of its step threads, `spent`, the ants its agent() steps went to
+/// being `asked`.
+pub(super) fn run_spend(spent: &HashMap<ThreadId, Vec<(UserId, Spent)>>, asked: &BTreeSet<UserId>) -> RunSpend {
+    let mut by_ant: BTreeMap<UserId, Spent> = BTreeMap::new();
+    for (ant, s) in spent.values().flatten() {
+        *by_ant.entry(ant.clone()).or_default() += *s;
+    }
+    by_ant.retain(|_, s| s.tokens > 0 || s.cost > 0.0);
+    let mut total = Spent::default();
+    by_ant.values().for_each(|s| total += *s);
+    let uncounted = asked.iter().filter(|ant| !by_ant.contains_key(*ant)).cloned().collect();
+    let by_ant = by_ant.into_iter().map(|(ant, spent)| AntSpent { ant, spent }).collect();
+    RunSpend { total, by_ant, uncounted }
+}
+
+/// What the step threads of `run`, which `journal` and `pending` tell the calls of, spent: the threads its conductor
+/// recorded under the run's thread for it, each just before its step went out.
+async fn spend_of(
+    js: &jetstream::Context,
+    run: &TrailRun,
+    journal: &[JournalEntry],
+    pending: &[PendingCall],
+) -> Result<RunSpend> {
+    let prefix = trail_thread_steps_prefix(&run.conductor, &run.thread);
+    let filter = subject::kv(TRAIL_RUNS_BUCKET, format_args!("{prefix}*"));
+    let function = |call: u32| {
+        let answered = journal.iter().find(|e| e.call == call).map(|e| e.function);
+        answered.or_else(|| pending.iter().find(|c| c.call == call).map(|c| c.function))
+    };
+    let (mut threads, mut asked) = (HashSet::new(), BTreeSet::new());
+    for (key, value) in latest_in(js, TRAIL_RUNS_BUCKET, &filter).await? {
+        let Some(step) = key.strip_prefix(&prefix).and_then(|step| step.parse::<ThreadId>().ok()) else { continue };
+        let Some(marker) = parse::<TrailStepThread>(&key, &value).filter(|m| m.run == run.run) else { continue };
+        // A step sent anew keeps its call: a marker of no call known is one of a human() step only to the owner.
+        let to_ant = match function(marker.call) {
+            Some(function) => function == TrailFunction::Agent,
+            None => run.owner.as_ref() != Some(&marker.to),
+        };
+        if to_ant {
+            asked.insert(marker.to);
+        }
+        threads.insert(step);
+    }
+    if threads.is_empty() {
+        return Ok(RunSpend::default());
+    }
+    let kv = DirectKv::new(js, None, SESSIONS_BUCKET).await?;
+    Ok(run_spend(&crate::ants::spend::in_all_on(js, &kv, &threads).await?, &asked))
 }
 
 /// The run `run`, of whichever conductor keeps it.
@@ -164,7 +241,11 @@ pub(crate) async fn detail(js: &jetstream::Context, run: &RunId) -> Result<Detai
         tracing::warn!("not reading the run's ratings: {e:#}");
         Vec::new()
     });
-    Ok(Detail { run: header, pending, queued, journal, children, ratings })
+    let spend = spend_of(js, &header, &journal, &pending)
+        .await
+        .inspect_err(|e| tracing::warn!("not reading what the run spent: {e:#}"))
+        .ok();
+    Ok(Detail { run: header, pending, queued, journal, children, ratings, spend })
 }
 
 /// The session the conductor of `run` keeps: the calls the run waits on and those queued. None before its first.
@@ -294,7 +375,7 @@ fn children(children: &[TrailRun]) -> Vec<[String; 4]> {
 
 /// The run's header, limits, route, child runs, pending and queued calls and journal.
 pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
-    let Detail { run: r, pending, queued, journal, children: kids, ratings } = detail;
+    let Detail { run: r, pending, queued, journal, children: kids, ratings, spend } = detail;
     let mut out = match r.first_trail() {
         Some(trail) => format!("run {} of trail {trail}\n", r.run),
         None => format!("run {} of an inline script\n", r.run),
@@ -352,6 +433,7 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
         ants_proto::duration::format(l.compute()),
         l.session_bytes / 1024
     );
+    out.push_str(&spend.as_ref().map_or_default(spent));
     let args = r.route.first().map_or(&Value::Null, |leg| &leg.args);
     if !args.is_null() {
         let _ = writeln!(out, "args: {}", one_line(&args.to_string(), 200));
@@ -402,6 +484,29 @@ fn waits_on(call: &PendingCall) -> String {
         None if call.asked => format!("to {}, waiting on a human it asked", call.to),
         None => format!("to {}", call.to),
     }
+}
+
+/// What a run's step threads spent, in all and by ant, and the ants of its steps that counted none.
+fn spent(spend: &RunSpend) -> String {
+    let RunSpend { total, by_ant, uncounted } = spend;
+    let mut out = format!("spent on its step threads: {} tokens, cost {:.2}", total.tokens, total.cost);
+    match &by_ant[..] {
+        [] => {}
+        [one] => {
+            let _ = write!(out, ", all by {}", one.ant);
+        }
+        all => {
+            let by: Vec<String> =
+                all.iter().map(|a| format!("{} {} tokens, cost {:.2}", a.ant, a.spent.tokens, a.spent.cost)).collect();
+            let _ = write!(out, " ({})", by.join("; "));
+        }
+    }
+    out.push('\n');
+    if !uncounted.is_empty() {
+        let names: Vec<&str> = uncounted.iter().map(UserId::as_str).collect();
+        let _ = writeln!(out, "counted no spend, as a harness reporting none: {}", names.join(", "));
+    }
+    out
 }
 
 /// A row per call of the journal of `run`: its function, whom it asked, what, and its answer.

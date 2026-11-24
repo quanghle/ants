@@ -24,7 +24,7 @@ use self::ants::{
 use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
 use self::server::{check_resolver, check_storage, check_store_account, reach};
-use self::services::{check_services, check_webhooks};
+use self::services::{check_services, check_webhook_trails, check_webhooks};
 use self::teams::{check_team_changes, check_teams};
 pub use self::trails::trail_worker;
 use self::trails::{check_runs, check_worker};
@@ -205,12 +205,16 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(reactions);
     checks.extend(trail_saves);
     checks.extend(team_changes);
+    let webhooks = setup.webhooks.exists().then(|| webhook::Config::read(&setup.webhooks).ok()).flatten();
+    let webhooks = webhooks.as_ref().map_or_default(|c| c.webhooks.as_slice());
     if let Some(loaded) = &loaded {
-        let webhooks = setup.webhooks.exists().then(|| webhook::Config::read(&setup.webhooks).ok()).flatten();
-        checks.extend(check_bypassed(loaded, webhooks.as_ref().map_or_default(|c| c.webhooks.as_slice())));
+        checks.extend(check_bypassed(loaded, webhooks));
     }
     checks.push(worker);
     checks.extend(check_runs(connected.as_ref(), chrono::Utc::now()).await);
+    if let Ok(local) = crate::trails::saved::local_dir() {
+        checks.extend(check_webhook_trails(webhooks, connected.as_ref(), &local).await);
+    }
     checks.extend(check_teams(connected.as_ref(), setup, chrono::Utc::now()).await);
     checks.push(resolver);
     // After the CLI's connection, which has the hub load the bus's account if no member connected yet.

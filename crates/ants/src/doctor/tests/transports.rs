@@ -1,4 +1,5 @@
-//! Tests of the doctor's transport checks: dev tunnels, HTTP bridges, the webhook config and exec sinks.
+//! Tests of the doctor's transport checks: dev tunnels, HTTP bridges, the webhook config, the trails webhooks start
+//! and exec sinks.
 
 use super::*;
 
@@ -341,4 +342,52 @@ async fn the_programs_of_exec_sinks_must_be_there_to_run() {
     let ready = format!("human alice notify #1: {} is executable", program.display());
     assert_eq!(commands(&check_webhooks(&path).await), [(Status::Ok, ready), (Status::Warn, off_path)]);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_webhook_starting_a_trail_needs_the_trail_saved_in_the_colony_or_on_this_machine() {
+    let Some(server) = Server::start() else { return };
+    let alice = ants_test_support::user("alice");
+    let creds = server.creds_as(&alice, Role::Human);
+    let (_, js) = server.connect_as(&alice, Role::Human).await;
+    let rights = Rights::from_creds(Some(&creds)).unwrap();
+    hub::init(&js, |s| rights.may_publish(s)).await.unwrap();
+    let connected = Connected { js: js.clone(), rights, colony: Ok(Vec::new()) };
+    let dir = server.dir();
+    let hook = |name: &str| {
+        format!("[[webhook]]\nname = \"{name}\"\nauth = \"bearer\"\nsecret_env = \"S\"\nant = \"dev-a\"\n")
+    };
+    let text = format!("{}trail = \"triage\"\n{}", hook("triage"), hook("plain"));
+    let config = webhook::Config::parse(&text, &dir.join("webhooks.toml"), dir, |_| Some("s".to_owned())).unwrap();
+    let local = dir.join("trails");
+    let shown = |checks: Vec<Check>| -> Vec<(String, Status, String, Vec<String>)> {
+        checks.into_iter().map(|c| (c.check, c.status, c.detail, c.fix)).collect()
+    };
+
+    let missing =
+        format!("starts trail triage, saved neither in the colony nor in {}: each event's run fails", local.display());
+    let fix = vec!["ants trail save FILE --name triage".to_owned()];
+    assert_eq!(
+        shown(check_webhook_trails(&config.webhooks, Some(&connected), &local).await),
+        [("webhook triage trail".to_owned(), Status::Fail, missing, fix)],
+        "the plain webhook starts none"
+    );
+    let unread = check_webhook_trails(&config.webhooks, None, &local).await;
+    assert_eq!(unread[0].status, Status::Skip, "{unread:#?}");
+
+    std::fs::create_dir_all(&local).unwrap();
+    let script = "meta = {\"name\": \"triage\", \"description\": \"Triage it\", \"phases\": []}\nagent(\"triage\")\n";
+    let file = local.join("triage.py");
+    std::fs::write(&file, script).unwrap();
+    let here = format!("starts trail triage, saved in {}", file.display());
+    for connected in [Some(&connected), None] {
+        let checks = shown(check_webhook_trails(&config.webhooks, connected, &local).await);
+        assert_eq!((checks[0].1, &checks[0].2), (Status::Ok, &here));
+    }
+
+    let saved = crate::trails::saved::read(&file, None, &alice, chrono::Utc::now()).unwrap();
+    crate::trails::saved::put(&js, &saved).await.unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let checks = shown(check_webhook_trails(&config.webhooks, Some(&connected), &local).await);
+    assert_eq!((checks[0].1, checks[0].2.as_str()), (Status::Ok, "starts trail triage, saved in the colony"));
 }

@@ -38,6 +38,10 @@ expression: value
       },
       "channel": "backend"
     },
+    "work_branch": {
+      "name": "ants/dev-a/019a7d2c-0000-7000-8000-000000000002",
+      "by": "dev-a"
+    },
     "limits": {
       "steps": 20,
       "concurrency": 4,
@@ -87,6 +91,10 @@ expression: value
         "user": "alice"
       },
       "channel": "backend"
+    },
+    "work_branch": {
+      "name": "ants/dev-a/019a7d2c-0000-7000-8000-000000000002",
+      "by": "dev-a"
     },
     "limits": {
       "steps": 20,
@@ -138,6 +146,10 @@ expression: value
       },
       "channel": "backend"
     },
+    "work_branch": {
+      "name": "ants/dev-a/019a7d2c-0000-7000-8000-000000000002",
+      "by": "dev-a"
+    },
     "limits": {
       "steps": 20,
       "concurrency": 4,
@@ -188,6 +200,10 @@ expression: value
         "user": "alice"
       },
       "channel": "backend"
+    },
+    "work_branch": {
+      "name": "ants/dev-a/019a7d2c-0000-7000-8000-000000000002",
+      "by": "dev-a"
     },
     "limits": {
       "steps": 20,

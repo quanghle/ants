@@ -258,6 +258,7 @@ Trade-offs of worktrees:
 - **Disk:** one full checkout per thread, plus build outputs (`target/`, `node_modules`) each thread builds from scratch, for up to `max_harnesses` live threads and every thread whose session has not expired.
 - **Branches:** a branch `ants/<ant>/<thread>` per thread in the repository; branches with unmerged commits remain after their worktree is removed until merged or deleted by hand.
 - **Starting point:** a worktree starts from `HEAD` without uncommitted changes of the workdir, and edits land on the thread's branch, not in the workdir, until merged; tools keyed by the workdir path (trust prompts, per-directory config, caches) see a new directory per thread.
+- **Passing work on:** a reply whose thread's branch holds commits `HEAD` lacks ends with `[ants] Branch ants/<ant>/<thread> holds N commits not in the repository's HEAD.`; a `handoff` from such a thread ends its message with `[ants] The work so far is on branch ants/<ant>/<thread>, N commits not in the repository's HEAD: this thread works in a checkout of its own, so merge ants/<ant>/<thread> to build on it.`, and a trail's later `agent()` steps name the branch the same way ([trails.md](trails.md#the-script)). Nothing merges it: the thread taking the work on merges the branch into its own.
 
 ## Ant templates
 

@@ -1,5 +1,5 @@
-//! Tests of serving webhooks: delivery once, channel mentions, reloads, refusals without the hub, timeouts and
-//! stops.
+//! Tests of serving webhooks: delivery once, the trail runs events start, channel mentions, reloads, refusals without
+//! the hub, timeouts and stops.
 
 use super::*;
 
@@ -147,6 +147,43 @@ async fn an_event_reaches_its_ant_once_and_a_refused_one_nothing() {
     let marker = seen.get(webhook_marker_key(&github)).await.unwrap().expect("it publishes its version");
     let marker: ants_proto::Serving = serde_json::from_slice(&marker).unwrap();
     assert_eq!(marker, ants_proto::Serving::here(ants_daemon::colony::machine().await), "it publishes its version");
+}
+
+#[tokio::test]
+async fn an_event_of_a_webhook_naming_a_trail_asks_its_ant_for_one_run_with_the_text_and_a_repeat_for_none() {
+    let Some((server, js, secret)) = hub().await else { return };
+    let triage = p("triage");
+    let creds = creds(&server, &triage, Destination::Ant(p("dev-a")));
+    let config = server.dir().join("webhooks.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[webhook]]\nname = \"triage\"\ncreds = {creds:?}\nauth = \"hmac-sha256\"\nsecret_file = {secret:?}\n\
+                 id = \"header:X-GitHub-Delivery\"\nant = \"dev-a\"\nowner = \"alice\"\ntext = \"issue {{json:/n}}\"\n\
+                 trail = \"triage\"\nargs = {{ repo = \"app\" }}\nlimits = {{ steps = 100 }}\n"
+        ),
+    )
+    .unwrap();
+    let (_ingress, addr) = start(&config, &server.url).await;
+    let body = br#"{"n":7}"#;
+    let event = [("X-GitHub-Delivery", "d1"), ("X-Hub-Signature-256", &signed(body))];
+    let first = deliver(addr, "/hooks/triage", &event, body).await;
+    assert_eq!(first.status, 202, "{}", first.body);
+    let again = request(addr, "POST", "/hooks/triage", &event, body).await;
+    assert_eq!((again.status, again.json()["duplicate"].as_bool()), (200, Some(true)));
+    let big = format!("{{\"n\":\"{}\"}}", "x".repeat(ants_proto::MAX_TRAIL_ARGS));
+    let big_event = [("X-GitHub-Delivery", "d2"), ("X-Hub-Signature-256", &signed(big.as_bytes()))];
+    let refused = request(addr, "POST", "/hooks/triage", &big_event, big.as_bytes()).await;
+    assert_eq!(refused.status, 413, "args larger than a run takes: {}", refused.body);
+
+    let messages: Vec<Envelope> = stored(&js, &subject::webhook_inbox(&p("dev-a"), &triage)).await;
+    let [message] = &messages[..] else { panic!("one message: {messages:?}") };
+    assert_eq!((message.owner.as_ref(), message.webhook), (Some(&p("alice")), true));
+    assert_eq!(message.text, "Run of trail triage for an event of webhook triage.");
+    let start = message.trail_start.as_deref().expect("the run to start");
+    assert_eq!(start.trail.as_str(), "triage");
+    assert_eq!(start.args, serde_json::json!({"repo": "app", "text": "issue 7"}), "the event's text an argument");
+    assert_eq!(start.limits.steps, 100);
 }
 
 #[tokio::test]

@@ -11,16 +11,18 @@ use super::schema;
 
 /// Whether `message`, which passed [`Envelope::check_subject`], answers `call`: `answerer` is the step's recipient,
 /// the message is on the step's thread, and it is neither a step, a notice ([`ants_proto::NoticeKind`]), an escalation
-/// nor an invitation to rate a run ([`Envelope::rating_of`]), as the conductor sends itself on the thread of a step to
-/// itself that a run started there reports on. `answerer` is the message's sender, or the human its
-/// [`Envelope::on_behalf_of`] names once the conductor honours the sender as that human's assistant, as for an answer
-/// to ask_human.
+/// but that of the question its sender, the answerer's assistant, was asked first, nor an invitation to rate a run
+/// ([`Envelope::rating_of`]), as the conductor sends itself on the thread of a step to itself that a run started there
+/// reports on. `answerer` is the message's sender, or the human its [`Envelope::on_behalf_of`] names, or whose
+/// question it answers, once the conductor honours the sender as that human's assistant, as for an answer to
+/// ask_human.
 pub(super) fn answered_by(call: &PendingCall, message: &Envelope, answerer: &UserId) -> bool {
+    let assisted = |e: &ants_proto::Escalation| e.assistant_of.as_ref() == Some(answerer) && e.is_leader(&message.from);
     message.thread_id == call.thread
         && *answerer == call.to
         && message.trail_step.is_none()
         && message.notice.is_none()
-        && message.escalation.is_none()
+        && message.escalation.as_deref().is_none_or(assisted)
         && message.rating_of.is_none()
 }
 
@@ -194,7 +196,11 @@ pub(super) fn envelope(run: &TrailRun, pending: &PendingCall, tips: Option<&TipB
             let args = AgentArgs::of(&pending.args)?;
             let tips = tips.and_then(|board| tips_block(board, &step, &args.prompt, run.origin.trusted(), Utc::now()));
             let team = args.team.as_deref().and_then(|team| team.parse().ok());
-            Envelope { team, ..Envelope::on_thread(thread, from, to, prompt(&args, tips.as_deref())) }
+            let text = match super::work::work_line(run) {
+                Some(work) => format!("{}\n\n{work}", prompt(&args, tips.as_deref())),
+                None => prompt(&args, tips.as_deref()),
+            };
+            Envelope { team, ..Envelope::on_thread(thread, from, to, text) }
         }
         TrailFunction::Human => Envelope::asking(thread, from, to, crate::mcp::asked_questions(pending.args.clone())?),
         TrailFunction::Trail => return Err("a trail() call sends no message".to_owned()),
@@ -240,10 +246,11 @@ pub(super) fn taken(pending: &PendingCall, reply: &Envelope) -> Taken {
 }
 
 /// The answer of a human to the questions of `pending`, as ask_human gives it: for one question the option picked
-/// or the text typed, for several one `title: answer` line each; the reply's text when it answers otherwise.
+/// or the text typed, for several one `title: answer` line each; the reply's text when it answers otherwise. The
+/// questions asked on the step's thread are the step's, as first sent or passed on by the owner's assistant.
 fn human_answer(pending: &PendingCall, reply: &Envelope) -> String {
     let questions = crate::mcp::asked_questions(pending.args.clone()).ok();
-    let answer = reply.answer.as_ref().filter(|answer| answer.question == pending.message);
+    let answer = reply.answer.as_ref();
     let words = questions
         .as_ref()
         .zip(answer)

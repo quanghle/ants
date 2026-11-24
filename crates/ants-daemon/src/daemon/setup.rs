@@ -140,6 +140,7 @@ pub(super) async fn trails(bus: Bus<'_>, services: &Services) -> Option<Trails> 
     };
     match Trails::new(conducting).await {
         Ok(trails) => {
+            trails.with_escalator(services.escalator.clone());
             trails.restore().await;
             services.mcp.with_trails(trails.clone());
             Some(trails)

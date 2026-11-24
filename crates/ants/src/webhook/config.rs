@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ants_daemon::bus;
 use ants_daemon::schedule::Mentions;
-use ants_proto::{ChannelId, Destination, JsDomain, UserId};
+use ants_proto::{ChannelId, Destination, JsDomain, TrailName, TrailStart, UserId};
 use anyhow::{Context as _, Result, anyhow, bail};
 use data_encoding::BASE64;
 use hyper::http::HeaderName;
@@ -35,6 +35,9 @@ pub(super) struct File {
     humans: Vec<notify::HumanEntry>,
 }
 
+/// The argument of a run a webhook's event starts that carries the event's text.
+pub(super) const TEXT_ARG: &str = "text";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Entry {
@@ -55,6 +58,9 @@ pub(super) struct Entry {
     owner: Option<UserId>,
     text: Option<String>,
     allow: Option<Vec<String>>,
+    trail: Option<TrailName>,
+    args: Option<serde_json::Map<String, serde_json::Value>>,
+    limits: Option<ants_daemon::trail::AskedLimits>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -95,6 +101,9 @@ pub struct Webhook {
     pub(super) text: Vec<Piece>,
     /// The tool rules the threads it starts are narrowed to; None for [`ants_proto::WEBHOOK_ALLOW`].
     pub(super) allow: Option<Vec<String>>,
+    /// The saved trail each event starts, with the ant as its conductor, under the limits the entry gives and with
+    /// its args, to which the event's text is added as `text`; None to prompt the ant with the text.
+    pub trail: Option<TrailStart>,
 }
 
 #[derive(PartialEq)]
@@ -379,8 +388,27 @@ impl Webhook {
         if let Some(allow) = &entry.allow {
             ants_daemon::Allowlist::parse(allow)?;
         }
+        let trail = match entry.trail {
+            None if entry.args.is_some() => bail!("args go with trail only"),
+            None if entry.limits.is_some() => bail!("limits go with trail only"),
+            None => None,
+            Some(_) if !matches!(destination, Destination::Ant(_)) => {
+                bail!("a webhook starting a trail names the ant conducting its runs, not a channel")
+            }
+            Some(_) if entry.allow.is_some() => {
+                bail!("allow goes without trail: a trail's steps are narrowed as a webhook's threads are")
+            }
+            Some(_) if entry.args.as_ref().is_some_and(|args| args.contains_key(TEXT_ARG)) => {
+                bail!("args.{TEXT_ARG} is the event's text: name the argument otherwise")
+            }
+            Some(trail) => {
+                let args = serde_json::Value::Object(entry.args.unwrap_or_default());
+                let limits = entry.limits.unwrap_or_default().limits().map_err(|e| anyhow!("limits: {e}"))?;
+                Some(TrailStart { trail, args, limits })
+            }
+        };
         let (owner, allow) = (entry.owner, entry.allow);
-        Ok(Self { name: entry.name, creds, auth, id, destination, mentions, owner, text, allow })
+        Ok(Self { name: entry.name, creds, auth, id, destination, mentions, owner, text, allow, trail })
     }
 
     fn check_creds(&self) -> Result<()> {

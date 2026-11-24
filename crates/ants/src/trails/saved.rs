@@ -118,7 +118,7 @@ pub(crate) async fn put(js: &jetstream::Context, trail: &SavedTrail) -> Result<O
 }
 
 /// The colony's trail `name`.
-pub(super) async fn get(js: &jetstream::Context, name: &TrailName) -> Result<Option<SavedTrail>> {
+pub(crate) async fn get(js: &jetstream::Context, name: &TrailName) -> Result<Option<SavedTrail>> {
     let found = latest_in(js, TRAILS_BUCKET, &subject::kv(TRAILS_BUCKET, name)).await?;
     Ok(found.iter().find_map(|(key, payload)| parse(key, payload)))
 }

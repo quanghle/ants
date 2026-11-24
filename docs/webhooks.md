@@ -37,11 +37,22 @@ creds = "gitlab.creds"
 auth = "standard-webhooks"                    # webhook-id, webhook-timestamp, webhook-signature (v1,<base64> ...)
 secret_file = "gitlab.secret"                 # the signing secret: whsec_<base64>, such as GitLab's signing token
 tolerance = "5m"                              # how far webhook-timestamp may be from now (default 5m, 1s to 1d)
+
+[[webhook]]
+name = "triage"                               # ants webhook add triage --to dev-a --preset github --trail triage
+creds = "triage.creds"
+auth = "hmac-sha256"
+secret_file = "triage.secret"
+id = "header:X-GitHub-Delivery"
+ant = "dev-a"                                 # the run's conductor
+trail = "triage"                              # instead of prompting the ant: start this saved trail at each event
+args = { repo = "acme/app" }                  # optional: the run's JSON args, given the event's text as `text`
+limits = { steps = 100, wall = "2d" }         # optional: what each run may spend (steps, at_once, turns, wall)
 id = "header:webhook-id"                      # the default with standard-webhooks
 ant = "dev-a"
 ```
 
-- **Auth & HTTP responses:** `hmac-sha256` (`signature_header`), `bearer` (`Authorization: Bearer <secret>`), `token` (`token_header`, e.g. `X-Gitlab-Token`) and `standard-webhooks` compare secrets and signatures in constant time (`401` on mismatch). Limits: `256 KiB` body (`413`), `15s` request timeout, `64` concurrent requests (`503` with `Retry-After: 5` when overloaded or NATS cannot store within 5 s; nothing buffers locally). Returns `202` (`{"thread": "...", "duplicate": false}`) when stored, `200` (`"duplicate": true`) on repeat, `400` bad JSON/ID, `404` unknown hook, `405` non-`POST`, `415` non-UTF-8 `{body}`.
+- **Auth & HTTP responses:** `hmac-sha256` (`signature_header`), `bearer` (`Authorization: Bearer <secret>`), `token` (`token_header`, e.g. `X-Gitlab-Token`) and `standard-webhooks` compare secrets and signatures in constant time (`401` on mismatch). Limits: `256 KiB` body (`413`), `15s` request timeout, `64` concurrent requests (`503` with `Retry-After: 5` when overloaded or NATS cannot store within 5 s; nothing buffers locally). Returns `202` (`{"thread": "...", "duplicate": false}`) when stored, `200` (`"duplicate": true`) on repeat, `400` bad JSON/ID, `404` unknown hook, `405` non-`POST`, `413` for a webhook starting a trail whose event's text makes the run's args over 64 KiB, `415` non-UTF-8 `{body}`.
 - **Standard Webhooks:** `auth = "standard-webhooks"` checks [Standard Webhooks](https://www.standardwebhooks.com) signatures, such as those of a GitLab (19.0+) signing token: `webhook-signature` lists space-separated `v1,<base64>` HMAC-SHA256 signatures of `<webhook-id>.<webhook-timestamp>.<body>`, keyed with the base64 of the secret after `whsec_` (the prefix is optional), and any one matching passes; other versions (`v1a`) are ignored. A missing `webhook-id` or `webhook-signature`, or a `webhook-timestamp` (Unix seconds) further than `tolerance` before or after now, answers `401` before the body is read. `id` defaults to `header:webhook-id`, so a request replayed within the tolerance is a duplicate.
 - **Deduplication & marker:** deduplicates for 7 d via `<webhook>.<hash>` in `ants_webhooks` plus 24 h `Nats-Msg-Id: webhook.<webhook>.<hash>`. Publishes `<webhook>.webhook` (`{machine, version, perms}`) on connect and hourly, for `ants doctor`; it says nothing of what the sender is.
 - **Subjects:** events go to `ants.inbox.<ant>.<webhook>.webhook` or `ants.chan.<channel>.<webhook>.webhook`, subjects only a webhook's credentials (and humans') publish on and no ant's, so daemons take them as a webhook's, untrusted, whatever `ants_webhooks` holds ([auth.md](auth.md#wire-acls-and-verification-invariants)).
@@ -51,12 +62,21 @@ ant = "dev-a"
 
 ### Trail runs
 
-A message from a webhook's credentials may start a [trail](trails.md) run instead of prompting its ant, as a schedule's
-firing does ([config.md](config.md#schedules)): it carries the saved trail, its `args` and the run's limits, and the
-ant's daemon conducts the run on the message's new thread, untrusted as the webhook's threads are
-([trails.md](trails.md#trust)). `ants webhook serve` sends no such message, but the credentials themselves may: the
-conductor takes the limits a firing asks for up to the maxima ([trails.md](trails.md#limits): 500 steps, 2000 turns,
-7 days), where a plain message of the same sender spends at most 8 turns. Whoever holds a webhook's or a schedule's
+A `[[webhook]]` naming a saved `trail` starts a [trail](trails.md) run at each event instead of prompting its ant, as a
+schedule's firing does ([config.md](config.md#schedules)): `ants webhook serve` sends the ant a message carrying the
+trail, its `args` with the event's text (the `text` template's) added as `args.text`, and the entry's `limits`, and the
+ant's daemon conducts the run on the message's new thread, owned by `owner` (else the default human) and untrusted as
+the webhook's threads are ([trails.md](trails.md#trust)). The run takes the message's id, so an event delivered again
+starts no second run, and a repeated event, a duplicate, sends no message at all; an event whose text makes the args
+over 64 KiB, the most a run takes, is refused with `413`. `limits` takes `steps` (default 50, at
+most 500), `at_once` (4, at most 16), `turns` (200, at most 2000) and `wall` (`24h`, at most `7d`), each left out taking
+its default. `args` or `limits` without `trail`, `args.text`, a limit of 0 or over its maximum, an unknown key in
+`limits`, `trail` with `channel`, and `trail` with `allow` (the run's steps are narrowed as a webhook's threads are) fail
+config loading; a run that cannot start, such as for a trail not saved, is told to the owner on that thread, and
+`ants doctor` checks that each such trail is saved, in the colony or in `~/.ants/trails` on its machine. Any message of
+a webhook's credentials may carry such a start, not only those of `ants webhook serve`: the conductor takes the limits a
+firing asks for up to the maxima ([trails.md](trails.md#limits): 500 steps, 2000 turns, 7 days), where a plain message
+of the same sender spends at most 8 turns. Whoever holds a webhook's or a schedule's
 credentials may so start a run of any saved trail on any ant those credentials reach, with any args, under limits of
 their choosing: such credentials are the operator's to guard, as the secrets of `ants webhook serve` are. Each step of
 the run still counts against the spending caps of the ant answering it
@@ -70,7 +90,11 @@ the run still counts against the spending caps of the ant answering it
 ants webhook add github --to dev-a --preset github --js-domain hub
 ants webhook add alerts --channel ops --preset grafana
 ants webhook add gitlab --to dev-a --preset gitlab --signing-token
+ants webhook add triage --to dev-a --preset github --trail triage
 ```
+
+`--trail NAME`, with `--to`, lists the webhook as starting a run of the saved trail `NAME` at each event
+([Trail runs](#trail-runs)); its `args` and `limits` go into the entry by hand.
 
 `--secret-file FILE` (its first line; `-` for standard input) or `--secret-env VAR` takes the secret from there instead of making a new one, copied to `<name>.secret`. `--preset gitlab --signing-token` checks GitLab's signing token (`auth = "standard-webhooks"`, `id = "header:webhook-id"`) rather than a secret token. GitLab generates that token (Settings > Webhooks > Generate signing token, shown once): without `--secret-file` or `--secret-env`, the command prints the URL to set in GitLab and reads the pasted token from the terminal without echo. A token that is no `whsec_<base64>` is refused before anything is written.
 

@@ -186,6 +186,7 @@ impl Mcp {
             provided: Provided::default(),
             trails: OnceLock::new(),
             dreams: OnceLock::new(),
+            worktrees: OnceLock::new(),
             served: Mutex::default(),
             settling: tokio::sync::Mutex::default(),
             state_path,
@@ -297,6 +298,12 @@ impl Mcp {
     /// Take `provider` for the ant's provider, which [`Mcp::provider`] gives.
     pub fn with_provider(&self, provider: Connected) {
         let _ = self.hub.provided.provider.set(provider);
+    }
+
+    /// Name to `handoff`'s new prompt the branch of the handing thread's worktree among `worktrees`, when it holds
+    /// commits the repository's `HEAD` lacks.
+    pub fn with_worktrees(&self, worktrees: Arc<crate::worktrees::Worktrees>) {
+        let _ = self.hub.worktrees.set(worktrees);
     }
 
     /// Reach the ant's trail runs through `trails` for `run_trail`, `trail_status` and `stop_trail`, the trails' tips
@@ -488,6 +495,8 @@ struct Hub {
     trails: OnceLock<crate::trail::Trails>,
     /// The ant's dreams, when its provider is sense ([`Mcp::with_dreams`]).
     dreams: OnceLock<crate::sense::Dreams>,
+    /// The worktrees the ant's threads work in, each in its own ([`Mcp::with_worktrees`]).
+    worktrees: OnceLock<Arc<crate::worktrees::Worktrees>>,
     /// The provider's tools as listed last.
     served: Mutex<provider::Served>,
     /// Held while a thread's origin is settled or read back, so none is lost to another.
