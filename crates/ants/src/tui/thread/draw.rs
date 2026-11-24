@@ -1,7 +1,9 @@
 //! Drawing the thread view: its cards, the conversation scrolled as the keys left it, and the side panel.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 
+use ants_proto::UserId;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -138,13 +140,20 @@ impl Page {
         (picks, range)
     }
 
-    /// The conversation's border title in `room` columns: the thread's title, cut to leave room for its channels.
+    /// The conversation's border title in `room` columns: the thread's title, cut to leave room for its channels and
+    /// the teams messages on it went through.
     fn title(&self, data: &Data, room: usize) -> String {
         let summary = data.live.summary(&self.history.thread);
-        let channels = summary.filter(|s| !s.channels.is_empty()).map_or_else(String::new, |s| {
+        let mut channels = summary.filter(|s| !s.channels.is_empty()).map_or_else(String::new, |s| {
             let channels: Vec<String> = s.channels.iter().map(|c| format!("#{c}")).collect();
             format!(" · {}", channels.join(" "))
         });
+        let mut teams: BTreeSet<&UserId> = summary.into_iter().flat_map(|s| &s.teams).collect();
+        teams.extend(self.history.entries.iter().filter(|e| !e.forged).filter_map(|e| e.team.as_ref()));
+        if !teams.is_empty() {
+            let teams: Vec<&str> = teams.into_iter().map(UserId::as_str).collect();
+            channels = format!("{channels} · via team {}", teams.join(", "));
+        }
         let title =
             style::fit(&data.title(&self.history.thread), room.saturating_sub(channels.chars().count()).max(10));
         format!(" {} ", style::fit(&format!("{title}{channels}"), room))

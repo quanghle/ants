@@ -391,6 +391,22 @@ pub(super) const CHANNEL: &[Entry] = &[
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];
 
+pub(super) const TEAM: &[Entry] = &[
+    Entry::new(UP_DOWN, "↑↓", "member", "select a member of the team's tree", 10, always),
+    Entry::new(&[Key::Enter], "Enter", "open", "open the selected member: an ant's view or a team's", 5, always),
+    Entry::new(
+        &[Key::Char('a')],
+        "a",
+        "ask",
+        "write to the team in the command bar: the message goes to its lead",
+        6,
+        always,
+    ),
+    Entry::new(&[Key::Char('M')], "M", "manage", "manage the team's members, lead, owner and description", 13, always),
+    Entry::new(PAGES, "PgUp PgDn", "page", "move the selection further", 92, always),
+    Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
+];
+
 pub(super) const DM: &[Entry] = &[
     Entry::new(UP_DOWN, "↑↓", "thread", "select a thread", 10, always),
     Entry::new(&[Key::Enter], "Enter", "open", "open the selected thread", 5, always),

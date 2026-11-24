@@ -37,7 +37,6 @@ const MACHINE: &str = "sets up or checks the machine running it";
 const MOVING: &str = "moves an ant between machines: files, config file and provider data of the machine running it";
 const ASSISTANT: &str = "ants-waemb";
 const SEND: &str = "the command bar: `@user TEXT` starts a thread, a text alone replies on the open one";
-const TEAMS: &str = "ants-n0szm.5";
 const POST: &str = "the command bar: `#channel TEXT` posts to a channel";
 
 /// Each command of `ants` by its words (`trail run`), or the commands starting with the same words (`auth`), and where
@@ -79,13 +78,13 @@ const CLI: &[(&str, Chat)] = &[
     ("channel read", Shown("a channel's view, which a channel of the nav opens, marking its posts read")),
     ("channel delete", Missing("ants-njfyx")),
     ("channel serve", Exempt(SERVICE)),
-    ("team create", Missing(TEAMS)),
-    ("team set", Missing(TEAMS)),
-    ("team add", Missing(TEAMS)),
-    ("team remove", Missing(TEAMS)),
-    ("team delete", Missing(TEAMS)),
-    ("team list", Missing(TEAMS)),
-    ("team show", Missing(TEAMS)),
+    ("team create", Missing("ants-n0szm.5")),
+    ("team set", Press(View::Team, Key::Char('M'), "manage")),
+    ("team add", Press(View::Team, Key::Char('M'), "manage")),
+    ("team remove", Press(View::Team, Key::Char('M'), "manage")),
+    ("team delete", Missing("ants-n0szm.5")),
+    ("team list", Shown("the nav's teams, as a forest, each with how many ants it holds")),
+    ("team show", Shown("a team's view, which a team of the nav opens: its header and members tree")),
     ("notes", Slash("notes")),
     ("react", Slash("react")),
     ("answer", Slash("answer")),
@@ -190,8 +189,8 @@ const MCP: &[(&str, Chat)] = &[
     ("read_attachment", Press(View::Thread, Key::Char('o'), "open file")),
     ("post_channel", Shown(POST)),
     ("manage_channel", Press(View::Channel, Key::Char('M'), "members")),
-    ("list_teams", Missing("ants-n0szm.5")),
-    ("manage_team", Missing("ants-n0szm.5")),
+    ("list_teams", Shown("the nav's teams, and a team's view with its members tree")),
+    ("manage_team", Press(View::Team, Key::Char('M'), "manage")),
     ("escalate", Press(View::Home, Key::Char('g'), "grant")),
     ("decide_approval", Slash("approve reject")),
     ("request_ant", Slash("add")),

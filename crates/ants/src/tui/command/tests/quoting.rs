@@ -23,7 +23,8 @@ fn gt_in_a_thread_replies_to_the_selected_message_quoting_it_and_mentioning_its_
     typed(&mut m, "why staging?");
     let quote =
         Some(Quoted { id: ids[1], quote: ants_proto::Quote::new(user("dev-a"), "deployed to staging"), sealed: false });
-    let job = Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: "why staging?".into(), quote };
+    let job =
+        Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: "why staging?".into(), quote, team: None };
     let sent = Some(Action::Run(job.clone(), "@dev-a why staging?".into()));
     assert_eq!(m.key(Key::Enter, at(3)), sent, "on the thread");
     assert_eq!(m.ui.bar.quoting, None, "sent once");

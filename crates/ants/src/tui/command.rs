@@ -38,7 +38,7 @@ const PASTE_ATTACH: usize = 64 * 1024;
 /// Send the note `text` on `request` to its ant on its thread, as any message of the human's there.
 pub fn note_job(request: &ApprovalRequest, text: &str) -> Job {
     let (to, thread) = (request.ant.clone(), Some(request.thread_id.clone()));
-    Job::Ask { to, thread, text: text.trim().to_owned(), quote: None }
+    Job::Ask { to, thread, text: text.trim().to_owned(), quote: None, team: None }
 }
 
 impl Model {

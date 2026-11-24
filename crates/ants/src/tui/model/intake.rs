@@ -178,6 +178,8 @@ impl Model {
                 data.humans = Some(humans);
             }
             Read::Directory(Err(e)) => self.failed("reading the channels", &e, now),
+            Read::Teams(Ok(teams)) => data.teams = teams,
+            Read::Teams(Err(e)) => self.failed("reading the teams", &e, now),
             Read::Levels(levels) => data.channel_levels = levels,
             Read::Marked(_, Ok(())) => {}
             Read::Unmarked(thread, Ok(())) => {

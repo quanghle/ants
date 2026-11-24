@@ -19,6 +19,8 @@ use serde::Serialize;
 
 pub use ants_daemon::teams::open;
 
+pub mod change;
+
 /// How long a lookup that only adds a check ([`holds_team`], [`check_retirable_on`]) waits for the hub.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
