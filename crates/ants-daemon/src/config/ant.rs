@@ -117,6 +117,9 @@ pub struct Ant {
     /// Ants the ant's escalations go to before any human, the first one leading; published in the colony.
     #[serde(default)]
     pub escalate_to: Vec<UserId>,
+    /// Turns a thread gets from a human's message, a webhook's or schedule's, and a leader's answer to an
+    /// escalation; unset: the top-level `turn_budget`, else [`ants_proto::DEFAULT_TURN_BUDGET`].
+    pub turn_budget: Option<u32>,
     /// Chain levels an escalation climbs before it goes to the thread's owner.
     #[serde(default = "default_max_escalation_hops")]
     pub max_escalation_hops: u32,
@@ -251,6 +254,7 @@ impl Ant {
             max_daily_cost: None,
             spend_warn_percent: DEFAULT_SPEND_WARN_PERCENT,
             escalate_to: Vec::new(),
+            turn_budget: None,
             max_escalation_hops: ants_proto::DEFAULT_MAX_ESCALATION_HOPS,
             escalate_after: DEFAULT_ESCALATE_AFTER,
             escalation_reminder: DEFAULT_ESCALATION_REMINDER,
@@ -340,6 +344,7 @@ impl Ant {
                 escalation: Chain {
                     escalate_to: self.escalate_to,
                     max_hops: self.max_escalation_hops,
+                    turn_budget: self.turn_budget.unwrap_or(ants_proto::DEFAULT_TURN_BUDGET),
                     after: Some(self.escalate_after).filter(|t| !t.is_zero()),
                     remind: Some(self.escalation_reminder).filter(|t| !t.is_zero()),
                     stand_in: self.stand_in,
@@ -374,6 +379,9 @@ impl Ant {
         }
         if self.spend_warn_percent >= 100 {
             bail!("ant {}: spend_warn_percent must be below 100 (0 for no warning)", self.name);
+        }
+        if self.turn_budget == Some(0) {
+            bail!("ant {}: turn_budget must be at least 1", self.name);
         }
         if self.stand_in.as_ref() == Some(&self.name) {
             bail!("ant {}: stand_in names the ant itself, not a human", self.name);

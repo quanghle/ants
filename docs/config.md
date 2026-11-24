@@ -9,6 +9,7 @@ sage = "system-sage"                       # default reviewer; an ant's name or 
 nats = "wss://hub.example/nats"            # default NATS URL for ants and schedules without `nats`
 js_domain = "hub"                          # default hub JetStream domain; also per ant and schedule
 human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
+turn_budget = 8                            # default; turns a thread gets from a human's message; also per ant and template
 metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (default: off)
 timezone = "America/New_York"              # default IANA time zone for schedule cron (default UTC)
 redact = true                              # redact secrets from daemon publications (default true)
@@ -95,6 +96,7 @@ max_daily_cost = 50.0                      # optional; also max_daily_tokens
 spend_warn_percent = 80                    # default; warn once past this % (< 100); 0 disables
 escalate_to = ["lead", "dev-b"]            # optional escalation chain; first ant leads
 sage = "lead"                              # optional; overrides top-level sage (see The sage)
+turn_budget = 20                           # optional; overrides the top-level turn_budget (default 8)
 max_escalation_hops = 3                    # default
 escalate_after = "30m"                     # default; "0" waits indefinitely; also how long the human's assistant has before passing on
 escalation_reminder = "4h"                 # default; first human reminder delay, then 1d and 3d later (3 at most); "0" disables
@@ -275,6 +277,7 @@ max_daily_cost = 10.0
 max_harnesses = 2                          # ceiling + default (default 4)
 prompt_timeout = "20m"                     # ceiling + default (default "30m"; "0" = unlimited)
 max_tool_calls = 300                       # ceiling + default (default 300; 0 = unlimited)
+turn_budget = 20                           # the turn_budget of its ants (default: the top-level one)
 allow = ["read", "search"]                 # base tool rules for every ant from this template
 allow_sets = { build = ["execute:cargo build*", "execute:cargo test*"] } # named rule sets a request may add
 pool_daily_cost = 25.0                     # optional shared UTC daily cap across template ants; also pool_daily_tokens
@@ -889,6 +892,8 @@ for the UTC day once the human's summaries spent `summary_daily_tokens` that day
 tokens fails to load. No service generates summaries on its own.
 
 ## Prompt limits and spending caps
+
+`turn_budget` sets the turns a thread may spend on ant-to-ant replies after a message, or a channel post, from a human, a webhook or a schedule, and after an escalation leader's answer: the receiving daemon gives the thread the ant's `turn_budget` (its `[[ant]]` or `[[ant_template]]` key, else the top-level one, else 8; at least 1), whatever budget the sending client stamped, so every client gives the same turns. Ant-to-ant messages and ants' channel posts keep the budget they carry. On a channel thread, the fresh budget comes from the ant a human's, webhook's or schedule's post wakes: a post mentioning nobody takes the channel messenger's `turn_budget`, and when a post @mentions several members, the lowest `turn_budget` among them limits the thread they share. Setting the top-level `turn_budget`, or the same value on a channel's members and its messenger, gives a channel's threads one budget.
 
 Per-prompt defaults: `prompt_timeout = "30m"` (includes approval wait; `"0"` disables) and `max_tool_calls = 300` (`0` disables), resetting every prompt. Optional spending caps bound tokens or cost per thread (`max_thread_tokens`, `max_thread_cost`) and per ant per UTC day (`max_daily_tokens`, `max_daily_cost`), plus shared `pool_daily_tokens` / `pool_daily_cost` on `[[ant_template]]` (summed across listed template ants via `ants_sessions`).
 

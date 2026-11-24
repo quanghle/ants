@@ -194,7 +194,7 @@ impl Inbox<'_> {
         // A post's thread has the turns its posts since left, which other members' replies may have spent.
         let humans = self.humans.humans();
         let read = match &incoming.post {
-            Some(posted) => Some(self.threads.context(&posted.post, seq, Earlier::Unseen, &humans).await?),
+            Some(posted) => Some(self.read_thread(&posted.post, seq, &humans).await?),
             None => None,
         };
         // The harness answered an earlier attempt, whose reply a later step failed to make or record.
@@ -459,6 +459,13 @@ impl Inbox<'_> {
             return Ok(());
         }
         Err(e)
+    }
+
+    /// The thread of `post`, its later human posts with the ant's fresh budget ([`Inbox::fresh_budgets`]).
+    async fn read_thread(&self, post: &ants_proto::ChannelPost, seq: u64, humans: &Humans) -> Result<Context> {
+        let mut read = self.threads.context(post, seq, Earlier::Unseen, humans).await?;
+        self.fresh_budgets(&mut read.later, humans);
+        Ok(read)
     }
 
     /// Whether the thread of `incoming` has no turns left for its answer, given what was read of a post's thread.

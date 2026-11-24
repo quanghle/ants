@@ -139,3 +139,15 @@ fn an_ants_table_leaves_the_file_and_the_rest_stays() {
     assert!(format!("{:#}", without("dev-a").unwrap_err()).contains("remove it by hand"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn an_entry_writes_the_turn_budget_only_when_set() {
+    let workdir = manifest_dir().canonicalize().unwrap();
+    let mut ant = Ant::new("dev-a".parse().unwrap(), workdir);
+    assert!(!entry(&ant).unwrap().contains("turn_budget"));
+    ant.turn_budget = Some(12);
+    let text = entry(&ant).unwrap();
+    assert!(text.contains("\nturn_budget = 12\n"), "{text}");
+    let read = parse_here(&format!("messenger = false\n{text}")).unwrap();
+    assert_eq!(read[0].turn_budget, Some(12));
+}

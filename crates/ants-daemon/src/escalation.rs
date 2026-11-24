@@ -119,6 +119,9 @@ pub struct Chain {
     pub escalate_to: Vec<UserId>,
     /// Levels an escalation climbs before it goes to the thread's owner.
     pub max_hops: u32,
+    /// Turns a thread gets from a human's message, a webhook's or schedule's, and a leader's answer to an escalation:
+    /// whatever budget their sender stamped, the receiving ant's config decides the fresh one. At least 1.
+    pub turn_budget: u32,
     /// How long an escalation waits for its leader before going one level higher; None waits for good.
     pub after: Option<Duration>,
     /// How long an escalation that reached a human waits for a human's message before a reminder; None never reminds.
@@ -133,6 +136,7 @@ impl Default for Chain {
         Self {
             escalate_to: Vec::new(),
             max_hops: DEFAULT_MAX_ESCALATION_HOPS,
+            turn_budget: DEFAULT_TURN_BUDGET,
             after: Some(DEFAULT_ESCALATE_AFTER),
             remind: Some(DEFAULT_ESCALATION_REMINDER),
             stand_in: None,
@@ -251,6 +255,11 @@ impl Escalator {
         Self { heed: Some(heed), ..self }
     }
 
+    /// The fresh turn budget of the ant's threads ([`Chain::turn_budget`]).
+    pub fn turn_budget(&self) -> u32 {
+        self.chain.turn_budget
+    }
+
     /// Follow the chain of a leader missing from the colony through `chains`.
     #[must_use]
     pub fn with_chains(mut self, chains: Chains) -> Self {
@@ -361,7 +370,7 @@ impl Escalator {
         let renewed = self.ledger.renew(&thread, &envelope.from, envelope.id).await?;
         if renewed {
             tracing::info!(%thread, leader = %envelope.from, "the leader answered the escalation; fresh budget");
-            envelope.turn_budget = envelope.turn_budget.max(DEFAULT_TURN_BUDGET);
+            envelope.turn_budget = self.chain.turn_budget;
         }
         Ok(renewed)
     }

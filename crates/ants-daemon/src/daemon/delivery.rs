@@ -191,7 +191,10 @@ impl Inbox<'_> {
         // Other members' replies stored during the prompt spent the thread's turns too.
         let humans = self.humans.humans();
         let later = match self.threads.context(post, seq, Earlier::Omitted, &humans).await {
-            Ok(now) => now.later,
+            Ok(mut now) => {
+                self.fresh_budgets(&mut now.later, &humans);
+                now.later
+            }
             Err(e) => {
                 let thread = &incoming.envelope.thread_id;
                 tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns");
@@ -235,7 +238,10 @@ impl Inbox<'_> {
         for _ in 0..SPEND_TRIES {
             let humans = self.humans.humans();
             let read = match self.threads.context(answered, seq, Earlier::Omitted, &humans).await {
-                Ok(read) => read,
+                Ok(mut read) => {
+                    self.fresh_budgets(&mut read.later, &humans);
+                    read
+                }
                 Err(e) => {
                     tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns; posting");
                     break;
