@@ -543,7 +543,12 @@ version.
   `--permission-prompts`): loading the file fails, naming it.
 - **MCP:** the ants MCP server is given over streamable HTTP on stdin (Claude Code's `mcp_set_servers`), never on the
   command line. `--strict-mcp-config` keeps other MCP servers out: those of `~/.claude.json`, the project's `.mcp.json`,
-  plugins and claude.ai connectors. Add servers with `--mcp-config` in `args`, and allow their tools there.
+  plugins and claude.ai connectors. Add servers with `--mcp-config` in `args`, and allow their tools there
+  (`--allowedTools=mcp__NAME`). The translator takes `--mcp-config` out of `args` (repeatable, `--mcp-config VALUE...`
+  or `=VALUE`, each value inline JSON `{"mcpServers": {...}}` or a file of it, read at each start) and sets its servers
+  on every session, new, resumed or forked, in the one `mcp_set_servers` with the ants servers, a later value's server
+  overriding an earlier one of the same name and the ants servers overriding both; `ants ant mcp ANT` lists them.
+  Invalid JSON, or a file that does not read, fails the start.
 - **Cancel:** Claude Code's `interrupt` ends the turn, the session going on; a turn not over 10 s later has its process
   killed, and the session resumes on the next message.
 - **Steering:** a steering message goes to stdin as a user message while the turn runs; Claude Code takes it between

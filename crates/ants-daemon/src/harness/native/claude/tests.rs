@@ -632,3 +632,77 @@ async fn a_prompt_dropped_mid_turn_leaves_no_turn_running() {
     };
     Agent.v1().name("test").connect_with(ours, dropped).await.unwrap();
 }
+
+#[tokio::test]
+async fn servers_of_mcp_config_in_args_join_the_ants_servers_of_every_session() {
+    let mut native = Fixture::new("claude-mcp-config", "");
+    let (first, second) = (native.dir.join("first.json"), native.dir.join("second.json"));
+    let first_servers = json!({ "mcpServers": {
+        "iconly": { "type": "http", "url": "https://old.example/mcp" },
+        "ants": { "type": "http", "url": "https://fake.example/mcp" },
+    } });
+    std::fs::write(&first, first_servers.to_string()).unwrap();
+    std::fs::write(&second, json!({ "mcpServers": { "docs": { "command": "docs-mcp" } } }).to_string()).unwrap();
+    let inline = json!({ "mcpServers": { "iconly": { "type": "http", "url": "https://icons.example/mcp",
+        "headers": { "Authorization": "Bearer x" } } } });
+    let table = format!(
+        "command = {:?}\nargs = [\"--mcp-config\", {:?}, {:?}, \"--mcp-config={}\", \"--allowedTools=mcp__iconly\"]",
+        native.cli.path(),
+        first.display().to_string(),
+        second.display().to_string(),
+        inline.to_string().replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    native.0.harness = define(&table).unwrap();
+    let added = ok(2, json!({ "added": [], "removed": [], "errors": {} }));
+    native.script(None, &[vec![signed_in()], vec![added.clone()]]);
+    native.script(Some(6), &[vec![signed_in()], vec![added], vec![result(0.0, json!({ "num_turns": 0 }))]]);
+    let servers = vec![McpServer::Stdio(McpServerStdio::new("ants", "/bin/ants"))];
+    let thread: ThreadId = "t1".parse().unwrap();
+    let launch = native
+        .launch(ModelSettings::default())
+        .with_mcp(Arc::new(move |_: &crate::harness::McpSession<'_>| servers.clone()))
+        .for_thread(&thread);
+
+    Session::start(&launch, None).await.unwrap().close().await;
+    Session::start(&launch, Some(SessionId::new("p1"))).await.unwrap().close().await;
+    fork(&launch, &SessionId::new("p1")).await.unwrap().expect("Claude Code forks");
+
+    let args = native.cli.args(2);
+    assert!(!args.iter().any(|arg| arg.starts_with("--mcp-config") || arg.ends_with(".json")), "taken out: {args:?}");
+    assert!(args.iter().any(|arg| arg == "--allowedTools=mcp__iconly"), "{args:?}");
+    let from_args = json!({ "iconly": inline["mcpServers"]["iconly"], "docs": { "command": "docs-mcp" } });
+    let mut with_ants = from_args.clone();
+    with_ants["ants"] = json!({ "type": "stdio", "command": "/bin/ants", "args": [], "env": {} });
+    let mut alone = from_args;
+    alone["ants"] = first_servers["mcpServers"]["ants"].clone();
+    for (run, servers) in [(2, &with_ants), (4, &with_ants), (6, &alone)] {
+        let set = json!({ "subtype": "mcp_set_servers", "servers": servers });
+        assert_eq!(native.received(run)[1]["request"], set, "run {run}: new, resumed, forked");
+    }
+}
+
+#[tokio::test]
+async fn a_bad_mcp_config_in_args_fails_the_start() {
+    let scratch = ants_test_support::scratch_dir("claude-bad-mcp-config-files").canonicalize().unwrap();
+    let bad_file = scratch.join("bad.json");
+    std::fs::write(&bad_file, "{not json").unwrap();
+    let bad_file = bad_file.display().to_string();
+    let configs: [&[&str]; 8] = [
+        &["--mcp-config", "{not json"],
+        &["--mcp-config", "/nonexistent/mcp.json"],
+        &["--mcp-config", &bad_file],
+        &["--mcp-config", r#"{"servers": {}}"#],
+        &["--mcp-config", r#"{"mcpServers": {"a": 1}}"#],
+        &["--mcp-config"],
+        &["--mcp-config="],
+        &["--mcp-config", "--verbose"],
+    ];
+    for args in configs {
+        let mut native = Fixture::new("claude-bad-mcp-config", "");
+        native.0.harness = define(&format!("command = {:?}\nargs = {args:?}", native.cli.path())).unwrap();
+        native.script(None, &[vec![signed_in()]]);
+        let error = Session::start(&native.launch(ModelSettings::default()), None).await.err().unwrap();
+        assert!(format!("{error:#}").contains("--mcp-config"), "{args:?}: {error:#}");
+    }
+    let _ = std::fs::remove_dir_all(scratch);
+}
