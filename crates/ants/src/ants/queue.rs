@@ -278,7 +278,7 @@ mod tests {
         Waiting {
             id: Uuid::from_u128(id),
             thread_id: thread.parse().unwrap(),
-            from: UserId::human(),
+            from: ants_test_support::human(),
             channel: None,
             sent_at: Utc::now() - chrono::Duration::minutes(3),
             seq: 1,
@@ -357,8 +357,8 @@ mod tests {
     #[tokio::test]
     async fn answers_to_other_requests_or_forged_ones_are_ignored() {
         let ant: UserId = "dev-a".parse().unwrap();
-        let request = QueueRequest::new(ant.clone(), UserId::human());
-        let other = QueueRequest::new(ant.clone(), UserId::human());
+        let request = QueueRequest::new(ant.clone(), ants_test_support::human());
+        let other = QueueRequest::new(ant.clone(), ants_test_support::human());
         let payload = |r: &QueueRequest| serde_json::to_vec(&r.answer(Vec::new(), None, None)).unwrap();
         let ours = (request.reply_subject(), payload(&request));
         let answers = futures::stream::iter([

@@ -26,7 +26,11 @@ fn a_config_leaving_every_ant_to_another_machine_fails_naming_the_builtin_ones()
     let dir = ants_test_support::scratch_dir("doctor-elsewhere");
     let config = dir.join("ants.toml");
     let check = |text: &str| {
-        std::fs::write(&config, format!("harness = \"copilot\"\n[host]\ncreds = \"h.creds\"\n{text}")).unwrap();
+        std::fs::write(
+            &config,
+            format!("harness = \"copilot\"\nhuman = \"human\"\n[host]\ncreds = \"h.creds\"\n{text}"),
+        )
+        .unwrap();
         let mut checks = Vec::new();
         assert!(check_config(&config, &mut checks).is_some());
         checks.remove(0)
@@ -80,6 +84,7 @@ async fn a_cli_only_config_passes_and_its_ants_checks_skip() {
         nats: "nats://127.0.0.1:1".to_owned(),
         creds: None,
         js_domain: None,
+        human: None,
         config: config.clone(),
         leaf_config: dir.join("leaf.conf"),
         hub_config: dir.join("no-nats.conf"),

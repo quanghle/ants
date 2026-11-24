@@ -305,9 +305,6 @@ impl Webhook {
         resolve: &impl Fn(&Path) -> PathBuf,
         env: &impl Fn(&str) -> Option<String>,
     ) -> Result<Self> {
-        if entry.name.is_human() {
-            bail!("the default human is no webhook");
-        }
         let secret = match (&entry.secret_env, &entry.secret_file) {
             (Some(var), None) => env(var).with_context(|| format!("environment variable {var} is not set"))?,
             (None, Some(file)) => read_secret(&resolve(file))?,

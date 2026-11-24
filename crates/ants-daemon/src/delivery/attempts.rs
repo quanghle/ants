@@ -577,7 +577,7 @@ mod tests {
     #[tokio::test]
     async fn a_withdrawal_and_the_retry_race_for_a_message_awaiting_it_and_exactly_one_wins() {
         let Some(server) = NatsServer::start() else { return };
-        let (human, ant): (UserId, UserId) = (UserId::human(), "dev-a".parse().unwrap());
+        let (human, ant): (UserId, UserId) = (ants_test_support::human(), "dev-a".parse().unwrap());
         let (_, js) = crate::bus::connect(&server.url, None, None, &human, "test").await.unwrap();
         let kv = crate::bus::ensure_attempts(&js, None, &ant).await.unwrap();
         let attempts = Attempts::new(kv.clone(), ant.clone());

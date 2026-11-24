@@ -59,8 +59,7 @@ pub fn items(data: &Data, selected: &Item, _now: DateTime<Utc>) -> Vec<Item> {
     ants.sort();
     ants.dedup();
     items.extend(ants.into_iter().map(|a| Item::Ant(a.clone())));
-    let mut people: Vec<&UserId> =
-        data.humans.iter().flat_map(Humans::iter).filter(|h| *h != data.me() && **h != UserId::human()).collect();
+    let mut people: Vec<&UserId> = data.humans.iter().flat_map(Humans::iter).filter(|h| *h != data.me()).collect();
     people.sort();
     items.extend(people.into_iter().map(|p| Item::Person(p.clone())));
     items

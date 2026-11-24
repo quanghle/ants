@@ -183,10 +183,10 @@ fn trails() {
             run: run(),
             script: script_sha256("agent('dev-a', 'build it')"),
             written_at: at(3),
-            retired: Some(TipRetired { by: user("alice"), at: at(9) }),
+            retired: Some(TipRetired { by: Some(user("alice")), at: at(9) }),
         },
     );
-    snap("tip_retired", &TipRetired { by: user("alice"), at: at(9) });
+    snap("tip_retired", &TipRetired { by: Some(user("alice")), at: at(9) });
     snap(
         "tip_vote",
         &TipVote {

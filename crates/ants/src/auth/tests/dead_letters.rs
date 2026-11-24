@@ -5,7 +5,7 @@ use super::*;
 #[tokio::test]
 async fn failed_messages_become_dead_letters_the_human_replays() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a) = (UserId::human(), p("dev-a"));
+    let (human, dev_a) = (ants_test_support::human(), p("dev-a"));
     let (h_client, h_js) = server.connect(&human).await;
     let (_, a_js) = server.connect(&dev_a).await;
     let stream = bus::ensure_stream(&h_js).await.unwrap();
@@ -24,7 +24,9 @@ async fn failed_messages_become_dead_letters_the_human_replays() {
         match Attempt::of(msg.info().unwrap().delivered, 2) {
             Attempt::Early => msg.ack_with(AckKind::Nak(None)).await.unwrap(),
             _ => {
-                dead::bury(&a_js, &dev_a, &msg, Some(&ask), "harness crashed").await.unwrap();
+                dead::bury(&a_js, &Registry::new(human.clone()), &dev_a, &msg, Some(&ask), "harness crashed")
+                    .await
+                    .unwrap();
                 break;
             }
         }
@@ -36,7 +38,7 @@ async fn failed_messages_become_dead_letters_the_human_replays() {
     // A payload that is no envelope is kept for inspection too.
     h_client.publish(subject::inbox(&dev_a, &human), "{oops".into()).await.unwrap();
     let msg = timeout(WAIT, inbox.next()).await.unwrap().unwrap().unwrap();
-    dead::bury(&a_js, &dev_a, &msg, None, "not an envelope").await.unwrap();
+    dead::bury(&a_js, &Registry::new(human.clone()), &dev_a, &msg, None, "not an envelope").await.unwrap();
 
     let letters = dead::list(&stream).await.unwrap();
     assert_eq!(letters.len(), 2, "{letters:?}");
@@ -91,7 +93,7 @@ async fn failed_messages_become_dead_letters_the_human_replays() {
 async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
     let Some(server) = Server::start() else { return };
     // An ant of its own: the metrics of an ant are the process's.
-    let (human, dev_a) = (UserId::human(), p("dev-backstop"));
+    let (human, dev_a) = (ants_test_support::human(), p("dev-backstop"));
     let (h_client, h_js) = server.connect(&human).await;
     let (_, a_js) = server.connect(&dev_a).await;
     let stream = bus::ensure_stream(&h_js).await.unwrap();
@@ -151,7 +153,7 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
             stream_seq: seq,
             deliveries: 2,
         };
-        let humans = Registry::default();
+        let humans = Registry::new(ants_test_support::human());
         let threads = Threads::new(
             h_js.clone(),
             human.clone(),
@@ -170,7 +172,7 @@ async fn messages_jetstream_stops_delivering_become_one_dead_letter() {
         assert_eq!(letters.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [dead_seq]);
         let notices = stream.get_last_raw_message_by_subject(&subject::inbox(&human, &dev_a)).await.unwrap();
         assert_eq!(notices.sequence, dead_seq + 1, "one notice, right after the dead letter");
-        let mut listed = crate::threads::thread::Threads::new(None).escalated(ants_proto::Humans::default());
+        let mut listed = crate::threads::thread::Threads::new(None).escalated(ants_proto::Humans::of([human.clone()]));
         let entry = crate::threads::thread::Parser::default()
             .entry(notices.sequence, chrono::Utc::now(), &notices.subject, &notices.payload)
             .unwrap();

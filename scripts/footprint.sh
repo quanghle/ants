@@ -24,8 +24,8 @@
 # Env:      NATS_SERVER (default: nats-server on PATH), FOOTPRINT_DIR (parent of the scratch directory,
 #           default: $TMPDIR or /tmp), FOOTPRINT_SAMPLES (idle samples, 1 s apart, default 5),
 #           FOOTPRINT_ASK_TIMEOUT (seconds, default 180). ANTS_ANT, ANTS_CONFIG, ANTS_CREDS, ANTS_JS_DOMAIN and
-#           ANTS_METRICS are ignored, and HOME is a scratch directory: no config file, credentials or ant's
-#           home of whoever runs it is read.
+#           ANTS_METRICS are ignored, ANTS_HUMAN is set to `human`, as whom the CLI acts, and HOME is a scratch
+#           directory: no config file, credentials or ant's home of whoever runs it is read.
 #
 # Private memory is RssAnon of /proc/PID/status on Linux and the physical footprint (`footprint`) on macOS.
 # Resident memory (`ps -o rss=`) is reported too: it is mostly the binary's clean, file-backed, shared code pages.
@@ -78,6 +78,7 @@ Darwin) command -v footprint >/dev/null 2>&1 || die "footprint not found, needed
 esac
 command -v "$nats_server" >/dev/null 2>&1 || die "nats-server not found (set NATS_SERVER)"
 unset ANTS_ANT ANTS_CONFIG ANTS_CREDS ANTS_JS_DOMAIN ANTS_METRICS
+export ANTS_HUMAN=human
 [ -z "$metrics" ] || command -v curl >/dev/null 2>&1 || die "curl not found, needed with --metrics"
 
 work=$(mktemp -d "${FOOTPRINT_DIR:-${TMPDIR:-/tmp}}/ants-footprint.XXXXXX")
@@ -171,7 +172,7 @@ wait_for "$work/nats.log" "Server is ready" 15 "$nats_pid"
 
 url=nats://127.0.0.1:$port
 {
-    printf 'messenger = false\nsage = "none"\nharness = "%s"\n' "$harness"
+    printf 'messenger = false\nsage = "none"\nharness = "%s"\nhuman = "human"\n' "$harness"
     [ -z "$metrics" ] || printf 'metrics = "%s"\n' "$metrics"
     printf '\n[[ant]]\nname = "footprint"\nworkdir = "%s"\nhome = "%s"\n' "$work/workdir" "$work/home"
     [ -z "$bare" ] || printf 'provider = "none"\n'

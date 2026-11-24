@@ -207,13 +207,13 @@ pub(crate) async fn retire(
     };
     match ranked.status {
         TipStatus::Live => {}
-        TipStatus::Retired(Retirement::ByHuman { by: human, at }) => {
+        TipStatus::Retired(Retirement::ByHuman { by: Some(human), at }) => {
             bail!("tip {id} of trail {name} was retired by {human} {} ago", short(since(at, now)))
         }
         status => bail!("tip {id} of trail {name} is retired already: {status}"),
     }
     let mut tip = ranked.tip.clone();
-    let retired = TipRetired { by: by.clone(), at: now };
+    let retired = TipRetired { by: Some(by.clone()), at: now };
     let kv = js.get_key_value(TRAIL_TIPS_BUCKET).await.context("opening ants_trail_tips (`ants init` creates it)")?;
     let payload = serde_json::to_vec(&retired)?;
     kv.put(tip.retired_key(), payload.into()).await.with_context(|| format!("retiring tip {id} of trail {name}"))?;

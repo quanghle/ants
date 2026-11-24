@@ -37,7 +37,7 @@ async fn send_message_follows_on_from_the_current_message() {
 async fn handoff_sends_to_the_ant_itself_on_another_thread() {
     let home = home("handoff");
     let (mcp, mut sent) = start(&home).await;
-    let mut current = Envelope::new(user("dev-b"), user("dev-a"), "go").with_owner(Some(UserId::human()));
+    let mut current = Envelope::new(user("dev-b"), user("dev-a"), "go").with_owner(Some(ants_test_support::human()));
     current.turn_budget = 4;
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
@@ -48,7 +48,11 @@ async fn handoff_sends_to_the_ant_itself_on_another_thread() {
     let out = sent.recv().await.unwrap();
     assert_eq!((&out.from, &out.to), (&user("dev-a"), &user("dev-a")));
     assert_ne!(out.thread_id, current.thread_id);
-    assert_eq!((out.turn_budget, out.owner.as_ref()), (3, Some(&UserId::human())), "one turn, the owner kept");
+    assert_eq!(
+        (out.turn_budget, out.owner.as_ref()),
+        (3, Some(&ants_test_support::human())),
+        "one turn, the owner kept"
+    );
 
     let other = ants_proto::ThreadId::generate();
     let (ok, _) = call(&client, "handoff", serde_json::json!({"text": "x", "thread": other.to_string()})).await;
@@ -196,7 +200,7 @@ async fn a_suggested_title_waits_for_the_turn_s_reply_and_goes_with_the_turn() {
 
 #[tokio::test]
 async fn complete_ends_an_ant_s_message_turn_with_no_reply_and_a_check_reaction() {
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
     let home = home("complete");
     let (mcp, mut sent) = start_with(&home, Vec::new(), Arc::default(), humans).await;
     let reacted: Arc<StdMutex<Vec<(Uuid, String)>>> = Arc::default();
@@ -256,7 +260,7 @@ async fn complete_ends_an_ant_s_message_turn_with_no_reply_and_a_check_reaction(
 
 #[tokio::test]
 async fn complete_is_refused_for_a_message_always_answered() {
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
     let home = home("complete-refused");
     let (mcp, mut sent) = start_with(&home, Vec::new(), Arc::default(), humans).await;
     let from_ant = || Envelope::new(user("dev-b"), user("dev-a"), "x");
@@ -303,7 +307,7 @@ async fn complete_is_refused_for_a_message_always_answered() {
 
 #[tokio::test]
 async fn ask_human_asks_the_thread_s_owner_without_spending_a_turn() {
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
     let home = home("ask-human");
     let (mcp, mut sent) = start_with(&home, Vec::new(), Arc::default(), humans).await;
     let mut current = Envelope::new(user("dev-b"), user("dev-a"), "q").with_owner(Some(user("alice")));
@@ -341,7 +345,7 @@ async fn ask_human_asks_the_thread_s_owner_without_spending_a_turn() {
         call(&client, "ask_human", one(serde_json::json!({"question": "Ship?", "options": ["yes", "no"]}))).await;
     assert!(ok, "{text}");
     let out = sent.recv().await.unwrap();
-    assert_eq!(out.to, UserId::human(), "no owner: the default human");
+    assert_eq!(out.to, ants_test_support::human(), "no owner: the default human");
     assert!(out.asks().unwrap().questions[0].free_text, "typed answers by default");
 }
 
@@ -407,7 +411,7 @@ async fn messages_between_ants_spend_the_budget() {
 #[tokio::test]
 async fn notes_posts_spend_the_budget_then_the_thread_goes_to_its_owner() {
     let notes = Arc::new(MemoryNotes::default());
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
     let home = home("notes");
     let (mcp, mut sent) = start_with(&home, Vec::new(), notes.clone(), humans).await;
     let mut current =
@@ -449,7 +453,7 @@ async fn notes_posts_spend_the_budget_then_the_thread_goes_to_its_owner() {
     assert!(text.contains("dev-b at ") && text.ends_with("ship friday?"), "{text}");
 
     // The human's post gives the notes a fresh budget, within the message's.
-    notes.0.locked().get_mut(&thread).unwrap().push(NotesPost::new(thread.clone(), UserId::human(), "go"));
+    notes.0.locked().get_mut(&thread).unwrap().push(NotesPost::new(thread.clone(), ants_test_support::human(), "go"));
     let (ok, text) = call(&client, "post_notes", serde_json::json!({"text": "back to it"})).await;
     assert!(ok && text.contains("(4 turns left)"), "{text}");
 }

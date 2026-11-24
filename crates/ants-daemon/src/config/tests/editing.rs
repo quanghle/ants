@@ -10,7 +10,11 @@ fn entries_read_back_as_written() {
     let text = entry(&plain).unwrap();
     assert_eq!(text, format!("[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", workdir.to_str().unwrap()));
     let read = parse_here(&format!("messenger = false\n{text}")).unwrap();
-    assert_eq!(read[0], Ant { harness: Some("copilot".to_owned()), ..plain }, "the file's harness");
+    assert_eq!(
+        read[0],
+        Ant { harness: Some("copilot".to_owned()), human: Some(ants_test_support::human()), ..plain },
+        "the file's harness"
+    );
 
     let mut full = Ant::new("dev-b".parse().unwrap(), workdir);
     full.nats = Some("wss://hub.example/nats".to_owned());

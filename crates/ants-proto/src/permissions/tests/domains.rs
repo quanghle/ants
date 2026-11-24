@@ -47,7 +47,7 @@ fn a_js_domain_adds_the_domain_form_of_the_jetstream_api() {
 /// no user permissions are checked: every domain form credentials hold is one of a plain right they hold too.
 #[test]
 fn every_domain_form_is_that_of_a_plain_right() {
-    let (human, a, pa) = (UserId::human(), p("dev-a"), p("pa"));
+    let (human, a, pa) = (crate::human(), p("dev-a"), p("pa"));
     let m1: Machine = "m1".parse().unwrap();
     let domain: JsDomain = "hub".parse().unwrap();
     for (kind, rights) in [
@@ -81,7 +81,7 @@ fn every_domain_form_is_that_of_a_plain_right() {
 /// the next under a name: credentials creating a bucket's ordered consumers may do both, or the watch stalls.
 #[test]
 fn ordered_consumers_of_a_bucket_can_be_recreated_under_a_name() {
-    let (human, a, pa) = (UserId::human(), p("dev-a"), p("pa"));
+    let (human, a, pa) = (crate::human(), p("dev-a"), p("pa"));
     let m1: Machine = "m1".parse().unwrap();
     for (kind, rights) in [
         ("human", Permissions::for_user(&human, Role::Human)),

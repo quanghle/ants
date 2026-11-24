@@ -3,9 +3,9 @@
 //! OAuth sign-in: `s` asks the harness to sign in to the selected server, which brings the address to open in a
 //! browser, and `v` hands over the address a browser on another machine came back to.
 
-use std::path::PathBuf;
+use crate::connection::Reach;
 
-use ants_proto::{JsDomain, McpReport, McpSignIn, McpStatus, UserId};
+use ants_proto::{McpReport, McpSignIn, McpStatus, UserId};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
@@ -360,9 +360,7 @@ pub enum Event {
 /// The admin orders about the shown ant's MCP servers, signed with the chat's credentials.
 pub struct Io {
     js: jetstream::Context,
-    url: String,
-    creds: Option<PathBuf>,
-    domain: Option<JsDomain>,
+    reach: Reach,
     /// The ant and asking last read.
     asked: Option<(UserId, u32)>,
     read: Option<LocalBoxFuture<'static, Event>>,
@@ -380,8 +378,7 @@ pub struct Wanted {
 
 impl Io {
     pub fn new(nats: &crate::connection::Nats<'_>, js: jetstream::Context) -> Self {
-        let (url, creds, domain) = (nats.url.to_owned(), nats.creds.map(PathBuf::from), nats.domain.cloned());
-        Self { js, url, creds, domain, asked: None, read: None, signed: None, sign: None }
+        Self { js, reach: nats.reach(), asked: None, read: None, signed: None, sign: None }
     }
 
     /// The next read or sign-in. Cancel-safe, so it can race the terminal's keys and the live feed.
@@ -402,15 +399,15 @@ impl Io {
     /// unless done already.
     pub fn watch(&mut self, wanted: Option<Wanted>) {
         let Some(Wanted { ant, asked, sign }) = wanted else { return };
-        let nats = (self.js.clone(), self.url.clone(), self.creds.clone(), self.domain.clone());
+        let nats = (self.js.clone(), self.reach.clone());
         if self.asked.as_ref() != Some(&(ant.clone(), asked)) {
             self.asked = Some((ant.clone(), asked));
-            let (js, url, creds, domain) = nats.clone();
+            let (js, reach) = nats.clone();
             let ant = ant.clone();
             self.read = Some(
                 async move {
                     let read = async {
-                        let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                        let nats = reach.nats()?;
                         crate::admin::mcp::read(&nats, &js, None, &ant).await
                     };
                     Event::Read(ant.clone(), asked, read.await.map_err(|e| format!("{e:#}")))
@@ -423,11 +420,11 @@ impl Io {
             return;
         }
         self.signed = Some((ant.clone(), sign));
-        let (js, url, creds, domain) = nats;
+        let (js, reach) = nats;
         self.sign = Some(
             async move {
                 let signed = async {
-                    let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                    let nats = reach.nats()?;
                     crate::admin::mcp::sign_in(&nats, &js, None, &ant, &server, callback).await
                 };
                 Event::Signed(ant.clone(), sign, signed.await.map_err(|e| format!("{e:#}")))

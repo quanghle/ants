@@ -444,7 +444,7 @@ mod tests {
     #[tokio::test]
     async fn a_save_expecting_an_older_revision_saves_nothing() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         js.create_stream(crate::hub::trails_config()).await.unwrap();
         let dev_a: UserId = "dev-a".parse().unwrap();
         let saved = Saved::new(&js, None, None, dev_a.clone(), SaveThrough::Bucket).await;
@@ -467,7 +467,7 @@ mod tests {
         let (Entry::Saved(found), last) = saved.lookup(&name).await.unwrap() else { panic!("saved") };
         assert_eq!(found, trail);
 
-        let elsewhere = SavedTrail { saved_by: Saver::Human { user: UserId::human() }, ..trail.clone() };
+        let elsewhere = SavedTrail { saved_by: Saver::Human { user: ants_test_support::human() }, ..trail.clone() };
         let kv = DirectKv::whole(&js, None, TRAILS_BUCKET).await.unwrap();
         kv.put(name.as_str(), serde_json::to_vec(&elsewhere).unwrap()).await.unwrap();
         assert!(!saved.write(&later, Some(last)).await.unwrap(), "replacing a revision another replaced");
@@ -491,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_read_of_the_colony_trails_runs_no_local_trail() {
         let Some(server) = NatsServer::start() else { return };
-        let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let dir = ants_test_support::scratch_dir("saved-trail-unread");
         std::fs::write(dir.join("deploy.py"), "agent('local')").unwrap();
         let saved = Saved::new(&js, None, Some(dir), "dev-a".parse().unwrap(), SaveThrough::Bucket).await;

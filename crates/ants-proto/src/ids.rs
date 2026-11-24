@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[cfg(doc)]
-use crate::{AttachmentHandle, HUMANS_BUCKET, Humans, INTAKE_STREAM, STREAM, link_outbox, owner_outbox};
+use crate::{AttachmentHandle, INTAKE_STREAM, STREAM, link_outbox, owner_outbox};
 use crate::{
     Error, FILES_BUCKET, LINKS_BUCKET, OUTBOX_CONSUMER, OUTBOX_STREAM, OWNERS_BUCKET, TRAIL_RUNS_INDEX, TRAIL_STEPS,
     TRAIL_STEPS_ON, subject,
@@ -105,12 +105,6 @@ token_id!(
 const TIP_ID_LEN: usize = 8;
 
 impl UserId {
-    /// The default human: a human whether or not [`HUMANS_BUCKET`] lists it, and the one escalations go to when a
-    /// thread has no owner.
-    pub fn human() -> Self {
-        Self("human".to_owned())
-    }
-
     /// The router ant that takes requests without an explicit recipient.
     pub fn messenger() -> Self {
         BuiltinAnt::Messenger.id()
@@ -131,12 +125,6 @@ impl UserId {
     /// reserved name: no ant or human may take it.
     pub fn signer() -> Self {
         Self("signer".to_owned())
-    }
-
-    /// Whether this is the default human, [`UserId::human`]. Other humans are known only from [`HUMANS_BUCKET`]
-    /// ([`Humans`]).
-    pub fn is_human(&self) -> bool {
-        self.0 == "human"
     }
 }
 
@@ -181,12 +169,6 @@ pub enum Role {
 }
 
 impl Role {
-    /// The role of `user` without the [`HUMANS_BUCKET`]: human for the default human, [`UserId::human`], else
-    /// ant.
-    pub fn by_default(user: &UserId) -> Self {
-        if user.is_human() { Self::Human } else { Self::Ant }
-    }
-
     pub fn is_human(self) -> bool {
         self == Self::Human
     }

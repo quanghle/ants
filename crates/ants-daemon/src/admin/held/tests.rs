@@ -1,7 +1,7 @@
 //! Tests of held orders: an order an assistant sent waits for its human to consent, and expires before the humans are
 //! read.
 
-use ants_proto::{AdminOp, AssistantGrant, Confirmations, PreAllow, UserId, confirmations_key, pre_allow_key};
+use ants_proto::{AdminOp, AssistantGrant, Confirmations, PreAllow, confirmations_key, pre_allow_key};
 
 use chrono::TimeDelta;
 
@@ -43,7 +43,7 @@ fn pre_allow(humans: &Registry, device: &TestDevice, rules: &[&str]) {
 #[test]
 fn a_held_order_waits_for_its_human_to_consent() {
     let device = TestDevice::default();
-    let humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
+    let humans = Registry::with(ants_test_support::human(), &["alice"]).verifying_grants(Some(device.account()));
     let (pause, restart) = (held(AdminOp::Pause), held(AdminOp::Restart { now: false }));
     let now = Utc::now();
     grant(&humans, &device, Some("pa"));
@@ -84,7 +84,7 @@ fn a_held_order_waits_for_its_human_to_consent() {
 /// withdrawn: it waits, and expires once out of time.
 #[test]
 fn a_held_order_expires_before_the_humans_are_read() {
-    let humans = Registry::default();
+    let humans = Registry::new(ants_test_support::human());
     let pause = held(AdminOp::Pause);
     let now = Utc::now();
     assert_eq!(consent(&humans, &pause, now), Consent::Waiting);

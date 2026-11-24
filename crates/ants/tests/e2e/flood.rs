@@ -27,7 +27,7 @@ pub fn a_flood_of_messages_is_answered_once_each() {
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
 
     let start_daemon = |run: usize| {
-        let mut command = ants(&["daemon", "--harness", "copilot", "--max-harnesses", "4"]);
+        let mut command = ants(&["daemon", "--harness", "copilot", "--human", "human", "--max-harnesses", "4"]);
         command
             .arg("--home")
             .arg(dir.join("home"))

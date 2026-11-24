@@ -408,7 +408,7 @@ mod tests {
         auth::init(&team).unwrap();
         assert_eq!(issued(&team, &m1).unwrap(), None, "nothing issued yet");
 
-        let on_m1 = auth::members(&users(&["dev-a", "human"]), &users(&["alice"]));
+        let on_m1 = auth::members(&users(&["dev-a"]), &users(&["alice", "human"]));
         auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::With, None, &out).unwrap();
         let kept = Members {
             ants: users(&["dev-a"]),

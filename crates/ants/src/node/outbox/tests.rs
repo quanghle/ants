@@ -46,10 +46,10 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     let domain: JsDomain = "hub".parse().unwrap();
     let m1: Machine = "m1".parse().unwrap();
     let (human, dev_a, dev_b): (UserId, UserId, UserId) =
-        (UserId::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
+        (ants_test_support::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
     let creds = |p: &UserId| {
         let out = hub.dir().join(format!("{p}.creds"));
-        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, p, crate::test_support::role_of(p), Some(&domain), &out).unwrap();
         out
     };
     let connect = async |url: &str, p: &UserId| {
@@ -66,7 +66,7 @@ async fn the_hub_takes_what_a_leaf_kept_while_its_uplink_was_down() {
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     // The CLI runs on m1 too.
     let alice: UserId = "alice".parse().unwrap();
-    let on_m1 = auth::members(&[dev_a.clone(), human.clone()], std::slice::from_ref(&alice));
+    let on_m1 = auth::members(std::slice::from_ref(&dev_a), &[alice.clone(), human.clone()]);
     auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
     let server_conf = team.join(auth::SERVER_CONF);
     let listen = format!("127.0.0.1:{}", free_port());
@@ -296,10 +296,10 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
     let domain: JsDomain = "hub".parse().unwrap();
     let m1: Machine = "m1".parse().unwrap();
     let (human, dev_a, dev_b): (UserId, UserId, UserId) =
-        (UserId::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
+        (ants_test_support::human(), "dev-a".parse().unwrap(), "dev-b".parse().unwrap());
     let connect = async |url: &str, p: &UserId| {
         let creds = hub.dir().join(format!("{p}.creds"));
-        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &creds).unwrap();
+        crate::test_support::issue(&team, p, crate::test_support::role_of(p), Some(&domain), &creds).unwrap();
         let (client, mut js) = bus::connect(url, Some(&creds), Some(&domain), p, "test").await.unwrap();
         js.set_timeout(Duration::from_secs(2));
         (client, js)
@@ -309,7 +309,7 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
     let (_b, b_js) = connect(&hub.url, &dev_b).await;
 
     let leaf_creds = hub.dir().join("leaf-m1.creds");
-    let on_m1 = auth::members(&[dev_a.clone(), human.clone()], &[]);
+    let on_m1 = auth::members(std::slice::from_ref(&dev_a), std::slice::from_ref(&human));
     auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
     let server_conf = team.join(auth::SERVER_CONF);
     let listen = format!("127.0.0.1:{}", free_port());
@@ -353,7 +353,7 @@ async fn a_post_waiter_reads_back_what_never_comes_live() {
         let room = client.subscribe(subject::chan_room(&ops)).await.unwrap();
         client.flush().await.unwrap();
         let stored = bus::store_acked(js, post.subject(), post, &post.id.to_string()).await.unwrap();
-        let me = Me { id: post.from.clone(), role: Role::by_default(&post.from), assistant_of: None };
+        let me = Me { id: post.from.clone(), role: crate::test_support::role_of(&post.from), assistant_of: None };
         let posts = channel::caught_up_posts(room.into(), js, &me, post, stored.as_ref().map(|ack| ack.sequence));
         (stored.is_some(), Box::pin(channel::thread_posts(posts, post, true)))
     };
@@ -422,12 +422,12 @@ async fn a_hub_without_js_api_reply_v2_is_reported() {
     let team = hub.dir().join("auth");
     let domain: JsDomain = "hub".parse().unwrap();
     let m1: Machine = "m1".parse().unwrap();
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let human_creds = hub.dir().join("human.creds");
     crate::test_support::issue(&team, &human, Role::Human, Some(&domain), &human_creds).unwrap();
     let (_h, h_js) = bus::connect(&hub.url, Some(&human_creds), Some(&domain), &human, "test").await.unwrap();
     bus::ensure_stream(&h_js).await.unwrap();
-    let on_m1 = auth::members(std::slice::from_ref(&human), &[]);
+    let on_m1 = auth::members(&[], std::slice::from_ref(&human));
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
     let (server_conf, listen) = (team.join(auth::SERVER_CONF), format!("127.0.0.1:{}", free_port()));
@@ -492,8 +492,8 @@ fn filters(sources: &[Source]) -> Vec<&str> {
 #[test]
 fn with_humans_on_a_machine_no_two_admissions_overlap() {
     let m1: Machine = "m1".parse().unwrap();
-    let ants = ["dev-a".parse().unwrap(), UserId::human(), "dev-b".parse().unwrap()];
-    let sources = admissions(&m1, &auth::members(&ants, &[]), 7);
+    let ants = ["dev-a".parse().unwrap(), "dev-b".parse().unwrap()];
+    let sources = admissions(&m1, &auth::members(&ants, &[ants_test_support::human()]), 7);
     assert_eq!(
         filters(&sources),
         [
@@ -515,7 +515,7 @@ fn with_humans_on_a_machine_no_two_admissions_overlap() {
 
     // With a second human, the first by name takes every inbox subject; each human posts under its own name.
     let alice: UserId = "alice".parse().unwrap();
-    let sources = admissions(&m1, &auth::members(&ants, &[alice.clone(), alice]), 7);
+    let sources = admissions(&m1, &auth::members(&ants, &[alice, ants_test_support::human()]), 7);
     assert_eq!(
         filters(&sources),
         [
@@ -546,16 +546,16 @@ async fn removing_an_ant_the_uplink_no_longer_carries_takes_one_that_left_alread
     let m1: Machine = "m1".parse().unwrap();
     let p = |s: &str| -> UserId { s.parse().unwrap() };
     let mut config = bus::ensure_stream(&js).await.unwrap().info().await.unwrap().config.clone();
-    config.sources = Some(admissions(&m1, &auth::members(&[p("dev-a"), p("dev-b")], &[UserId::human()]), 1));
+    config.sources = Some(admissions(&m1, &auth::members(&[p("dev-a"), p("dev-b")], &[ants_test_support::human()]), 1));
     js.update_stream(&config).await.unwrap();
 
     let team = hub.dir().join("auth");
     auth::init(&team).unwrap();
-    let on_m1 = auth::members(&[p("dev-b"), p("dev-c")], &[UserId::human()]);
+    let on_m1 = auth::members(&[p("dev-b"), p("dev-c")], &[ants_test_support::human()]);
     auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, None, &hub.dir().join("leaf.creds")).unwrap();
     assert!(members::retired(&team, &m1, &p("dev-c")).unwrap());
 
-    let carried = Members { ants: vec![p("dev-b")], humans: vec![UserId::human()], ..Members::default() };
+    let carried = Members { ants: vec![p("dev-b")], humans: vec![ants_test_support::human()], ..Members::default() };
     let removing = |ants: &[&str]| Change {
         remove: Members { ants: ants.iter().map(|a| p(a)).collect(), ..Members::default() },
         ..Change::default()
@@ -594,7 +594,7 @@ fn the_attachments_store_takes_the_chunks_of_every_sender_for_one_human_else_eac
         ]
     );
     let alice: UserId = "alice".parse().unwrap();
-    let with_humans = auth::members(&[dev_a, UserId::human()], std::slice::from_ref(&alice));
+    let with_humans = auth::members(&[dev_a, ants_test_support::human()], std::slice::from_ref(&alice));
     assert_eq!(
         transforms(&with_humans),
         [(alice, "ants.in.m1.ants.out.files.>".to_owned(), "$O.ants_files.C.>".to_owned())]
@@ -613,10 +613,10 @@ async fn an_outbox_goes_on_after_a_restart_at_once_through_its_durable_consumer(
     let team = hub.dir().join("auth");
     let domain: JsDomain = "hub".parse().unwrap();
     let m1: Machine = "m1".parse().unwrap();
-    let (human, dev_a): (UserId, UserId) = (UserId::human(), "dev-a".parse().unwrap());
+    let (human, dev_a): (UserId, UserId) = (ants_test_support::human(), "dev-a".parse().unwrap());
     let creds = |p: &UserId| {
         let out = hub.dir().join(format!("{p}.creds"));
-        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, p, crate::test_support::role_of(p), Some(&domain), &out).unwrap();
         out
     };
     let (human_creds, a_creds) = (creds(&human), creds(&dev_a));
@@ -627,7 +627,7 @@ async fn an_outbox_goes_on_after_a_restart_at_once_through_its_durable_consumer(
     };
     let (_h, h_js) = connect(&hub.url, &human, &human_creds).await;
     bus::ensure_stream(&h_js).await.unwrap();
-    let on_m1 = auth::members(&[dev_a.clone(), human.clone()], &[]);
+    let on_m1 = auth::members(std::slice::from_ref(&dev_a), std::slice::from_ref(&human));
     let leaf_creds = hub.dir().join("leaf-m1.creds");
     auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
     let (server_conf, listen) = (team.join(auth::SERVER_CONF), format!("127.0.0.1:{}", free_port()));

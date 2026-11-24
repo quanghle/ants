@@ -240,8 +240,9 @@ pub async fn admit_ant(hub: &Context, machine: &Machine, ant: &UserId) -> Result
     let start = info.state.last_sequence + 1;
     let mut ants = hub.get_stream(STREAM).await.context("looking up the hub's stream")?;
     let mut config = ants.info().await?.config.clone();
-    // A human's admission may take every inbox subject of the machine already, which the ant's may not overlap.
-    let every_inbox = machine.admitted(&UserId::human(), Role::Human, true).swap_remove(0).0;
+    // A human's admission, whoever the human, may take every inbox subject of the machine already, which the ant's may
+    // not overlap.
+    let every_inbox = machine.admitted(ant, Role::Human, true).swap_remove(0).0;
     let sources = config.sources.get_or_insert_default();
     let inbox = !sources
         .iter()
@@ -256,7 +257,7 @@ pub async fn admit_ant(hub: &Context, machine: &Machine, ant: &UserId) -> Result
     }
     if let Some(mut config) = stream_config(hub, FILES_STREAM).await? {
         // A human's admission may take the chunks of every sender already, which the ant's may not overlap.
-        let every_sender = machine.admitted_files(&UserId::human(), Role::Human).0;
+        let every_sender = machine.admitted_files(ant, Role::Human).0;
         let sources = config.sources.get_or_insert_default();
         let taken = sources
             .iter()

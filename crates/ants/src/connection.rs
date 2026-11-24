@@ -1,11 +1,11 @@
 //! How the CLI reaches NATS: the connection the global options name, and connecting to it as the human or ant of
 //! the credentials, creating what the hub lacks on the way.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ants_daemon::{bus, hub};
-use ants_proto::{DeviceId, JsDomain};
+use ants_proto::{DeviceId, JsDomain, UserId};
 use anyhow::Result;
 
 use crate::people::{devices, humans};
@@ -15,11 +15,28 @@ pub struct Connection<'a> {
     pub nats: &'a str,
     pub creds: Option<&'a Path>,
     pub js_domain: Option<&'a JsDomain>,
+    /// Whom the CLI acts as without credentials: the config file's `human`, or `ANTS_HUMAN`.
+    pub human: Option<&'a UserId>,
 }
 
 impl<'a> Connection<'a> {
     pub(crate) fn nats(&self) -> Result<Nats<'a>> {
-        Nats::new(self.nats, self.creds, self.js_domain)
+        Nats::new(self.nats, self.creds, self.js_domain, self.human)
+    }
+}
+
+/// What a [`Nats`] is made of, owned, to make it again in a task of its own ([`Nats::reach`]).
+#[derive(Clone)]
+pub(crate) struct Reach {
+    url: String,
+    creds: Option<PathBuf>,
+    domain: Option<JsDomain>,
+    me: UserId,
+}
+
+impl Reach {
+    pub(crate) fn nats(&self) -> Result<Nats<'_>> {
+        Nats::new(&self.url, self.creds.as_deref(), self.domain.as_ref(), Some(&self.me))
     }
 }
 
@@ -50,8 +67,13 @@ pub struct Nats<'a> {
 }
 
 impl<'a> Nats<'a> {
-    pub(crate) fn new(url: &'a str, creds: Option<&'a Path>, domain: Option<&'a JsDomain>) -> Result<Self> {
-        let me = humans::Me::from_creds(creds)?;
+    pub(crate) fn new(
+        url: &'a str,
+        creds: Option<&'a Path>,
+        domain: Option<&'a JsDomain>,
+        human: Option<&UserId>,
+    ) -> Result<Self> {
+        let me = humans::Me::from_creds(creds, human)?;
         let device = humans::device(creds)?;
         let rights = humans::Rights::from_creds(creds)?;
         let account = devices::account_of(creds)?;
@@ -68,6 +90,16 @@ impl<'a> Nats<'a> {
             hub_checked: AtomicBool::new(false),
             device_published: AtomicBool::new(false),
         })
+    }
+
+    /// What the connection is made of, owned.
+    pub(crate) fn reach(&self) -> Reach {
+        Reach {
+            url: self.url.to_owned(),
+            creds: self.creds.map(Path::to_path_buf),
+            domain: self.domain.cloned(),
+            me: self.me.id.clone(),
+        }
     }
 
     /// Connect as [`Nats::me`], and register it in the humans bucket ([`humans::register_or_warn`]). The first

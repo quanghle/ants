@@ -39,7 +39,7 @@ impl Conductor {
     async fn end_message(&mut self, run: &RunId) -> Envelope {
         loop {
             let told = self.told().await;
-            if told.to == UserId::human() && told.text.starts_with(&format!("Run {run} ")) {
+            if told.to == ants_test_support::human() && told.text.starts_with(&format!("Run {run} ")) {
                 return told;
             }
         }
@@ -66,7 +66,7 @@ async fn conductor_failing(server: &NatsServer, fails: usize) -> (Conductor, Arc
         let tried = tried.clone();
         move |envelope: Envelope| {
             let tx = tx.clone();
-            let owner = envelope.to == UserId::human() && envelope.trail_step.is_none();
+            let owner = envelope.to == ants_test_support::human() && envelope.trail_step.is_none();
             let failed = owner && tried.fetch_add(1, Ordering::SeqCst) < fails;
             Box::pin(async move {
                 if failed {
@@ -86,7 +86,7 @@ async fn conductor_failing(server: &NatsServer, fails: usize) -> (Conductor, Arc
         ant: lead,
         worker: ants_binary(),
         trails_dir: None,
-        humans: Registry::new(UserId::human()),
+        humans: Registry::new(ants_test_support::human()),
         colony,
         outbox,
         attempts,
@@ -283,8 +283,8 @@ log("built")
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!({"built": "done", "count": 2}) });
     assert_eq!(lead.notes(&thread, 3).await[2], "log: built");
     let told = lead.told().await;
-    assert_eq!((&told.from, &told.to, &told.thread_id), (&ant("lead"), &UserId::human(), &thread));
-    assert_eq!(told.owner, Some(UserId::human()));
+    assert_eq!((&told.from, &told.to, &told.thread_id), (&ant("lead"), &ants_test_support::human(), &thread));
+    assert_eq!(told.owner, Some(ants_test_support::human()));
     let result = "```json\n{\n  \"built\": \"done\",\n  \"count\": 2\n}\n```";
     assert!(told.text.starts_with(&format!("Run {run}")), "{}", told.text);
     assert!(told.text.ends_with(&format!(" is done (1 steps, 1 turns):\n\n{result}")), "{}", told.text);
@@ -336,7 +336,7 @@ await go()
     assert_eq!(lead.notes(&thread, 2).await[1], noted("quota", "[ants] dev is out of quota."));
     assert!(!lead.header(&run).await.finished(), "the step is still waited on");
 
-    let human = Envelope::on_thread(step.thread_id.clone(), UserId::human(), ant("lead"), "how goes it?");
+    let human = Envelope::on_thread(step.thread_id.clone(), ants_test_support::human(), ant("lead"), "how goes it?");
     assert!(!lead.trails.take(&human).await.unwrap(), "a human's message on a step's thread is prompted");
 
     let withdrawn = step.reply(ant("dev"), "[ants] Withdrawn.", Role::Ant).unwrap().as_notice(NoticeKind::Withdrawn);

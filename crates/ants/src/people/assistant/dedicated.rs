@@ -148,7 +148,7 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
         Some(name) => name.clone(),
         None => default_name(human)?,
     };
-    if name == *human || name.is_human() {
+    if name == *human {
         bail!("{name} is a human: an assistant is an ant");
     }
     auth::check_not_reserved(&name)?;
@@ -374,6 +374,9 @@ fn entry(nats: &Nats<'_>, args: &EnableArgs, ant: &UserId, summary: &Summary, ou
     let mut checked = p.clone();
     if checked.harness.is_none() {
         checked.harness.clone_from(&summary.harness);
+    }
+    if checked.human.is_none() {
+        checked.human.clone_from(&summary.human);
     }
     checked.into_config(nats, &summary.harnesses)?;
     config::entry(&p)
@@ -626,10 +629,10 @@ mod tests {
         let Some(server) = Server::start() else { return };
         let alice = p("alice");
         let creds = server.creds_as(&alice, Role::Human);
-        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+        let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
         let (team, scratch) = (server.dir().join("auth"), ants_test_support::scratch_dir("assistant-enable"));
         let (config, home) = (scratch.join("config.toml"), scratch.join("home"));
-        std::fs::write(&config, "harness = \"copilot\"\n").unwrap();
+        std::fs::write(&config, "harness = \"copilot\"\nhuman = \"human\"\n").unwrap();
         let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
 
         enable(&nats, enable_args(&config, &team, &home)).await.unwrap();
@@ -675,10 +678,10 @@ mod tests {
         let Some(server) = Server::start() else { return };
         let alice = p("alice");
         let creds = server.creds_as(&alice, Role::Human);
-        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+        let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
         let (team, scratch) = (server.dir().join("auth"), ants_test_support::scratch_dir("assistant-refused"));
         let (config, home) = (scratch.join("config.toml"), scratch.join("home"));
-        let start = "harness = \"copilot\"\n";
+        let start = "harness = \"copilot\"\nhuman = \"human\"\n";
         std::fs::write(&config, start).unwrap();
         let untouched = || {
             assert_eq!(std::fs::read_to_string(&config).unwrap(), start);
@@ -739,13 +742,15 @@ mod tests {
         let admin = auth::Registered { label: Some("laptop"), admin: true, ..auth::Registered::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
         auth::Issue::new(&team, &alice, issued::Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
-        let nats = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+        let nats = Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
         let (_, js) = nats.connect("test").await.unwrap();
         let (path, home) = (server.dir().join("config.toml"), server.dir().join("pa-home"));
         let work = server.dir().join("work");
         std::fs::create_dir_all(&work).unwrap();
-        let text =
-            format!("harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", work.display().to_string());
+        let text = format!(
+            "harness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n",
+            work.display().to_string()
+        );
         std::fs::write(&path, text).unwrap();
         let file = ants_daemon::admin::ConfigFile::new(path.clone(), std::sync::Arc::default());
         let (ants, task) = host_of_m1(&server, &js, true, Some(file)).await;

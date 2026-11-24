@@ -98,8 +98,8 @@ impl Hub {
         Ok(entries)
     }
 
-    /// Why no daemon serves the ant `to` now, by its colony entry, with names from the colony `to` may stand for; None
-    /// when one does, `to` is a human or the channel manager, or the colony cannot be read, so a lookup never holds a
+    /// Why no daemon serves the ant `to` now, by its colony entry, with names from the colony `to` may stand for, and
+    /// for a name the colony lacks, how to reach a human instead; None when one does, `to` is a human or the channel manager, or the colony cannot be read, so a lookup never holds a
     /// message back. A provider limit counts only while it holds past `wait` from now.
     pub(super) async fn unserved(&self, to: &UserId, wait: Duration) -> Option<String> {
         let lookup = self.lookup.get()?;
@@ -118,7 +118,13 @@ impl Hub {
             }
         };
         let now = chrono::Utc::now();
-        let why = why_unserved(to, entry.as_ref(), now, wait)?;
+        let mut why = why_unserved(to, entry.as_ref(), now, wait)?;
+        if entry.is_none() {
+            let human = self.humans.default_human();
+            why = format!(
+                "{why}, nor is {to} a human: ask_human asks the thread's owner, else the default human {human}"
+            );
+        }
         let others = match tokio::time::timeout(LOOKUP_TIMEOUT, self.others()).await {
             Ok(Ok(others)) => others,
             _ => return Some(format!("{why}.")),

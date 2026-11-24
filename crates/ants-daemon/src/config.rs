@@ -7,7 +7,7 @@
 //!                                   # another ant, or "none" (crate::config::Sage)
 //! nats = "wss://hub.example/nats"   # default server for every ant
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
-//! human = "alice"                   # default human, for escalations of threads with no owner; also per ant
+//! human = "alice"                   # default human, for escalations of threads with no owner; required here or per ant
 //! turn_budget = 8                   # turns a thread gets from a human's message, for ant-to-ant replies (the
 //!                                   # default); also per ant and per template
 //! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::monitoring::metrics); off without it
@@ -22,6 +22,7 @@
 //! creds = "~/.config/ants/auth/alice.creds"
 //! nats = "wss://hub.example/nats"   # default: the top-level nats
 //! js_domain = "hub"                 # default: the top-level js_domain
+//! human = "alice"                   # whom the CLI acts as without credentials (default: the top-level human)
 //! auto_archive = "14d"              # archive threads idle this long for the CLI's human (default 0: never)
 //! summaries = "on-demand"           # or "ahead": also ask for TL;DRs of the threads shown (needs the next key)
 //! summary_daily_tokens = 50000      # most tokens a human's summaries spend a UTC day ahead of time (default 0)

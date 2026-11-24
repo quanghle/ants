@@ -453,7 +453,7 @@ async fn mark_incarnation(identities: &kv::Store) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{UserId, subject};
+    use ants_proto::subject;
     use ants_test_support::NatsServer;
 
     use super::*;
@@ -471,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn init_creates_what_is_missing_once() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         assert_eq!(problems(&check(&js, |_| true).await), Object::ALL);
         assert!(check(&js, |s| s == Object::Read.info_subject()).await.iter().all(|f| f.object == Object::Read));
         let read_create = "$JS.API.STREAM.CREATE.KV_ants_read";
@@ -535,7 +535,7 @@ mod tests {
     #[tokio::test]
     async fn every_bucket_refuses_a_rollup_and_keeps_the_entries_of_others() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         init(&js, |_| true).await.unwrap();
         for object in Object::ALL.into_iter().filter(|o| o.bucket().is_some()) {
             let prefix = format!("$KV.{}", object.bucket().unwrap());
@@ -559,7 +559,7 @@ mod tests {
     #[tokio::test]
     async fn init_denies_the_rollups_of_buckets_created_allowing_them() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let allowing_rollups = [Object::TrailTips, Object::Presence, Object::Humans];
         for object in allowing_rollups {
             match object.spec() {
@@ -607,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn the_identities_bucket_carries_an_incarnation_marker_that_init_writes() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let identities = crate::records::direct_kv::DirectKv::new(&js, None, IDENTITIES_BUCKET).await.unwrap();
         let incarnation = || crate::profile::shared::incarnation(&identities);
 
@@ -633,7 +633,7 @@ mod tests {
     #[tokio::test]
     async fn init_leaves_existing_objects_as_they_are() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         js.create_stream(stream::Config {
             name: "OUTBOX".into(),
             subjects: vec!["out.>".into()],
@@ -660,14 +660,14 @@ mod tests {
     #[tokio::test]
     async fn the_stream_drops_repeated_message_ids_for_a_day() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let stream = bus::ensure_stream(&js).await.unwrap();
         assert_eq!(stream.cached_info().config.duplicate_window, DUPLICATE_WINDOW);
 
         let publish = async |id: &str| {
             let mut headers = async_nats::HeaderMap::new();
             headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
-            let subject = subject::inbox(&"dev-a".parse().unwrap(), &UserId::human());
+            let subject = subject::inbox(&"dev-a".parse().unwrap(), &ants_test_support::human());
             js.publish_with_headers(subject, headers, "{}".into()).await.unwrap().await.unwrap()
         };
         let first = publish("m-1").await;

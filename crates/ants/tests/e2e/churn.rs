@@ -41,7 +41,9 @@ pub fn reloads_under_traffic_lose_no_message() {
     let config = dir.join("config.toml");
     let metrics = format!("127.0.0.1:{}", free_port());
     let render = |listed: &[bool], generation: usize| {
-        let mut text = format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\nmetrics = {metrics:?}\n");
+        let mut text = format!(
+            "messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\nmetrics = {metrics:?}\n"
+        );
         let names =
             std::iter::once("dev-a".to_owned()).chain((0..CHURNED).filter(|i| listed[*i]).map(|i| format!("c-{i}")));
         for name in names {

@@ -15,12 +15,12 @@ pub(super) fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) 
     let check = "credentials";
     let Some(path) = &setup.creds else {
         checks.push(Check::skip(check, "none set (--creds, ANTS_CREDS or `creds` in [cli]): connecting as no one"));
-        let me = Me::from_creds(None).ok()?;
+        let me = Me::from_creds(None, setup.human.as_ref()).ok()?;
         return Some(Identity { me, rights: Rights::from_creds(None).ok()?, finding: None });
     };
     let read = creds::check(path).and_then(|finding| {
         Ok(Identity {
-            me: Me::from_creds(Some(path))?,
+            me: Me::from_creds(Some(path), None)?,
             rights: Rights::from_creds(Some(path))?,
             finding: Some(finding),
         })

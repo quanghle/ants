@@ -506,14 +506,14 @@ mod tests {
 
     #[test]
     fn a_notice_is_never_copied_into_a_reply_or_follow_up() {
-        let notice = Envelope::new(p("dev-a"), UserId::human(), "[ants] spent").as_notice(NoticeKind::Spend);
-        assert_eq!(notice.reply(UserId::human(), "ok", Role::Ant).unwrap().notice, None);
+        let notice = Envelope::new(p("dev-a"), crate::human(), "[ants] spent").as_notice(NoticeKind::Spend);
+        assert_eq!(notice.reply(crate::human(), "ok", Role::Ant).unwrap().notice, None);
         assert_eq!(notice.follow_up(p("dev-a"), p("dev-b"), "on").notice, None);
     }
 
     #[test]
     fn reply_swaps_parties_and_links_the_message() {
-        let ask = Envelope::new(UserId::human(), p("dev-a"), "hi");
+        let ask = Envelope::new(crate::human(), p("dev-a"), "hi");
         let reply = ask.reply(p("dev-a"), "hello", Role::Human).unwrap();
         assert_eq!((reply.from.as_str(), reply.to.as_str()), ("dev-a", "human"));
         assert_eq!(reply.thread_id, ask.thread_id);
@@ -552,11 +552,11 @@ mod tests {
         let json = serde_json::to_string(&Envelope::new(p("dev-a"), p("dev-b"), "x")).unwrap();
         assert!(!json.contains("allow"), "{json}");
 
-        let humans = Humans::default();
+        let humans = crate::humans();
         let post = ChannelPost::new("ops".parse().unwrap(), p("github"), "push").with_allow(rules.clone());
         let answer = post.reply(p("dev-a"), "on it", &[], &humans).unwrap();
         assert_eq!(answer.allow, rules);
-        assert_eq!(answer.reply(UserId::human(), "thanks", &[], &humans).unwrap().allow, None);
+        assert_eq!(answer.reply(crate::human(), "thanks", &[], &humans).unwrap().allow, None);
     }
 
     #[test]
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(last.turn_budget, 0);
         let refused = NotesPost::spend(t.clone(), p("dev-b"), "more", 8, Some(&last));
         assert_eq!(refused, Err(Error::BudgetExhausted(t.clone())));
-        let human = NotesPost::new(t.clone(), UserId::human(), "go on");
+        let human = NotesPost::new(t.clone(), crate::human(), "go on");
         assert_eq!(
             NotesPost::spend(t, p("dev-b"), "more", 8, Some(&human)).unwrap().turn_budget,
             DEFAULT_TURN_BUDGET - 1
@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn envelope_round_trips_through_json() {
-        let msg = Envelope::new(UserId::human(), UserId::messenger(), "route this");
+        let msg = Envelope::new(crate::human(), UserId::messenger(), "route this");
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("in_reply_to"));
         assert_eq!(serde_json::from_str::<Envelope>(&json).unwrap(), msg);

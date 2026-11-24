@@ -101,8 +101,8 @@ async fn runs_started_answering_a_step_share_its_grant_and_tell_all_they_spent_a
     let start = StartRun {
         trail: TrailSource::Saved("deploy".parse().unwrap()),
         args: Value::Null,
-        owner: Some(UserId::human()),
-        origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
+        owner: Some(ants_test_support::human()),
+        origin: Origin { by: Starter::Human { user: ants_test_support::human() }, channel: None },
         thread: ThreadId::generate(),
         limits: TrailLimits { steps: 4, ..TrailLimits::default() },
         spends_from: None,
@@ -169,7 +169,8 @@ async fn runs_started_answering_a_step_share_its_grant_and_tell_all_they_spent_a
     let header = lead.header(&root).await;
     assert_eq!((header.steps, header.turns), (4, 4), "nothing told twice: its step, the nested three, a reply turn");
 
-    let asked = Envelope::new(UserId::human(), ant("dev"), "fan out").with_owner(Some(UserId::human()));
+    let asked =
+        Envelope::new(ants_test_support::human(), ant("dev"), "fan out").with_owner(Some(ants_test_support::human()));
     let _asked = dev.begin(&asked);
     let client = mcp_client(&dev, &asked.thread_id).await;
     let (ok, text) = call(&client, "run_trail", json!({"script": four, "limits": {"steps": 7}})).await;
@@ -293,7 +294,7 @@ async fn a_stopped_run_answering_a_step_tells_what_it_spent_until_the_notice_goe
     let run = started(&text);
     let first = tokio::time::timeout(Duration::from_secs(30), dev_sent.recv()).await.unwrap().unwrap();
     assert!(first.trail_step.is_some(), "the run's first step goes out");
-    dev_trails.stop(&run, &UserId::human()).await.unwrap();
+    dev_trails.stop(&run, &ants_test_support::human()).await.unwrap();
 
     let notice = loop {
         let sent = tokio::time::timeout(Duration::from_secs(30), dev_sent.recv()).await.unwrap().unwrap();
@@ -327,8 +328,8 @@ async fn a_nested_run_s_trail_call_on_the_route_of_its_step_s_run_is_refused_and
     let start = StartRun {
         trail: TrailSource::Saved("deploy".parse().unwrap()),
         args: Value::Null,
-        owner: Some(UserId::human()),
-        origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
+        owner: Some(ants_test_support::human()),
+        origin: Origin { by: Starter::Human { user: ants_test_support::human() }, channel: None },
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
         spends_from: None,

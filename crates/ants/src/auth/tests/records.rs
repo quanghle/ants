@@ -6,7 +6,7 @@ use super::*;
 #[tokio::test]
 async fn ants_write_their_own_colony_entry_and_everyone_reads_the_colony() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a) = (UserId::human(), p("dev-a"));
+    let (human, dev_a) = (ants_test_support::human(), p("dev-a"));
     let ttl = ants_proto::COLONY_TTL;
 
     let (_a, a_js) = server.connect(&dev_a).await;
@@ -46,7 +46,7 @@ async fn ants_write_their_own_colony_entry_and_everyone_reads_the_colony() {
 async fn ants_warn_a_human_once_per_crossing_of_a_storage_limit() {
     use ants_daemon::monitoring::storage::{self, Settings, Watcher};
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (h_client, h_js) = server.connect(&human).await;
     bus::ensure_stream(&h_js).await.unwrap();
     bus::init_own_buckets(&h_js).await.unwrap();
@@ -88,7 +88,7 @@ async fn ants_warn_a_human_once_per_crossing_of_a_storage_limit() {
 #[tokio::test]
 async fn ants_keep_their_own_escalation_chain_and_read_everyone_s() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, lead) = (UserId::human(), p("dev-a"), p("lead"));
+    let (human, dev_a, lead) = (ants_test_support::human(), p("dev-a"), p("lead"));
     let (_a, a_js) = server.connect(&dev_a).await;
     assert!(bus::ensure_chains(&a_js).await.is_err(), "only the human creates the bucket");
     let (_h, h_js) = server.connect(&human).await;
@@ -114,7 +114,7 @@ async fn ants_record_the_links_they_pass_on_and_read_everyone_s() {
     let (dev_a, dev_b, lead) = (p("dev-a"), p("dev-b"), p("lead"));
     let (_a, a_js) = server.connect(&dev_a).await;
     assert!(bus::ensure_links(&a_js).await.is_err(), "only the human creates the bucket");
-    let (_h, h_js) = server.connect(&UserId::human()).await;
+    let (_h, h_js) = server.connect(&ants_test_support::human()).await;
     let h_kv = bus::ensure_links(&h_js).await.unwrap();
 
     let origin = ThreadId::generate();
@@ -153,7 +153,7 @@ async fn senders_store_their_own_attachments_and_ants_read_those_of_the_messages
     use ants_proto::{AttachmentHandle, AttachmentScope};
 
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b, dev_c) = (UserId::human(), p("dev-a"), p("dev-b"), p("dev-c"));
+    let (human, dev_a, dev_b, dev_c) = (ants_test_support::human(), p("dev-a"), p("dev-b"), p("dev-c"));
     let (_a, a_js) = server.connect(&dev_a).await;
     assert!(a_js.create_stream(ants_daemon::hub::files_config()).await.is_err(), "only a human creates it");
     let (_h, h_js) = server.connect(&human).await;
@@ -193,7 +193,7 @@ async fn humans_write_only_their_own_reactions_and_ants_change_theirs_through_an
     use ants_proto::{ReactionChange, ReactionsOutcome, ReactionsRequest};
 
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (eyes, check): (ants_proto::Reaction, ants_proto::Reaction) =
         ("eyes".parse().unwrap(), "check".parse().unwrap());
     let (a_client, a_js) = server.connect(&dev_a).await;
@@ -272,7 +272,7 @@ async fn ants_signer_reads_the_runs_ants_save_trails_from() {
     let Some(server) = Server::start() else { return };
     let dev_a = p("dev-a");
     let (_a, a_js) = server.connect(&dev_a).await;
-    let (_h, h_js) = server.connect(&UserId::human()).await;
+    let (_h, h_js) = server.connect(&ants_test_support::human()).await;
     h_js.create_stream(ants_daemon::hub::trail_runs_config()).await.unwrap();
     let key = trail_session_key(&dev_a, &RunId::generate());
     DirectKv::new(&a_js, None, TRAIL_RUNS_BUCKET).await.unwrap().put(&key, b"{}".to_vec()).await.unwrap();
@@ -293,7 +293,7 @@ async fn humans_save_the_trails_and_each_ant_keeps_only_the_runs_it_conducts() {
         trail_thread_steps_prefix, trail_tip_key, trail_tip_retired_key, trail_tip_vote_key,
     };
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (_a, a_js) = server.connect(&dev_a).await;
     let (_h, h_js) = server.connect(&human).await;
     let configs = [
@@ -403,7 +403,7 @@ async fn a_rollup_under_an_ant_s_rights_leaves_the_trail_entries_of_others() {
         trail_session_key, trail_tip_key,
     };
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (_h, h_js) = server.connect(&human).await;
     let rights = crate::people::humans::Rights::from_creds(Some(&server.creds(&human))).unwrap();
     ants_daemon::hub::init(&h_js, |s| rights.may_publish(s)).await.unwrap();

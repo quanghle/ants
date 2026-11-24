@@ -110,7 +110,7 @@ pub(crate) fn stored_on(subject: &str, attachments: &[Attachment], stored: DateT
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{Envelope, UserId};
+    use ants_proto::Envelope;
 
     use super::*;
 
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn an_invalid_reference_is_listed_unavailable() {
-        let message = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "look");
+        let message = Envelope::new("human".parse().unwrap(), "dev-a".parse().unwrap(), "look");
         let good = reference("a.txt", b"a");
         let bad = Attachment { name: "evil\u{1b}[2J".into(), ..reference("b", b"b") };
         let shown = listed(&[good.clone(), bad, good.clone()], |id| message.attachment_handle(id));

@@ -62,6 +62,10 @@ pub struct AntOptions {
     /// `[harnesses.NAME]` (default: the config file's top-level `harness`; with none, required).
     #[arg(long)]
     harness: Option<String>,
+    /// Default human of the ant, who gets the escalations and tool requests of threads with no owner (default: the
+    /// config file's top-level `human`; with none, required).
+    #[arg(long, value_name = "NAME")]
+    human: Option<UserId>,
     /// Model ID advertised by the harness. Omitted: keep the harness default.
     #[arg(long)]
     model: Option<String>,
@@ -138,6 +142,7 @@ impl AntOptions {
             || self.tasks.is_some()
             || !self.env.is_empty()
             || self.harness.is_some()
+            || self.human.is_some()
             || self.model.is_some()
             || self.reasoning_effort.is_some()
             || self.context.is_some()
@@ -178,6 +183,9 @@ impl AntOptions {
         p.env.extend(self.env.iter().cloned());
         if let Some(harness) = &self.harness {
             p.harness = Some(harness.clone());
+        }
+        if let Some(human) = &self.human {
+            p.human = Some(human.clone());
         }
         if let Some(model) = &self.model {
             p.model = Some(model.clone());
@@ -286,7 +294,7 @@ pub struct Listed {
 
 /// The ants to serve, the harnesses they may name and the schedules to run: those of the config file, or for an ant
 /// described by flags the harnesses and host settings of the file at `default_path` if it exists, and its top-level
-/// `harness` unless the flags name one. The schedules run only when the daemon serves the whole file, not one ant
+/// `harness` and `human` unless the flags name them. The schedules run only when the daemon serves the whole file, not one ant
 /// picked with `--ant`. `hostname` names the machine where the file does
 /// not. `creds` (`--creds`) are the credentials of the ant described by flags, else of the file's ant `--ant` names,
 /// else of its one `[[ant]]`, where it sets none ([`config::Loaded::credit`]): never a built-in ant's unless named, and
@@ -324,6 +332,9 @@ fn select(
             let summary = Summary::load(default_path)?;
             if ant.harness.is_none() {
                 ant.harness = summary.harness;
+            }
+            if ant.human.is_none() {
+                ant.human = summary.human;
             }
             let harnesses = summary.harnesses;
             let (schedules, metrics) = (Vec::new(), args.metrics);

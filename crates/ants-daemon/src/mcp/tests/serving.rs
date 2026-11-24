@@ -31,7 +31,7 @@ async fn the_socket_serves_the_tools_after_the_token() {
     let client = ClientConfig::default().serve(stream).await.unwrap();
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "human", "text": "done"})).await;
     assert!(ok, "{text}");
-    assert!(sent.recv().await.unwrap().to.is_human());
+    assert!(sent.recv().await.unwrap().to == ants_test_support::human());
 
     let mut stranger = ipc::connect(Path::new(&server.args[2])).await.unwrap();
     stranger.write_all(b"nope\n").await.unwrap();
@@ -62,7 +62,7 @@ async fn a_home_too_long_for_a_socket_serves_the_tools_from_the_runtime_director
     let client = ClientConfig::default().serve(stream).await.unwrap();
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "human", "text": "done"})).await;
     assert!(ok, "{text}");
-    assert!(sent.recv().await.unwrap().to.is_human());
+    assert!(sent.recv().await.unwrap().to == ants_test_support::human());
     drop(client);
     drop(mcp);
     assert!(!socket.exists(), "the socket is removed with the server");

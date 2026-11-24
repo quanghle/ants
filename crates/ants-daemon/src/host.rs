@@ -170,7 +170,7 @@ pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sense: 
     if let Some(sense) = &sense {
         sense.up(Link::new(js.clone(), host.js_domain.clone(), accounts.clone(), machine.clone()));
     }
-    let humans = crate::people::humans::Registry::new(UserId::human())
+    let humans = crate::people::humans::Registry::listed()
         .verifying_grants(crate::people::humans::account(host.creds.as_deref()));
     let _watching = humans.watch(js.clone(), crate::people::humans::RETRY);
     let orders = admin::Orders {

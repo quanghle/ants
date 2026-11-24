@@ -87,7 +87,7 @@ async fn a_run_whose_records_could_not_be_read_at_start_takes_a_reply_or_a_stop_
     let reply = a.reply(a.to.clone(), "A", Role::Ant).unwrap();
     let e = again.trails.take(&reply).await.expect_err("the reply waits for its run, not acked as a late one");
     assert!(format!("{e:#}").contains(&format!("continuing run {answered}")), "{e:#}");
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let e = again.trails.stop(&stopped, &human).await.expect_err("no stop while the run's records are unread");
     assert!(e.contains(&format!("continuing run {stopped}")), "{e}");
 
@@ -211,7 +211,7 @@ async fn a_replay_of_a_changed_script_fails_the_run_naming_the_call_that_differs
     assert!(error.contains("diverges from the journal: call "), "{error}");
     assert!(error.contains(r#""prompt":"z""#) && error.contains(r#""prompt":"a""#), "{error}");
     assert_eq!(limit, None);
-    let refused = again.trails.resume(&run, &UserId::human(), None).await.unwrap_err();
+    let refused = again.trails.resume(&run, &ants_test_support::human(), None).await.unwrap_err();
     assert!(refused.contains("failed, not on a limit"), "{refused}");
 }
 
@@ -225,7 +225,7 @@ async fn a_fired_run_stored_but_not_listed_is_continued_by_its_firing_delivered_
     let start = TrailStart { trail: "ask".parse().unwrap(), args: Value::Null, limits: TrailLimits::DEFAULT };
     let fire = || {
         Envelope::new(ant("nightly"), ant("lead"), "Scheduled run of trail.")
-            .with_owner(Some(UserId::human()))
+            .with_owner(Some(ants_test_support::human()))
             .from_webhook()
             .starting(Some(start.clone()))
     };

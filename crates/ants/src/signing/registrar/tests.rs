@@ -288,8 +288,6 @@ async fn a_github_user_under_the_policy_registers_a_device_and_holds_the_name() 
 
         let reason = refusal(&Device::new("bob").ask(&client, WAIT).await);
         assert!(reason.contains("octocat is bound to alice"), "{reason}");
-        let reason = refusal(&Device::new("human").ask(&client, WAIT).await);
-        assert!(reason.contains("default human"), "{reason}");
 
         let mut forged = Device::new("dave");
         forged.request.label = Some("other".into());
@@ -307,7 +305,7 @@ async fn outside_the_policy_a_human_decides_and_an_approval_stands_until_the_nam
     let config = server.dir().join("config.toml");
     std::fs::write(&config, policy(&url)).unwrap();
     let client = bootstrap(&server, &team).await;
-    let (_, js) = server.connect_as(&UserId::human(), Role::Human).await;
+    let (_, js) = server.connect_as(&ants_test_support::human(), Role::Human).await;
     let stream = bus::ensure_stream(&js).await.unwrap();
     let register = async |name: &str| Device::new(name).ask(&client, WAIT).await;
 

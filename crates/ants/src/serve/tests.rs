@@ -30,6 +30,7 @@ fn ant(name: &str) -> Ant {
     p.nats = Some(format!("nats://{name}:4222"));
     p.creds = Some(PathBuf::from(format!("{name}.creds")));
     p.harness = Some("copilot".to_owned());
+    p.human = Some(ants_test_support::human());
     p
 }
 
@@ -60,9 +61,12 @@ fn the_file_names_the_machine_as_the_host_connection_would() {
     let listed = |text: &str, line: &str| listing(text, line).unwrap();
     let err = format!("{:#}", listing("messenger = false\n", "").unwrap_err());
     assert!(err.contains("nothing to serve on this machine: no [[ant]] entries and messenger = false"), "{err}");
-    let top = "harness = \"copilot\"\nmachine = \"dev-vm1\"\n";
+    let top = "harness = \"copilot\"\nhuman = \"human\"\nmachine = \"dev-vm1\"\n";
     assert_eq!(listed(top, "--ant system-messenger").machine, Some("dev-vm1".parse().unwrap()));
-    assert_eq!(listed("harness = \"copilot\"\nmachine = \"Dev VM\"\n", "").machine, Some("gen-4f2a".parse().unwrap()));
+    assert_eq!(
+        listed("harness = \"copilot\"\nhuman = \"human\"\nmachine = \"Dev VM\"\n", "").machine,
+        Some("gen-4f2a".parse().unwrap())
+    );
     let team = dir.join("team");
     crate::auth::init(&team).unwrap();
     crate::auth::issue_host(&team, &"m1".parse().unwrap(), None, &dir.join("h.creds")).unwrap();
@@ -267,7 +271,7 @@ fn creds_given_stand_for_the_one_ant_named_or_listed_never_a_builtin_ant_unnamed
     let config = dir.join("config.toml");
     let cli = dir.join("cli.creds");
     let listing = |text: &str, line: &str| {
-        std::fs::write(&config, format!("harness = \"copilot\"\n{text}")).unwrap();
+        std::fs::write(&config, format!("harness = \"copilot\"\nhuman = \"human\"\n{text}")).unwrap();
         ants(&args(&format!("--config {} {line}", config.display())), &config, "box", Some(&cli))
     };
     let creds = |listed: &Listed| -> Vec<(String, Option<PathBuf>)> {

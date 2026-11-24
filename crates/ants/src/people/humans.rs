@@ -21,7 +21,8 @@ pub async fn ensure(js: &jetstream::Context) -> Result<kv::Store> {
         .context("opening the humans bucket (with credentials, `ants init` as a human creates it)")
 }
 
-/// Who the CLI acts as: the user its credentials name, a human or an ant, or `human` without credentials.
+/// Who the CLI acts as: the user its credentials name, a human or an ant, or without credentials the human the config
+/// file's `human` names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Me {
     pub id: UserId,
@@ -32,10 +33,17 @@ pub struct Me {
 }
 
 impl Me {
-    /// The one the credentials file `creds` names, from the `name` of its user JWT; `human` without credentials.
-    pub fn from_creds(creds: Option<&Path>) -> Result<Self> {
+    /// The one the credentials file `creds` names, from the `name` of its user JWT; without credentials, the human
+    /// `human` (the config file's `human`, or `ANTS_HUMAN`), failing when that is unset too.
+    pub fn from_creds(creds: Option<&Path>, human: Option<&UserId>) -> Result<Self> {
         let Some(path) = creds else {
-            return Ok(Self { id: UserId::human(), role: Role::Human, assistant_of: None });
+            let Some(human) = human else {
+                bail!(
+                    "no credentials and no human to act as: set `human` in the config file (top level or [cli]), \
+                     or ANTS_HUMAN, or give --creds"
+                );
+            };
+            return Ok(Self { id: human.clone(), role: Role::Human, assistant_of: None });
         };
         let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
         Self::from_creds_text(&text).with_context(|| format!("credentials {}", path.display()))
@@ -53,7 +61,7 @@ impl Me {
         let claims = creds_claims(text)?;
         let name = claims["name"].as_str().context("a user JWT without a name")?;
         let id: UserId = name.parse().with_context(|| format!("a user JWT naming {name:?}, not a user id"))?;
-        let role = if writes_humans(&claims) { Role::Human } else { Role::by_default(&id) };
+        let role = if writes_humans(&claims) { Role::Human } else { Role::Ant };
         let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
         let assistant_of = if role.is_human() { None } else { ants_proto::AssistantOf::from_tags(tags) };
         Ok(Self { id, role, assistant_of })
@@ -130,10 +138,9 @@ pub fn may_publish(claims: &Value, subject: &str) -> bool {
 }
 
 /// Register `me` in the humans bucket, creating the bucket when missing, unless its entry is there already: one
-/// direct get then. `human`, a human without an entry, and an ant are never registered. Returns whether it put an
-/// entry.
+/// direct get then. An ant is never registered. Returns whether it put an entry.
 pub async fn register(js: &jetstream::Context, me: &Me) -> Result<bool> {
-    if me.id.is_human() || !me.role.is_human() {
+    if !me.role.is_human() {
         return Ok(false);
     }
     let registered = |payload: &[u8]| {
@@ -228,7 +235,12 @@ mod tests {
 
     #[test]
     fn the_credentials_name_whom_the_cli_acts_as() {
-        assert_eq!(Me::from_creds(None).unwrap(), Me { id: UserId::human(), role: Role::Human, assistant_of: None });
+        let err = Me::from_creds(None, None).unwrap_err().to_string();
+        assert!(err.contains("no credentials and no human to act as"), "{err}");
+        assert_eq!(
+            Me::from_creds(None, Some(&p("alice"))).unwrap(),
+            Me { id: p("alice"), role: Role::Human, assistant_of: None }
+        );
         let human = json!({ "pub": { "allow": ["ants.inbox.*.alice", "$KV.ants_humans.*"] } });
         let me = |claims| Me::from_creds_text(&creds_with(claims)).map_err(|e| format!("{e:#}"));
         assert_eq!(
@@ -242,7 +254,8 @@ mod tests {
         );
         assert_eq!(
             me(json!({ "name": "human" })),
-            Ok(Me { id: UserId::human(), role: Role::Human, assistant_of: None })
+            Ok(Me { id: ants_test_support::human(), role: Role::Ant, assistant_of: None }),
+            "no name makes a human"
         );
         assert!(me(json!({ "name": "Alice Smith" })).unwrap_err().starts_with("a user JWT naming \"Alice Smith\""));
         assert_eq!(me(json!({ "sub": "U123" })).unwrap_err(), "a user JWT without a name");
@@ -270,7 +283,7 @@ mod tests {
         let connect =
             async |me: &Me, creds: &Path| bus::connect(&server.url, Some(creds), None, &me.id, "test").await.unwrap().1;
         let creds = server.creds_as(&alice, Role::Human);
-        let me = Me::from_creds(Some(&creds)).unwrap();
+        let me = Me::from_creds(Some(&creds), None).unwrap();
         assert_eq!(me, Me { id: alice.clone(), role: Role::Human, assistant_of: None });
         let a_js = connect(&me, &creds).await;
         assert!(register(&a_js, &me).await.unwrap(), "the first connection registers alice");
@@ -282,13 +295,14 @@ mod tests {
         assert!(register(&a_js, &me).await.unwrap(), "a removed human registers again");
 
         let creds = server.creds_as(&dev_a, Role::Ant);
-        let ant = Me::from_creds(Some(&creds)).unwrap();
+        let ant = Me::from_creds(Some(&creds), None).unwrap();
         assert_eq!(ant.role, Role::Ant);
         assert!(!register(&connect(&ant, &creds).await, &ant).await.unwrap());
-        let creds = server.creds_as(&UserId::human(), Role::Human);
-        let human = Me::from_creds(Some(&creds)).unwrap();
-        assert!(!register(&connect(&human, &creds).await, &human).await.unwrap(), "human needs no entry");
-        let keys: Vec<String> = kv.keys().await.unwrap().try_collect().await.unwrap();
-        assert_eq!(keys, ["alice"]);
+        let creds = server.creds_as(&ants_test_support::human(), Role::Human);
+        let human = Me::from_creds(Some(&creds), None).unwrap();
+        assert!(register(&connect(&human, &creds).await, &human).await.unwrap(), "no name is a human without an entry");
+        let mut keys: Vec<String> = kv.keys().await.unwrap().try_collect().await.unwrap();
+        keys.sort();
+        assert_eq!(keys, ["alice", "human"]);
     }
 }

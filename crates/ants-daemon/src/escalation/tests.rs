@@ -169,7 +169,7 @@ async fn reminders_back_off_and_stop_after_the_third() {
         Box::pin(async { Ok(None) })
     });
     let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
     let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::limits::caps::Caps::default()));
     let chain = Chain { remind: Some(Duration::from_millis(1)), ..Default::default() };
     let escalator = Escalator::new(p("dev-a"), chain, colony, humans, ledger, send);
@@ -200,7 +200,7 @@ async fn a_snooze_holds_the_reminder_back_and_a_read_escalation_ends_them() {
         Box::pin(async move { Ok(Some(seq)) })
     });
     let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
     let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::limits::caps::Caps::default()));
     let chain = Chain { remind: Some(Duration::from_millis(1)), ..Default::default() };
     let until = chrono::Utc::now() + chrono::TimeDelta::hours(1);
@@ -247,7 +247,7 @@ fn recording(chain: &[&str]) -> (Escalator, Recorded) {
         Box::pin(async { Ok(None) })
     });
     let colony: Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
     let ledger = Arc::new(Ledger::memory(p("dev-a"), crate::limits::caps::Caps::default()));
     let chain = Chain { escalate_to: chain.iter().map(|s| p(s)).collect(), after: None, ..Default::default() };
     (Escalator::new(p("dev-a"), chain, colony, humans, ledger, send), sent)
@@ -376,7 +376,7 @@ mod assistant_first {
 
     fn humans() -> (Registry, TestDevice) {
         let device = TestDevice::default();
-        let humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
+        let humans = Registry::with(ants_test_support::human(), &["alice"]).verifying_grants(Some(device.account()));
         grant(&humans, &device, Some("pa"));
         (humans, device)
     }

@@ -124,7 +124,8 @@ impl Drop for Conductor {
 
 /// The buckets `ants init` creates, as the human.
 async fn init(server: &NatsServer) {
-    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "init").await.unwrap();
+    let (_, js) =
+        ants_daemon::bus::connect(&server.url, None, None, &ants_test_support::human(), "init").await.unwrap();
     for config in
         [hub::trails_config(), hub::trail_runs_config(), hub::trail_tips_config(), hub::trail_ratings_config()]
     {
@@ -134,14 +135,15 @@ async fn init(server: &NatsServer) {
 
 /// Save `script` as the colony's trail `name`, as the human.
 async fn save_for_colony(server: &NatsServer, name: &str, script: &str) {
-    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "save").await.unwrap();
+    let (_, js) =
+        ants_daemon::bus::connect(&server.url, None, None, &ants_test_support::human(), "save").await.unwrap();
     let trail = ants_proto::SavedTrail {
         name: name.parse().unwrap(),
         description: "a test".to_owned(),
         phases: Vec::new(),
         waypoints: Vec::new(),
         script: script.to_owned(),
-        saved_by: ants_proto::Saver::Human { user: UserId::human() },
+        saved_by: ants_proto::Saver::Human { user: ants_test_support::human() },
         saved_from: None,
         saved_at: chrono::Utc::now(),
     };
@@ -151,7 +153,7 @@ async fn save_for_colony(server: &NatsServer, name: &str, script: &str) {
 
 /// The conductor `lead`'s daemon, its runs continued, with `worker` as the `ants` binary and `colony` as the colony.
 async fn conductor(server: &NatsServer, worker: &Path, colony: Vec<ColonyEntry>) -> Conductor {
-    conductor_full(server, worker, colony, Registry::new(UserId::human()), None).await
+    conductor_full(server, worker, colony, Registry::new(ants_test_support::human()), None).await
 }
 
 /// [`conductor`], knowing the humans and their assistants' grants from `humans`.
@@ -166,7 +168,7 @@ async fn conductor_saving(
     colony: Vec<ColonyEntry>,
     trails_dir: Option<PathBuf>,
 ) -> Conductor {
-    conductor_full(server, worker, colony, Registry::new(UserId::human()), trails_dir).await
+    conductor_full(server, worker, colony, Registry::new(ants_test_support::human()), trails_dir).await
 }
 
 /// [`conductor`] with its humans and saved trails directory.
@@ -261,7 +263,7 @@ impl Conductor {
 
     /// Start a run of `script` reporting on `thread`.
     async fn start_on(&self, script: &str, limits: TrailLimits, thread: ThreadId) -> RunId {
-        let human = UserId::human();
+        let human = ants_test_support::human();
         let start = StartRun {
             trail: TrailSource::Script(format!("{META}{script}")),
             args: Value::Null,
@@ -451,7 +453,7 @@ async fn lead_mcp(dir: &Path, js: &async_nats::jetstream::Context, trails: &Trai
     let outbox: ants_daemon::mcp::Outbox = Arc::new(|_| Box::pin(async { Ok(()) }));
     let colony: ants_daemon::mcp::Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
     let notes = Arc::new(JetStreamNotes::new(js.clone(), ant("lead")));
-    let humans = Registry::new(UserId::human());
+    let humans = Registry::new(ants_test_support::human());
     let mcp = Mcp::start(ant("lead"), &dir.join("home"), outbox, colony, notes, humans, None).await.unwrap();
     mcp.with_trails(trails.clone());
     mcp

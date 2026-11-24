@@ -95,7 +95,7 @@ fn a_rejection_names_who_rejected_the_tool_request() {
 #[tokio::test]
 async fn a_thread_marked_done_in_the_period_shows_who_marked_it() {
     let Some(server) = NatsServer::start() else { return };
-    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     js.create_stream(crate::hub::threads_config()).await.unwrap();
     let threads = js.get_key_value(THREADS_BUCKET).await.unwrap();
     let (ant, done, open) = (p("dev-a"), ThreadId::generate(), ThreadId::generate());
@@ -129,7 +129,7 @@ async fn a_thread_marked_done_in_the_period_shows_who_marked_it() {
 #[tokio::test]
 async fn review_distinguishes_explicit_undo_from_an_absent_or_pruned_done_mark() {
     let Some(server) = NatsServer::start() else { return };
-    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     js.create_stream(crate::hub::threads_config()).await.unwrap();
     let kv = DirectKv::new(&js, None, THREADS_BUCKET).await.unwrap();
     let (ant, undone, pruned, never) = (p("dev-a"), ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
@@ -159,7 +159,7 @@ async fn review_distinguishes_explicit_undo_from_an_absent_or_pruned_done_mark()
 #[tokio::test]
 async fn an_unreadable_entry_reopens_a_thread_only_with_matching_metadata() {
     let Some(server) = NatsServer::start() else { return };
-    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     js.create_stream(crate::hub::stream_config()).await.unwrap();
     js.create_stream(crate::hub::threads_config()).await.unwrap();
     js.create_key_value(crate::hub::kept_config(SESSIONS_BUCKET)).await.unwrap();

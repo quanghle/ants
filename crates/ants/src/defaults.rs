@@ -1,15 +1,15 @@
 //! The global `--nats`, `--creds` and `--js-domain`, defaulted from the config file where neither a flag nor the
-//! environment sets them.
+//! environment sets them, and the human the CLI acts as without credentials (`ANTS_HUMAN`, else the file's `human`).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use ants_daemon::config::{self, CliDefaults};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory as _, FromArgMatches as _, Parser as _};
 
-use crate::cli::{Ants, DaemonCommand};
+use crate::cli::{Ants, DaemonCommand, HUMAN_ENV};
 use crate::cli::{Cli, Command};
 
 /// Parse the command line, then fill in the connection it leaves to the config file.
@@ -45,8 +45,8 @@ fn is_daemon(args: impl IntoIterator<Item = OsString>) -> bool {
 
 /// The whole command line of a parsed `ants daemon`.
 fn daemon(lean: Ants<DaemonCommand>) -> Cli {
-    let Ants { nats, creds, js_domain, compact, command } = lean;
-    Cli { nats, creds, js_domain, compact, command: command.map(Command::Daemon) }
+    let Ants { nats, creds, js_domain, human, compact, command } = lean;
+    Cli { nats, creds, js_domain, human, compact, command: command.map(Command::Daemon) }
 }
 
 /// The config file `ANTS_CONFIG` names, else `~/.ants/config.toml`.
@@ -75,11 +75,23 @@ pub fn cli() -> Result<CliDefaults> {
 
 /// Set the global connection flags that neither the command line nor the environment set from the file at `path`,
 /// if it exists, except for `ants daemon` and `ants add`: their flags describe ants, and they read the file's
-/// top-level keys themselves.
+/// top-level keys themselves. Without credentials then, the human the CLI acts as comes from [`HUMAN_ENV`], else the
+/// file.
 fn apply(cli: &mut Cli, matches: &ArgMatches, path: &Path) -> Result<()> {
-    if matches!(cli.command, Some(Command::Daemon(_) | Command::Add(_))) {
-        return Ok(());
+    if !matches!(cli.command, Some(Command::Daemon(_) | Command::Add(_))) {
+        connection(cli, matches, path)?;
     }
+    if cli.creds.is_none() {
+        cli.human = match std::env::var(HUMAN_ENV).ok().filter(|h| !h.is_empty()) {
+            Some(human) => Some(human.parse().with_context(|| format!("{HUMAN_ENV}={human:?}"))?),
+            None => CliDefaults::load(path)?.human,
+        };
+    }
+    Ok(())
+}
+
+/// The connection part of [`apply`].
+fn connection(cli: &mut Cli, matches: &ArgMatches, path: &Path) -> Result<()> {
     let given = |id| matches!(matches.value_source(id), Some(ValueSource::CommandLine | ValueSource::EnvVariable));
     let (nats, creds, js_domain) = (given("nats"), given("creds"), given("js_domain"));
     if nats && creds && js_domain {

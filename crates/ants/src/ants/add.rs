@@ -90,9 +90,6 @@ pub(crate) struct Listing {
 /// in place of its own, unless the config file lists it already, and where its credentials go.
 pub(crate) fn listing(args: &AddArgs, base: Ant, nats: &str, js_domain: Option<&JsDomain>) -> Result<Listing> {
     let name = &args.name;
-    if name.is_human() {
-        bail!("{name} is the default human, not an ant");
-    }
     crate::auth::check_not_reserved(name)?;
     let path = match &args.config {
         Some(path) => path.clone(),
@@ -399,6 +396,9 @@ fn entry(
     if checked.harness.is_none() {
         checked.harness.clone_from(&summary.harness);
     }
+    if checked.human.is_none() {
+        checked.human.clone_from(&summary.human);
+    }
     checked.into_config(nats, &summary.harnesses)?;
     let entry = config::entry(&p)?;
     Ok((p, entry))
@@ -596,7 +596,7 @@ mod tests {
         let Some(server) = crate::test_support::Server::start() else { return };
         let dir = ants_test_support::scratch_dir("ant-add-stored").canonicalize().unwrap();
         let config = dir.join("config.toml");
-        std::fs::write(&config, "harness = \"copilot\"\n").unwrap();
+        std::fs::write(&config, "harness = \"copilot\"\nhuman = \"human\"\n").unwrap();
         let (config_arg, workdir) = (config.to_str().unwrap(), dir.to_str().unwrap());
         let out = dir.join("keys/dev-a.creds");
         let out_arg = out.to_str().unwrap();
@@ -606,7 +606,7 @@ mod tests {
         store.lock();
         let err = format!("{:#}", run_with(&add, &server.url, &store).await.unwrap_err());
         assert!(err.contains("locked"), "{err}");
-        let kept = std::fs::read_to_string(&config).unwrap() == "harness = \"copilot\"\n";
+        let kept = std::fs::read_to_string(&config).unwrap() == "harness = \"copilot\"\nhuman = \"human\"\n";
         assert!(!seed_path(&out).exists() && kept, "nothing half-done");
         store.unlock();
 
@@ -646,7 +646,7 @@ mod tests {
 
         let dir = ants_test_support::scratch_dir("ant-add-home").canonicalize().unwrap();
         let config = dir.join("config.toml");
-        std::fs::write(&config, "harness = \"copilot\"\n").unwrap();
+        std::fs::write(&config, "harness = \"copilot\"\nhuman = \"human\"\n").unwrap();
         let home = dir.join("home");
         let sense = ants_sense::identity::sense_id(&home).unwrap();
         let status = ChainStatus {
@@ -682,7 +682,7 @@ mod tests {
     async fn a_listed_ant_gets_its_credentials_later() {
         let dir = ants_test_support::scratch_dir("ant-add").canonicalize().unwrap();
         let config = dir.join("config.toml");
-        std::fs::write(&config, "# mine\nharness = \"copilot\"\n").unwrap();
+        std::fs::write(&config, "# mine\nharness = \"copilot\"\nhuman = \"human\"\n").unwrap();
         let (config_arg, out) = (config.to_str().unwrap(), dir.join("keys/dev-a.creds"));
         let workdir = dir.to_str().unwrap();
         let out_arg = out.to_str().unwrap();
@@ -702,7 +702,10 @@ mod tests {
         .await
         .unwrap();
         let listed = std::fs::read_to_string(&config).unwrap();
-        assert!(listed.starts_with("# mine\nharness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\n"), "{listed}");
+        assert!(
+            listed.starts_with("# mine\nharness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\n"),
+            "{listed}"
+        );
         assert!(listed.contains("\nidle_timeout = \"1m30s\"\n"), "{listed}");
         let dev_a = config::load(&config).unwrap().ants.into_iter().find(|p| p.name.as_str() == "dev-a").unwrap();
         assert_eq!(

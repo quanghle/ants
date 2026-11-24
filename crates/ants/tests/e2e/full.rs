@@ -39,7 +39,7 @@ pub fn a_full_hub_answers_once_space_returns() {
     std::fs::write(
         &config,
         format!(
-            "messenger = false\nsage = \"none\"\nharness = \"copilot\"\n\
+            "messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\n\
              [storage]\nwarn_percent = 60\nmax_file_store = {STORE}\n\
              [[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {:?}\n",
             dir.join("home")

@@ -118,13 +118,13 @@ mod tests {
     #[tokio::test]
     async fn only_credentials_reading_every_reaction_follow_them() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a) = (UserId::human(), "dev-a".parse::<UserId>().unwrap());
+        let (human, dev_a) = (ants_test_support::human(), "dev-a".parse::<UserId>().unwrap());
         let (_h, h_js) = server.connect_as(&human, Role::Human).await;
         h_js.create_stream(ants_daemon::hub::reactions_config()).await.unwrap();
         let (_a, a_js) = server.connect_as(&dev_a, Role::Ant).await;
         let follow = async |user: &UserId, role, js| {
             let creds = server.creds_as(user, role);
-            let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+            let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
             changes(&nats, js, &Arc::new(Checker::new(&nats, js))).await
         };
         let mut as_human = follow(&human, Role::Human, &h_js).await;

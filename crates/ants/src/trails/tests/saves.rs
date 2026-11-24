@@ -213,7 +213,7 @@ async fn humans_save_list_show_replace_and_remove_trails_and_ants_save_none_from
 
     let dev_a = p("dev-a");
     let creds = server.creds_as(&dev_a, Role::Ant);
-    let ant = Nats::new(&server.url, Some(&creds), None).unwrap();
+    let ant = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let (_, ant_js) = ant.connect("test").await.unwrap();
     assert_eq!(saved::colony(&ant_js).await.unwrap().len(), 1, "an ant reads the colony's trails");
     let save = TrailCommand::Save { file: file.clone(), name: None };

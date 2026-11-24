@@ -32,7 +32,7 @@ pub fn junk_on_the_subjects_is_dead_lettered_once_and_the_ant_answers_on() {
     let init = run(ants(&["init"]));
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
     let log = dir.join("daemon.log");
-    let mut daemon = ants(&["daemon", "--harness", "copilot"]);
+    let mut daemon = ants(&["daemon", "--harness", "copilot", "--human", "human"]);
     daemon
         .arg("--home")
         .arg(dir.join("home"))

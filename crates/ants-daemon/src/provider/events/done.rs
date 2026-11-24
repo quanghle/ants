@@ -144,7 +144,7 @@ mod tests {
     #[tokio::test]
     async fn each_marking_of_a_thread_done_is_told_to_the_provider_of_an_ant_holding_its_session_once() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let stream = js.create_stream(crate::hub::threads_config()).await.unwrap();
         let threads = DirectKv::new(&js, None, THREADS_BUCKET).await.unwrap();
         let ant: UserId = "dev-a".parse().unwrap();
@@ -155,7 +155,7 @@ mod tests {
         let lifecycle = Lifecycle::open(&outbox, &ant, "id-1", &home).await.unwrap();
         let has_session = async |thread: &ThreadId| *thread != other;
         let done_as_of = async |thread: &ThreadId, after| {
-            let done = ThreadDone::new(thread.clone(), UserId::human(), after);
+            let done = ThreadDone::new(thread.clone(), ants_test_support::human(), after);
             super::mark(&threads, &done).await.unwrap();
             done
         };

@@ -110,7 +110,7 @@ impl Model {
     }
 
     /// The users `@` completes, by name, each an "ant" or a "human": the members of the channel on view, else the
-    /// colony's ants and the registered humans; the human using the UI and the default human are left out.
+    /// colony's ants and the registered humans; the human using the UI is left out.
     fn users(&self) -> Vec<(UserId, &'static str)> {
         let data = &self.data;
         let channel = match self.page() {
@@ -132,7 +132,7 @@ impl Model {
         };
         users
             .into_iter()
-            .filter(|u| *u != data.me() && **u != UserId::human())
+            .filter(|u| *u != data.me())
             .map(|u| (u.clone(), if data.is_human(u) { "human" } else { "ant" }))
             .collect()
     }

@@ -25,6 +25,9 @@ use crate::{ants::add, completions, serve};
 /// The server `--nats` defaults to.
 pub(crate) const DEFAULT_NATS: &str = "nats://127.0.0.1:4222";
 
+/// Environment variable naming the human the CLI acts as without credentials, over the config file's `human`.
+pub(crate) const HUMAN_ENV: &str = "ANTS_HUMAN";
+
 /// The whole command line.
 pub(crate) type Cli = Ants<Command>;
 
@@ -39,7 +42,8 @@ pub(crate) struct Ants<C: Subcommand> {
     pub(crate) nats: String,
 
     /// NATS credentials file (`ants auth user` writes one). Needed when the server enforces per-user permissions.
-    /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as `human`.
+    /// The CLI acts as the human they name, and registers it in `ants_humans` on connecting; without them, as the
+    /// human `ANTS_HUMAN` names, else the config file's `[cli]` or top-level `human`.
     /// Unset, the config file's `[cli]` `creds` apply, except to `ants daemon` and `ants add`. To `ants daemon` they
     /// are the credentials of the ant --ant names, else of the file's one [[ant]] where it sets none.
     /// A human's also create the hub's stream and buckets that are missing on connecting, as `ants init` does.
@@ -52,6 +56,10 @@ pub(crate) struct Ants<C: Subcommand> {
     /// Unset, the config file's `[cli]` or top-level `js_domain` applies, except to `ants daemon` and `ants add`.
     #[arg(long, global = true, env = "ANTS_JS_DOMAIN")]
     pub(crate) js_domain: Option<JsDomain>,
+
+    /// Whom the CLI acts as without credentials ([`HUMAN_ENV`], else the config file's `human`); none when unset.
+    #[arg(skip)]
+    pub(crate) human: Option<UserId>,
 
     /// With bare `ants`: the two-line pane of `ants chat --compact`.
     #[arg(long)]

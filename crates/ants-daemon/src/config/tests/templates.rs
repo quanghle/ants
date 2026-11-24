@@ -253,6 +253,7 @@ fn a_request_is_checked_and_its_entry_loads_as_the_ant_checked() {
             creds: Some(manifest_dir().join("docs.creds")),
             nats: Some("nats://hub:4222".to_owned()),
             pool: ant.pool.clone(),
+            human: Some(ants_test_support::human()),
             ..checked
         }
     );

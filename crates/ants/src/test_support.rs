@@ -23,7 +23,7 @@ use async_nats::{Client, Event, jetstream};
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
-use crate::auth::{Issue, SERVER_CONF, init, issue_leaf, members, role};
+use crate::auth::{Issue, SERVER_CONF, init, issue_leaf, members};
 use crate::credentials::issued::Kind;
 use crate::node::members::EnrollApprover;
 use crate::tools;
@@ -81,12 +81,12 @@ impl Server {
     pub(crate) fn creds_in(&self, user: &UserId, domain: Option<&JsDomain>) -> PathBuf {
         let suffix = domain.map_or_default(|d| format!("-{d}"));
         let out = self.dir().join(format!("{user}{suffix}.creds"));
-        issue(&self.dir().join("auth"), user, role(user, false), domain, &out).unwrap();
+        issue(&self.dir().join("auth"), user, role_of(user), domain, &out).unwrap();
         out
     }
 
     pub(crate) async fn connect(&self, user: &UserId) -> (Client, jetstream::Context) {
-        self.connect_as(user, role(user, false)).await
+        self.connect_as(user, role_of(user)).await
     }
 
     /// Credentials of `user` issued in `role`.
@@ -174,6 +174,11 @@ pub(crate) fn uplink_for_most_ants(
 
 /// Issue a new NATS user for `user`, an ant or a human, in `role`, for the hub's JetStream domain if it has one, and
 /// write its `.creds` file to `out`. Earlier credentials stay valid.
+/// The role the tests give `user`: a human's for [`ants_test_support::human`], else an ant's.
+pub(crate) fn role_of(user: &UserId) -> Role {
+    if *user == ants_test_support::human() { Role::Human } else { Role::Ant }
+}
+
 pub(crate) fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
     issue_with(dir, user, role.into(), Permissions::for_user(user, role).with_js_domain(js_domain), out)
 }
@@ -194,6 +199,6 @@ pub(crate) async fn answer(
     now: DateTime<Utc>,
 ) -> Result<ApprovalDecision> {
     let (seq, request) = tools::find(stream, id).await?;
-    let answer = tools::Answer { seq, request: &request, verdict, by: &UserId::human(), now };
+    let answer = tools::Answer { seq, request: &request, verdict, by: &ants_test_support::human(), now };
     tools::answer_request(js, stream, &answer).await
 }

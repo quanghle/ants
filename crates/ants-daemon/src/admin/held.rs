@@ -75,7 +75,7 @@ impl Hold {
 
 impl Default for Hold {
     fn default() -> Self {
-        Self::new(Registry::default())
+        Self::new(Registry::listed())
     }
 }
 

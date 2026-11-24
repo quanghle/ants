@@ -423,7 +423,7 @@ mod tests {
     #[tokio::test]
     async fn reactions_persist_group_by_message_and_add_and_remove_idempotently() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let (one, two) = (Uuid::now_v7(), Uuid::now_v7());
         assert!(load(&js, &[one]).await.unwrap().is_empty(), "no bucket yet");
         let missing = add(&js, None, &p("alice"), &one, &r("eyes")).await.unwrap_err();
@@ -441,7 +441,7 @@ mod tests {
 
         // Across a reconnect.
         drop(js);
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let all = load(&js, &[one, two, Uuid::now_v7()]).await.unwrap();
         assert_eq!(all[&one], [reacted("check", &["dev-a"]), reacted("eyes", &["alice", "dev-a"])]);
         assert_eq!(all[&two], [reacted("x", &["bob"])]);
@@ -467,7 +467,7 @@ mod tests {
     #[tokio::test]
     async fn the_bucket_denies_purges_and_rollups() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         hub::init(&js, |_| true).await.unwrap();
         let message = Uuid::now_v7();
         add(&js, None, &p("alice"), &message, &r("eyes")).await.unwrap();
@@ -487,10 +487,10 @@ mod tests {
     async fn ants_read_and_change_reactions_to_the_messages_they_read_only() {
         use ants_proto::{ChannelPost, Envelope, NotesPost};
         let Some(server) = NatsServer::start() else { return };
-        let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         hub::init(&js, |_| true).await.unwrap();
         let (dev_a, dev_b, dev_c) = (p("dev-a"), p("dev-b"), p("dev-c"));
-        let to_a = Envelope::new(UserId::human(), dev_a.clone(), "for dev-a");
+        let to_a = Envelope::new(ants_test_support::human(), dev_a.clone(), "for dev-a");
         let between = Envelope::new(dev_b.clone(), dev_c.clone(), "between dev-b and dev-c");
         let notes = NotesPost::new(between.thread_id.clone(), dev_c.clone(), "notes anyone reads");
         let post = ChannelPost::new("ops".parse().unwrap(), dev_b.clone(), "a channel anyone reads");
@@ -505,7 +505,7 @@ mod tests {
         // A message stored long after the time its id says.
         let (secs, _) = between.id.get_timestamp().unwrap().to_unix();
         let stale = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, secs - 2 * 24 * 3600, 0));
-        let late = Envelope { id: stale, ..Envelope::new(UserId::human(), dev_a.clone(), "late") };
+        let late = Envelope { id: stale, ..Envelope::new(ants_test_support::human(), dev_a.clone(), "late") };
         bus::publish(&js, &late).await.unwrap();
         for message in [to_a.id, between.id, notes.id, post.id, stale] {
             add(&js, None, &p("alice"), &message, &r("eyes")).await.unwrap();
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(outcome(&dev_a, Uuid::now_v7()).await, ReactionsOutcome::Unknown, "no such message");
         assert_eq!(outcome(&dev_a, uuid::Uuid::new_v4()).await, ReactionsOutcome::Unknown, "no ants id");
         assert_eq!(outcome(&dev_a, stale).await, ReactionsOutcome::Unknown, "stored too late to tell");
-        let quiet = Envelope::new(UserId::human(), dev_a.clone(), "no reactions");
+        let quiet = Envelope::new(ants_test_support::human(), dev_a.clone(), "no reactions");
         bus::publish(&js, &quiet).await.unwrap();
         assert_eq!(outcome(&dev_a, quiet.id).await, ReactionsOutcome::Listed { reactions: Vec::new() });
 

@@ -21,7 +21,7 @@ const MAX_ASK_WAIT: Duration = Duration::from_mins(30);
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SendMessage {
-    /// Recipient ant, such as `dev-b`, or `human`.
+    /// Recipient: an ant, such as `dev-b`, or a human by name.
     to: String,
     /// The message.
     text: String,
@@ -291,7 +291,7 @@ impl Tools {
 
 #[tool_router(router = messages_router, vis = "pub(super)")]
 impl Tools {
-    #[tool(description = "Send a message to another ant, or to `human`, and return at once. It goes on the \
+    #[tool(description = "Send a message to another ant, or to a human by name, and return at once. It goes on the \
         current thread unless `thread` says otherwise. A message between ants spends one turn of the thread's \
         budget; with none left it is refused and the thread is its owner's to decide. A reply comes later as a new \
         message. When no daemon serves the ant now (no colony entry, a stale one, or a harness signed out) the \

@@ -30,7 +30,7 @@ fn titles(requests: &[ApprovalRequest]) -> Vec<&str> {
 async fn pending_requests_are_listed_and_answered() {
     let Some(server) = Server::start() else { return };
     let dev_a: UserId = "dev-a".parse().unwrap();
-    let (_, human) = server.connect(&UserId::human()).await;
+    let (_, human) = server.connect(&ants_test_support::human()).await;
     let stream = bus::ensure_stream(&human).await.unwrap();
     let (_, ant_js) = server.connect(&dev_a).await;
     let minute = Duration::from_secs(60);
@@ -52,7 +52,7 @@ async fn pending_requests_are_listed_and_answered() {
     let id = push.id.to_string();
     let decision = answer(&human, &stream, &id[..id.len() - 4], Verdict::AllowAlways, Utc::now()).await.unwrap();
     assert_eq!((decision.request_id, decision.verdict), (push.id, Verdict::AllowAlways));
-    assert_eq!(decision.by, Some(UserId::human()), "the decider, told to the human the request waited for");
+    assert_eq!(decision.by, Some(ants_test_support::human()), "the decider, told to the human the request waited for");
     let stored = stream.get_last_raw_message_by_subject(&push.decision_subject()).await.unwrap();
     assert_eq!(stored.subject.as_str(), format!("ants.approvals.dev-a.{}", push.id));
     assert_eq!(serde_json::from_slice::<ApprovalDecision>(&stored.payload).unwrap(), decision);
@@ -82,7 +82,7 @@ async fn pending_requests_are_listed_and_answered() {
 async fn an_ant_qualified_id_picks_among_colliding_ids() {
     let Some(server) = Server::start() else { return };
     let (dev_a, dev_b): (UserId, UserId) = ("dev-a".parse().unwrap(), "dev-b".parse().unwrap());
-    let (_, human) = server.connect(&UserId::human()).await;
+    let (_, human) = server.connect(&ants_test_support::human()).await;
     let stream = bus::ensure_stream(&human).await.unwrap();
     let minute = Duration::from_secs(60);
     let real = request(&dev_a, "git push", vec![Verdict::AllowOnce], minute);
@@ -154,7 +154,7 @@ async fn a_rejection_with_a_note_sends_it_only_once_stored() {
     let Some(server) = Server::start() else { return };
     let [alice, bob, dev_a]: [UserId; 3] = ["alice", "bob", "dev-a"].map(|p| p.parse().unwrap());
     let creds = [&alice, &bob].map(|human| server.creds_as(human, Role::Human));
-    let [a, b] = creds.each_ref().map(|c| Nats::new(&server.url, Some(c), None).unwrap());
+    let [a, b] = creds.each_ref().map(|c| Nats::new(&server.url, Some(c), None, None).unwrap());
     let (_, a_js) = a.connect("test").await.unwrap();
     let stream = a_js.get_stream(STREAM).await.unwrap();
     let (_, ant_js) = server.connect(&dev_a).await;
@@ -190,7 +190,7 @@ async fn a_rejection_with_a_note_sends_it_only_once_stored() {
 async fn a_request_an_ant_of_the_chain_decided_is_no_longer_pending() {
     let Some(server) = Server::start() else { return };
     let [dev_a, lead, dev_c]: [UserId; 3] = ["dev-a", "lead", "dev-c"].map(|p| p.parse().unwrap());
-    let (_, human) = server.connect(&UserId::human()).await;
+    let (_, human) = server.connect(&ants_test_support::human()).await;
     let stream = bus::ensure_stream(&human).await.unwrap();
     bus::ensure_chains(&human).await.unwrap();
     let (_, ant_js) = server.connect(&dev_a).await;
@@ -234,7 +234,7 @@ async fn a_request_an_ant_of_the_chain_decided_is_no_longer_pending() {
 async fn repeated_approvals_suggest_an_allow_rule() {
     let Some(server) = Server::start() else { return };
     let dev_a: UserId = "dev-a".parse().unwrap();
-    let (_, human) = server.connect(&UserId::human()).await;
+    let (_, human) = server.connect(&ants_test_support::human()).await;
     let stream = bus::ensure_stream(&human).await.unwrap();
     let (_, ant_js) = server.connect(&dev_a).await;
     let mut stored = Vec::new();
@@ -251,7 +251,7 @@ async fn repeated_approvals_suggest_an_allow_rule() {
         bus::publish_json(&ant_js, r.subject(), &r, None).await.unwrap();
         let (seq, _) = find(&stream, &qualified(&r)).await.unwrap();
         if let Some(verdict) = verdict {
-            let answer = Answer { seq, request: &r, verdict, by: &UserId::human(), now: Utc::now() };
+            let answer = Answer { seq, request: &r, verdict, by: &ants_test_support::human(), now: Utc::now() };
             answer_request(&human, &stream, &answer).await.unwrap();
         }
         stored.push((seq, r));
@@ -271,7 +271,7 @@ async fn repeated_approvals_suggest_an_allow_rule() {
 async fn following_reports_new_requests_and_how_each_ends() {
     let Some(server) = Server::start() else { return };
     let [dev_a, lead]: [UserId; 2] = ["dev-a", "lead"].map(|p| p.parse().unwrap());
-    let (client, human) = server.connect(&UserId::human()).await;
+    let (client, human) = server.connect(&ants_test_support::human()).await;
     let stream = bus::ensure_stream(&human).await.unwrap();
     bus::ensure_chains(&human).await.unwrap();
     let (_, ant_js) = server.connect(&dev_a).await;

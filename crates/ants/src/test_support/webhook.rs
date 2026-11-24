@@ -15,7 +15,7 @@ use crate::test_support::issue_with;
 /// secret file.
 pub(crate) async fn hub() -> Option<(Server, jetstream::Context, PathBuf)> {
     let server = Server::start()?;
-    let (_, js) = server.connect(&UserId::human()).await;
+    let (_, js) = server.connect(&ants_test_support::human()).await;
     bus::ensure_stream(&js).await.unwrap();
     ensure_bucket(&js).await.unwrap();
     bus::ensure_owners(&js).await.unwrap();

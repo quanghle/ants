@@ -116,7 +116,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let dir = ants_test_support::scratch_dir("export-move").canonicalize().unwrap();
     let alice = p("alice");
     let creds = server.creds_as(&alice, Role::Human);
-    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     ants_daemon::hub::create_identities(&js).await.unwrap();
     let kv = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
@@ -128,7 +128,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let config = dir.join("config.toml");
     let workdir = dir.to_str().unwrap();
     let listed = format!(
-        "harness = \"claude\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {workdir:?}\nhome = {:?}\nwhoami = \"Reviewer\"\n\
+        "harness = \"claude\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {workdir:?}\nhome = {:?}\nwhoami = \"Reviewer\"\n\
          model = \"opus\"\nfallback = [\"codex\"]\ncapabilities = [\"review\"]\n",
         home.to_str().unwrap()
     );
@@ -187,7 +187,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     assert_eq!(paths, [("notes.md", Kind::Core), ("CLAUDE.md", Kind::Harness)]);
 
     let config_b = dir.join("config-b.toml");
-    std::fs::write(&config_b, "harness = \"claude\"\n").unwrap();
+    std::fs::write(&config_b, "harness = \"claude\"\nhuman = \"human\"\n").unwrap();
     let (file_arg, config_arg) = (file.to_str().unwrap(), config_b.to_str().unwrap());
     let home_b = dir.join("home-b");
     let out_b = dir.join("keys/dev-b.creds");
@@ -241,7 +241,7 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     let read_back: Export = serde_json::from_slice(&std::fs::read(&with_part).unwrap()).unwrap();
     assert_eq!(read_back.provider, Some(part));
     let config_c = dir.join("config-c.toml");
-    std::fs::write(&config_c, "harness = \"copilot\"\n").unwrap();
+    std::fs::write(&config_c, "harness = \"copilot\"\nhuman = \"human\"\n").unwrap();
     let (home_c, out_c) = (dir.join("home-c"), dir.join("keys/dev-a.creds"));
     let args = [
         with_part.to_str().unwrap(),

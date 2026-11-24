@@ -7,7 +7,7 @@ use super::*;
 /// it.
 #[test]
 fn only_hosts_reach_sense_event_logs() {
-    let (human, a, pa) = (UserId::human(), p("dev-a"), p("pa"));
+    let (human, a, pa) = (crate::human(), p("dev-a"), p("pa"));
     let m1: Machine = "m1".parse().unwrap();
     let domain: JsDomain = "hub".parse().unwrap();
     let id: crate::SenseId = "01J9ZQ3C5V8W2X4Y6Z7A8B9C0D".parse().unwrap();

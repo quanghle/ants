@@ -36,7 +36,7 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
     let config = dir.join("config.toml");
     std::fs::write(
         &config,
-        "messenger = false\nharness = \"copilot\"\nnats = \"nats://127.0.0.1:1\"\n[[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n",
+        "messenger = false\nharness = \"copilot\"\nhuman = \"human\"\nnats = \"nats://127.0.0.1:1\"\n[[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n",
     )
     .unwrap();
     let loaded = config::load(&config).unwrap();
@@ -44,6 +44,7 @@ async fn a_leaf_reports_an_ant_its_uplink_misses_and_a_node_not_listening() {
         nats: "nats://127.0.0.1:1".to_owned(),
         creds: None,
         js_domain: None,
+        human: None,
         config,
         leaf_config: leaf_config.clone(),
         hub_config: dir.join("no-nats.conf"),
@@ -110,6 +111,7 @@ async fn a_leaf_s_store_and_system_uplinks_pass_after_the_uplink_is_respelled() 
         nats: "nats://127.0.0.1:1".to_owned(),
         creds: None,
         js_domain: None,
+        human: None,
         config: dir.join("no-config.toml"),
         leaf_config: leaf_config.clone(),
         hub_config: dir.join("no-nats.conf"),

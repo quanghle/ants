@@ -43,7 +43,7 @@ async fn a_machine_s_daemon_decides_each_order_to_its_ants_once_and_records_why(
     let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
-    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let unrecorded = send(&admin, &js, None, &dev_a, AdminOp::Pause, WAIT).await.unwrap_err().to_string();
     assert!(unrecorded.contains("host credentials"), "no machine recorded itself: {unrecorded}");
@@ -58,7 +58,7 @@ async fn a_machine_s_daemon_decides_each_order_to_its_ants_once_and_records_why(
     assert_eq!((paused.id, paused.admin.as_ref(), paused.op.as_ref()), (pause.id, Some(&alice), Some(&AdminOp::Pause)));
 
     let bob_creds = server.creds_as(&bob, Role::Human);
-    let bob_nats = crate::connection::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
+    let bob_nats = crate::connection::Nats::new(&server.url, Some(&bob_creds), None, None).unwrap();
     let refused = send(&bob_nats, &js, None, &dev_a, AdminOp::Resume, WAIT).await.unwrap_err();
     assert!(refused.to_string().contains("no admin role"), "{refused:#}");
     let (jwt, key) = auth::read_creds(&bob_creds).unwrap();
@@ -206,7 +206,7 @@ async fn an_admin_behind_a_leaf_node_sends_orders_through_its_uplink_and_none_wh
     })
     .await;
 
-    let on_leaf = crate::connection::Nats::new(&leaf_node.url, Some(&admin_creds), Some(&domain)).unwrap();
+    let on_leaf = crate::connection::Nats::new(&leaf_node.url, Some(&admin_creds), Some(&domain), None).unwrap();
     let (_, js) = on_leaf.connect("test").await.unwrap();
     let (pause, paused) = send(&on_leaf, &js, None, &dev_a, AdminOp::Pause, WAIT * 4).await.unwrap();
     let paused = paused.expect("m1's daemon decides it");
@@ -221,7 +221,7 @@ async fn an_admin_behind_a_leaf_node_sends_orders_through_its_uplink_and_none_wh
     assert!(started.elapsed() < WAIT, "it fails at once");
     let said = format!("{down:#}");
     assert!(said.contains("the hub is out of reach") && said.contains("no outbox keeps"), "{said}");
-    let on_hub = crate::connection::Nats::new(&hub.url, Some(&admin_creds), Some(&domain)).unwrap();
+    let on_hub = crate::connection::Nats::new(&hub.url, Some(&admin_creds), Some(&domain), None).unwrap();
     let (_, hub_js) = on_hub.connect("test").await.unwrap();
     let (waiting, none) = send(&on_hub, &hub_js, None, &dev_a, AdminOp::Resume, Duration::ZERO).await.unwrap();
     assert_eq!(none, None, "m1's daemon is out of reach");
@@ -262,13 +262,13 @@ async fn orders_to_other_ants_are_decided_while_a_retire_waits_for_its_ant_to_st
     let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
-    let nats = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
 
     let path = server.dir().join("config.toml");
     let b_creds = server.creds_as(&dev_b, Role::Ant);
     let text = format!(
-        "harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n\n[[ant]]\nname = \"dev-b\"\n\
+        "harness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\n\n[[ant]]\nname = \"dev-b\"\n\
          workdir = \".\"\ncreds = {b_creds:?}\n"
     );
     std::fs::write(&path, text).unwrap();
@@ -315,7 +315,7 @@ async fn a_restart_order_restarts_the_harnesses_of_an_ant_its_machine_serves() {
     let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
-    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let restarts = Restarts::default();
     let (ants, task) = host_of_m1_serving(&server, &js, true, None, restarts.clone()).await;
@@ -363,11 +363,11 @@ async fn a_set_order_edits_the_config_in_place_unless_a_field_changed_or_the_fil
     let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
-    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
     let path = server.dir().join("config.toml");
-    let text = "harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nmodel = \"gpt-5\"  # fast \
+    let text = "harness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nmodel = \"gpt-5\"  # fast \
                 enough\n\n# Keep dev-b on its own.\n[[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n";
     std::fs::write(&path, text).unwrap();
     let mut triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
@@ -420,12 +420,12 @@ async fn a_pause_order_sets_paused_in_the_config_and_a_resume_order_removes_it()
     let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
-    let nats = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     let admin = Admin::of(&nats).unwrap();
 
     let path = server.dir().join("config.toml");
-    let text = "harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"  # here\n";
+    let text = "harness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"  # here\n";
     std::fs::write(&path, text).unwrap();
     let mut triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
     let config = ConfigFile::new(path.clone(), triggers.edits());
@@ -467,7 +467,7 @@ async fn a_read_memories_order_answers_with_the_ant_s_core_and_harness_memories(
     let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
-    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
     let workdir = server.dir().join("work");
@@ -475,7 +475,7 @@ async fn a_read_memories_order_answers_with_the_ant_s_core_and_harness_memories(
     std::fs::write(workdir.join("AGENTS.md"), "Run the checks.\n").unwrap();
     let path = server.dir().join("config.toml");
     let text = format!(
-        "harness = \"codex\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\nwhoami = \"A tester.\"\ntasks = \
+        "harness = \"codex\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\nwhoami = \"A tester.\"\ntasks = \
          \"Test.\"\n",
         workdir.display().to_string()
     );

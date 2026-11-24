@@ -168,7 +168,7 @@ async fn calls_carry_who_calls_where_and_when() {
         (&context.ant, context.identity.as_str(), &context.thread),
         (&user("dev-a"), "id-1", &current.thread_id)
     );
-    assert_eq!(context.origin.by, Starter::Human { user: UserId::human() });
+    assert_eq!(context.origin.by, Starter::Human { user: ants_test_support::human() });
     assert_eq!((context.harness.as_str(), context.model.as_deref(), context.machine.as_str()), ("test", None, "m1"));
     assert!(context.at >= before && context.trusted());
 
@@ -231,7 +231,7 @@ async fn a_thread_keeps_its_origin_and_stays_untrusted_once_a_webhook_reached_it
     session(&asked.thread_id);
     let channel: ants_proto::ChannelId = "ops".parse().unwrap();
     mcp.settle_origin(&asked, Some(&channel)).await.unwrap();
-    let mut human = Envelope::new(UserId::human(), user("dev-a"), "look");
+    let mut human = Envelope::new(ants_test_support::human(), user("dev-a"), "look");
     human.thread_id = asked.thread_id.clone();
     mcp.settle_origin(&human, None).await.unwrap();
     let origin = mcp.call_context(&asked.thread_id).await.unwrap().origin;
@@ -279,14 +279,14 @@ async fn a_thread_keeps_its_stored_origin_across_a_restart() {
     drop(mcp);
     let (mcp, _sent) = start(&home).await;
     mcp.with_origins(store.clone());
-    let mut human = Envelope::new(UserId::human(), user("dev-a"), "look");
+    let mut human = Envelope::new(ants_test_support::human(), user("dev-a"), "look");
     human.thread_id = thread.clone();
     mcp.settle_origin(&human, None).await.unwrap();
     assert_eq!(mcp.origin(&thread), Some(stored.clone()), "a human's message keeps it untrusted");
     assert_eq!(store.get(&thread).await.unwrap(), Some(stored));
 
     hook.thread_id = from_human().thread_id;
-    let mut human = Envelope::new(UserId::human(), user("dev-a"), "look");
+    let mut human = Envelope::new(ants_test_support::human(), user("dev-a"), "look");
     human.thread_id = hook.thread_id.clone();
     mcp.settle_origin(&human, None).await.unwrap();
     mcp.settle_origin(&hook, None).await.unwrap();

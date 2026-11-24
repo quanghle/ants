@@ -105,7 +105,7 @@ impl Bus {
         let stream = bus::ensure_stream(&js).await.unwrap();
         let markers = bus::ensure_attempts(&js, js_domain, &dev).await.unwrap();
         let marks = Marks::new(markers.clone(), &dev, &server.dir().join("dev-a"));
-        let replies = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+        let replies = client.subscribe(subject::inbox_of(&ants_test_support::human())).await.unwrap();
         client.flush().await.unwrap();
         let ledger = Arc::new(Ledger::memory(dev.clone(), Caps::default()));
         let limits = PromptLimits::default();
@@ -136,7 +136,7 @@ impl Bus {
             channels,
             threads,
             colony,
-            humans: Registry::default(),
+            humans: Registry::new(ants_test_support::human()),
             redactor: Redactor::default(),
             publisher: None,
             restarts: Restarts::default(),
@@ -182,7 +182,7 @@ impl Bus {
             worker: std::path::PathBuf::from("ants"),
             trails_dir: None,
             saves: crate::trail::SaveThrough::Bucket,
-            humans: Registry::default(),
+            humans: Registry::new(ants_test_support::human()),
             colony: self.colony.clone(),
             outbox: Arc::new(|_| Box::pin(async { Ok(()) })),
             attempts: self.markers.clone(),
@@ -196,7 +196,7 @@ impl Bus {
 
     /// Send `text` from the human, returning the envelope and its stream sequence.
     async fn send(&self, thread: &ThreadId, text: &str) -> (Envelope, u64) {
-        self.send_from(UserId::human(), thread, text).await
+        self.send_from(ants_test_support::human(), thread, text).await
     }
 
     /// Send `text` from ant dev-b, marked to wait its turn rather than steer the prompt running on the thread.
@@ -428,7 +428,7 @@ async fn until(what: &str, done: impl Fn() -> bool) {
 
 /// Ask the daemon to cancel the prompt on `thread` until it answers, as the daemon may not listen yet.
 async fn cancel(bus: &Bus, thread: &ThreadId) -> bool {
-    let request = ants_proto::CancelRequest::new(bus.dev.clone(), thread.clone(), UserId::human());
+    let request = ants_proto::CancelRequest::new(bus.dev.clone(), thread.clone(), ants_test_support::human());
     ask_cancel(bus, &request, WAIT).await.expect("no answer to the cancel request").cancelled
 }
 

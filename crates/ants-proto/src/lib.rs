@@ -256,7 +256,7 @@ pub const MAX_CHANNEL_OPS: usize = 32;
 /// Most characters a channel's description ([`ChannelEntry::description`]) has.
 pub const MAX_CHANNEL_DESCRIPTION: usize = 1000;
 /// KV bucket of the humans: one [`HumanEntry`] per human, keyed by its user id. Only humans write it; ants read
-/// it. [`UserId::human`] is a human without an entry.
+/// it.
 pub const HUMANS_BUCKET: &str = "ants_humans";
 /// KV bucket of the escalation chains: one [`ChainEntry`] per ant, keyed by its id, put by its daemon on
 /// start. Unlike the colony's, entries never expire, so a chain can be followed past an ant that is offline. Each
@@ -437,4 +437,16 @@ pub const DEFAULT_MAX_ESCALATION_HOPS: u32 = 3;
 #[cfg(test)]
 fn p(s: &str) -> UserId {
     s.parse().unwrap()
+}
+
+/// The human the tests name `human`.
+#[cfg(test)]
+fn human() -> UserId {
+    p("human")
+}
+
+/// The humans of the tests: [`human()`] alone.
+#[cfg(test)]
+fn humans() -> Humans {
+    Humans::of([human()])
 }

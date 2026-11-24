@@ -187,10 +187,9 @@ impl Editor {
         }
         let ants = data.live.colony.iter().map(|e| &e.ant).filter(|a| !data.is_human(a));
         let users: BTreeSet<&UserId> = match typing.field {
-            Field::Add => ants
-                .chain(data.humans.iter().flat_map(Humans::iter))
-                .filter(|u| !entry.is_member(u) && **u != UserId::human())
-                .collect(),
+            Field::Add => {
+                ants.chain(data.humans.iter().flat_map(Humans::iter)).filter(|u| !entry.is_member(u)).collect()
+            }
             _ => ants.collect(),
         };
         let names = users.into_iter().map(|u| (u.to_string(), if data.is_human(u) { "human" } else { "ant" }));

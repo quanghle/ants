@@ -287,11 +287,17 @@ mod tests {
         let listens = owner(&busy_listen).await.unwrap_err();
         assert_eq!(listens, format!("--managed-nats: a server listens on {busy_listen} already"));
 
-        std::fs::write(config, "harness = \"copilot\"\nmessenger = true\n").unwrap();
+        std::fs::write(config, "harness = \"copilot\"\nhuman = \"human\"\nmessenger = true\n").unwrap();
         assert_eq!(owner(&busy_listen).await, Ok(Managed::Off), "a config file there is not edited");
-        assert_eq!(std::fs::read_to_string(config).unwrap(), "harness = \"copilot\"\nmessenger = true\n");
-        std::fs::write(config, format!("harness = \"copilot\"\nmessenger = true\n{}", nats_server_table(conf, None)))
-            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(config).unwrap(),
+            "harness = \"copilot\"\nhuman = \"human\"\nmessenger = true\n"
+        );
+        std::fs::write(
+            config,
+            format!("harness = \"copilot\"\nhuman = \"human\"\nmessenger = true\n{}", nats_server_table(conf, None)),
+        )
+        .unwrap();
         assert_eq!(owner(&busy_listen).await, Ok(Managed::Kept), "the daemon of the file there runs it");
 
         let unit = if cfg!(target_os = "macos") {

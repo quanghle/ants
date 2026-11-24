@@ -33,6 +33,7 @@ fn the_top_level_harness_is_the_default_one_and_runs_the_builtin_messenger() {
         home: Some(dir.clone()),
         js_domain: messenger.js_domain.clone(),
         builtin: Some(Messenger),
+        human: Some(ants_test_support::human()),
         ..Ant::new(UserId::messenger(), dir)
     };
     assert_eq!(messenger, &stock, "harness defaults for model, reasoning effort and context; stock settings");
@@ -194,7 +195,7 @@ fn dropin_files_define_harnesses_the_ants_may_name() {
     let config = dir.join("config.toml");
     let dropins = dir.join("harnesses.d");
     std::fs::create_dir(&dropins).unwrap();
-    let text = "messenger = false\nsage = \"none\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"\n\
+    let text = "messenger = false\nsage = \"none\"\nhuman = \"human\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"\n\
                     [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nharness = \"mine\"\n\
                     [harnesses.mine]\ncommand = \"mine-acp\"\n";
     std::fs::write(&config, text).unwrap();
@@ -264,7 +265,7 @@ fn without_a_top_level_harness_each_ant_and_template_names_its_own() {
     assert!(e.contains(": ant template worker lists no harnesses: no harness set"), "{e}");
 
     let ants = parse_as_is(
-        "messenger = false\nsage = \"none\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"",
+        "messenger = false\nsage = \"none\"\nhuman = \"human\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nharness = \"codex\"",
     )
     .unwrap()
     .ants;

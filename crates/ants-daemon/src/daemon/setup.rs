@@ -378,9 +378,8 @@ async fn ant_records(config: &Config, js: &jetstream::Context) -> (Option<Identi
 fn approver(bus: Bus<'_>) -> NatsApprover {
     let Bus { config, client, js, humans, .. } = bus;
     let settings = &config.policy;
-    NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), settings.approval_timeout)
+    NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), settings.approval_timeout, humans.clone())
         .with_chain(settings.escalation.clone())
-        .with_humans(humans.clone())
 }
 
 /// Connect to the bus as the ant's daemon, retrying until it answers: `None` when `stop` comes first.

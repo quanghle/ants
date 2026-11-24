@@ -196,9 +196,6 @@ async fn add(
 ) -> Result<EnrollReply> {
     let dir = approver.dir.as_path();
     let (ant, key) = (&request.ant, request.public_key.as_str());
-    if ant.is_human() {
-        bail!("{ant} is a human's name, not an ant's");
-    }
     auth::check_not_reserved(ant)?;
     if revoked.contains(key) {
         bail!("the key {key} is revoked");

@@ -57,14 +57,16 @@ async fn an_add_order_adds_an_ant_the_signer_signs_on_it_and_a_retire_order_revo
         format!("$JS.API.CONSUMER.INFO.{threads}.{}", done_reader(&dev_b)),
     ]);
     Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
-    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
     let work = server.dir().join("work");
     std::fs::create_dir_all(&work).unwrap();
     let path = server.dir().join("config.toml");
-    let text =
-        format!("harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", work.display().to_string());
+    let text = format!(
+        "harness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n",
+        work.display().to_string()
+    );
     std::fs::write(&path, &text).unwrap();
     let mut triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
     let config = ConfigFile::new(path.clone(), triggers.edits());
@@ -141,14 +143,16 @@ async fn an_order_to_another_ant_is_decided_while_an_add_waits_for_the_signer() 
     let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
-    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
     let work = server.dir().join("work");
     std::fs::create_dir_all(&work).unwrap();
     let path = server.dir().join("config.toml");
-    let text =
-        format!("harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", work.display().to_string());
+    let text = format!(
+        "harness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n",
+        work.display().to_string()
+    );
     std::fs::write(&path, &text).unwrap();
     let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
     let config = ConfigFile::new(path.clone(), triggers.edits());
@@ -274,8 +278,10 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let work = hub.dir().join("work");
     std::fs::create_dir_all(&work).unwrap();
     let path = hub.dir().join("config.toml");
-    let text =
-        format!("harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n", work.display().to_string());
+    let text = format!(
+        "harness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\n",
+        work.display().to_string()
+    );
     std::fs::write(&path, &text).unwrap();
     let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
     let config = ConfigFile::new(path.clone(), triggers.edits());
@@ -304,7 +310,7 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     })
     .await;
 
-    let admin = crate::connection::Nats::new(&hub.url, Some(&admin_creds), Some(&domain)).unwrap();
+    let admin = crate::connection::Nats::new(&hub.url, Some(&admin_creds), Some(&domain), None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let settings = json!({ "workdir": work });
     let Value::Object(settings) = settings else { unreachable!() };
@@ -368,7 +374,7 @@ async fn add_orders_sent_at_once_leave_the_daemon_serving_every_ant() {
     let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&team, &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
-    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, admin_js) = admin.connect("test").await.unwrap();
     let m1: Machine = "m1".parse().unwrap();
     let host_creds = dir.join("host-m1.creds");
@@ -378,7 +384,7 @@ async fn add_orders_sent_at_once_leave_the_daemon_serving_every_ant() {
     let (a_creds, a_home) = (server.creds_as(&dev_a, Role::Ant), dir.join("homes/dev-a"));
     std::fs::create_dir_all(&a_home).unwrap();
     let text = format!(
-        "messenger = false\nsage = \"none\"\nharness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {a_home:?}\n\
+        "messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {a_home:?}\n\
          home = {a_home:?}\ncreds = {a_creds:?}\n"
     );
     std::fs::write(&config, text).unwrap();

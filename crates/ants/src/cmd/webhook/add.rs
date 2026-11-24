@@ -120,9 +120,6 @@ pub struct AddArgs {
 /// Run `ants webhook add` with the global `--nats` and `--js-domain`.
 pub async fn add(args: AddArgs, nats: &str, js_domain: Option<&JsDomain>) -> Result<()> {
     let name = &args.name;
-    if name.is_human() {
-        bail!("{name} is the default human, not a webhook");
-    }
     auth::check_not_reserved(name)?;
     let destination = match (&args.to, &args.channel) {
         (Some(ant), None) => Destination::Ant(ant.clone()),

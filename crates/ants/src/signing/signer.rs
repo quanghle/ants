@@ -339,7 +339,7 @@ impl Signer<'_> {
     fn judge(&self, request: &AntRequest) -> Result<Judgement> {
         let (manager, name) = (&request.manager, &request.name);
         let refuse = |why: String| Ok(Judgement::Refuse(why));
-        if name.is_human() || *name == *manager {
+        if *name == *manager {
             return refuse(format!("{name} cannot be an ant added by {manager}"));
         }
         if let Err(e) = auth::check_not_reserved(name) {
@@ -881,7 +881,7 @@ mod tests {
         use ants_proto::{Envelope, ReactionChange, ReactionsOutcome, ReactionsRequest};
         let Some(server) = Server::start() else { return };
         let config = templates(&server, 1);
-        let (human, dev_a) = (UserId::human(), p("dev-a"));
+        let (human, dev_a) = (ants_test_support::human(), p("dev-a"));
         let (_, h_js) = server.connect_as(&human, Role::Human).await;
         bus::ensure_stream(&h_js).await.unwrap();
         h_js.create_stream(ants_daemon::hub::reactions_config()).await.unwrap();

@@ -164,9 +164,10 @@ impl Credentials {
     }
 }
 
-/// Who a client on a server without authentication acts as: `human`, as the CLI does without credentials.
-pub fn unauthenticated() -> Session {
-    Session { human: UserId::human(), domain: None, account: None, name: CONNECTION_NAME.to_owned() }
+/// A client on a server without authentication acting as `human`, as the CLI without credentials acts as the `human`
+/// of its config.
+pub fn unauthenticated(human: UserId) -> Session {
+    Session { human, domain: None, account: None, name: CONNECTION_NAME.to_owned() }
 }
 
 /// The team's public bootstrap credentials (`ants auth bootstrap`), with which a device asks `ants signer` to register

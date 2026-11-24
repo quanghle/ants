@@ -209,7 +209,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
     let ants = ant::Io::new(js.clone(), nats.domain.cloned(), me.clone());
     let memories = memories::Io::new(nats, js.clone());
     let mcp = mcp::Io::new(nats, js.clone());
-    let settings = settings::Io::new(js.clone(), nats.url, nats.creds.map(Path::to_path_buf), nats.domain.cloned());
+    let settings = settings::Io::new(nats, js.clone());
     let (credentials, holder) =
         credentials::Io::new(js.clone(), nats.url, nats.domain.cloned(), team_dir(None), approver::LISTEN);
     let creds = crate::people::assistant::signing_creds(nats).map(Path::to_path_buf).map_err(|e| format!("{e:#}"));

@@ -818,7 +818,7 @@ mod tests {
     #[tokio::test]
     async fn the_human_learns_which_ants_no_daemon_serves() {
         let Some(server) = Server::start() else { return };
-        let (_, human) = server.connect(&UserId::human()).await;
+        let (_, human) = server.connect(&ants_test_support::human()).await;
         let ids: Vec<UserId> = ["dev-a", "dev-b", "dev-c"].map(|a| a.parse().unwrap()).into();
         let ants: Vec<&UserId> = ids.iter().collect();
         assert!(unserved_warnings(&human, &ants).await.is_empty(), "no colony to read, no warning");
@@ -846,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn the_human_lists_registered_ants() {
         let Some(server) = Server::start() else { return };
-        let (_, human) = server.connect(&UserId::human()).await;
+        let (_, human) = server.connect(&ants_test_support::human()).await;
         assert!(list(&human).await.unwrap().is_empty(), "an empty colony, created on first use");
 
         let mut registrations = Vec::new();

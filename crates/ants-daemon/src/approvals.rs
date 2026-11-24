@@ -194,8 +194,16 @@ impl From<Offered> for Heard {
 }
 
 impl NatsApprover {
-    pub fn new(client: async_nats::Client, js: jetstream::Context, ant: UserId, timeout: Duration) -> Self {
-        let (chain, waiting, humans, answering) = Default::default();
+    /// An approver telling the thread's owner when a human, else the default human of `humans`, of an expired
+    /// request.
+    pub fn new(
+        client: async_nats::Client,
+        js: jetstream::Context,
+        ant: UserId,
+        timeout: Duration,
+        humans: Registry,
+    ) -> Self {
+        let (chain, waiting, answering) = Default::default();
         Self { client, js, ant, timeout, chain, waiting, humans, answering, assistants: None }
     }
 
@@ -209,12 +217,6 @@ impl NatsApprover {
     #[must_use]
     pub fn with_chain(self, chain: Chain) -> Self {
         Self { chain, ..self }
-    }
-
-    /// The same, telling the thread's owner when a human, else the default human of `humans`, of an expired request.
-    #[must_use]
-    pub fn with_humans(self, humans: Registry) -> Self {
-        Self { humans, ..self }
     }
 
     /// Note that the ant answers `envelope` on its thread until the returned guard drops: a tool request of the turn

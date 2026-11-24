@@ -37,7 +37,7 @@ fn write(dir: &Path, file: &str, text: &str) -> std::path::PathBuf {
 /// The JetStream context of a human's connection, which creates the colony's missing buckets.
 async fn human(server: &Server, user: &UserId) -> jetstream::Context {
     let creds = server.creds_as(user, Role::Human);
-    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     nats.connect("test").await.unwrap().1
 }
 

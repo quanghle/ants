@@ -455,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn the_human_reads_what_each_ant_spent() {
         let Some(server) = Server::start() else { return };
-        let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+        let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
         let (_, h_js) = server.connect_as(&human, Role::Human).await;
         let kv = DirectKv::new(&h_js, None, SESSIONS_BUCKET).await.unwrap();
         let today = date("2026-11-14");

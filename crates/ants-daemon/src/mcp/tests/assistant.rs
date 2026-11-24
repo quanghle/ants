@@ -281,7 +281,7 @@ async fn assistant_with(
     notes: Arc<MemoryNotes>,
 ) -> (Mcp, mpsc::UnboundedReceiver<Envelope>, Registry, crate::people::humans::TestDevice, Arc<MemoryHuman>) {
     let device = crate::people::humans::TestDevice::default();
-    let humans = Registry::with(UserId::human(), &["alice", "bob"]).verifying_grants(Some(device.account()));
+    let humans = Registry::with(ants_test_support::human(), &["alice", "bob"]).verifying_grants(Some(device.account()));
     let (mcp, sent) = start_with(home, Vec::new(), notes, humans.clone()).await;
     let store = Arc::new(MemoryHuman::default());
     mcp.with_assisting(user("alice"));

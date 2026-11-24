@@ -111,7 +111,10 @@ mod tests {
 
     /// The humans: `human`, and alice, from the humans bucket.
     pub(super) fn humans() -> Humans {
-        Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))])
+        Humans::from_entries([
+            ("alice", ants_proto::HumanEntry::new(p("alice"))),
+            ("human", ants_proto::HumanEntry::new(p("human"))),
+        ])
     }
 
     pub(super) fn post(from: &str, text: &str) -> ChannelPost {
@@ -132,7 +135,7 @@ mod tests {
         assert_eq!(wakes(&a, Some(&entry), &post("dev-a", "@dev-a note to self")), Wake::Skip, "its own post");
         assert_eq!(wakes(&a, None, &post("human", "@dev-a deploy")), Wake::Skip, "no such channel");
         assert_eq!(wakes(&p("dev-c"), Some(&entry), &post("human", "@dev-c deploy")), Wake::Skip, "no member");
-        let other = ChannelPost::new("dev".parse().unwrap(), UserId::human(), "@dev-a deploy");
+        let other = ChannelPost::new("dev".parse().unwrap(), ants_test_support::human(), "@dev-a deploy");
         assert_eq!(wakes(&a, Some(&entry), &other), Wake::Skip, "another channel's entry");
     }
 

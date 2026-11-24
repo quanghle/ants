@@ -7,23 +7,23 @@ use crate::{HumanEntry, Role, mention_key, p};
 #[test]
 fn channel_posts_start_threads_and_are_checked_against_their_subject() {
     let c: ChannelId = "ops".parse().unwrap();
-    let top = ChannelPost::new(c.clone(), UserId::human(), "@dev-a, @dev-b: deploy? cc @dev-a");
+    let top = ChannelPost::new(c.clone(), crate::human(), "@dev-a, @dev-b: deploy? cc @dev-a");
     assert!(top.starts_thread());
     assert_eq!(top.thread_id.as_str(), top.id.to_string());
     assert_eq!(top.mentions, [p("dev-a"), p("dev-b")]);
     assert!(top.mentions(&p("dev-b")) && !top.mentions(&p("dev-c")));
     assert_eq!((top.turn_budget, top.in_reply_to), (DEFAULT_TURN_BUDGET, None));
     assert_eq!(top.subject(), "ants.chan.ops.human");
-    assert_eq!(subject::parse_chan(&top.subject()), Some((c.clone(), UserId::human())));
+    assert_eq!(subject::parse_chan(&top.subject()), Some((c.clone(), crate::human())));
     assert_eq!(top.check_subject("ants.chan.ops.human"), Ok(()));
     let err = top.check_subject("ants.chan.ops.dev-a").unwrap_err();
     assert_eq!(err.to_string(), "channel post from human in channel ops arrived on ants.chan.ops.dev-a");
     assert!(top.check_subject("ants.chan.dev.human").is_err(), "posted to another channel");
 
-    let two = ChannelPost::new(c.clone(), UserId::human(), "and this");
+    let two = ChannelPost::new(c.clone(), crate::human(), "and this");
     assert_ne!(two.thread_id, top.thread_id, "each top-level post starts its own thread");
     assert!(two.mentions.is_empty());
-    let on = ChannelPost::on_thread(c, top.thread_id.clone(), UserId::human(), "more");
+    let on = ChannelPost::on_thread(c, top.thread_id.clone(), crate::human(), "more");
     assert!(!on.starts_thread());
     assert_eq!(on.thread_id, top.thread_id);
 
@@ -36,9 +36,9 @@ fn channel_posts_start_threads_and_are_checked_against_their_subject() {
 
 #[test]
 fn every_ant_channel_post_spends_a_turn() {
-    let humans = Humans::default();
+    let humans = crate::humans();
     let c: ChannelId = "ops".parse().unwrap();
-    let ask = ChannelPost::new(c.clone(), UserId::human(), "@dev-a deploy?");
+    let ask = ChannelPost::new(c.clone(), crate::human(), "@dev-a deploy?");
     let answer = ask.reply(p("dev-a"), "done, @human", &[], &humans).unwrap();
     assert_eq!((answer.channel.clone(), answer.thread_id.clone()), (c.clone(), ask.thread_id.clone()));
     assert_eq!(answer.in_reply_to, Some(ask.id));
@@ -51,7 +51,7 @@ fn every_ant_channel_post_spends_a_turn() {
     let spent = Err(Error::BudgetExhausted(ask.thread_id));
     assert_eq!(back.reply(p("dev-a"), "@dev-b again", &[], &humans), spent);
     assert_eq!(back.reply(p("dev-a"), "@human over to you", &[], &humans), spent);
-    let human = back.reply(UserId::human(), "@dev-a @dev-b go on", &[], &humans).unwrap();
+    let human = back.reply(crate::human(), "@dev-a @dev-b go on", &[], &humans).unwrap();
     assert_eq!(human.turn_budget, DEFAULT_TURN_BUDGET, "the human's post gives a fresh budget");
     assert_eq!(
         handoff.reply(p("dev-c"), "late", &[back.clone(), human], &humans).unwrap().turn_budget,
@@ -66,9 +66,9 @@ fn every_ant_channel_post_spends_a_turn() {
 
 #[test]
 fn ants_woken_by_one_post_spend_the_thread_s_turns_together() {
-    let humans = Humans::default();
+    let humans = crate::humans();
     let c: ChannelId = "ops".parse().unwrap();
-    let mut ask = ChannelPost::new(c.clone(), UserId::human(), "@dev-a @dev-b @dev-c review");
+    let mut ask = ChannelPost::new(c.clone(), crate::human(), "@dev-a @dev-b @dev-c review");
     ask.turn_budget = 4;
     let a = ask.reply(p("dev-a"), "@dev-b @dev-c fine", &[], &humans).unwrap();
     let b = ask.reply(p("dev-b"), "@dev-a @dev-c fine", std::slice::from_ref(&a), &humans).unwrap();
@@ -87,7 +87,7 @@ fn ants_woken_by_one_post_spend_the_thread_s_turns_together() {
 
 #[test]
 fn channel_entries_list_members_and_wake_those_mentioned() {
-    let humans = Humans::default();
+    let humans = crate::humans();
     let c: ChannelId = "ops".parse().unwrap();
     let mut entry = ChannelEntry::new(c.clone());
     assert!(entry.add_member(p("dev-a")) && entry.add_member(p("dev-b")) && entry.add_member(p("dev-c")));
@@ -105,7 +105,7 @@ fn channel_entries_list_members_and_wake_those_mentioned() {
     let minimal: ChannelEntry = serde_json::from_str(r#"{"channel":"ops","topic":"new"}"#).unwrap();
     assert_eq!(minimal, ChannelEntry::new(c.clone()));
 
-    let human = UserId::human();
+    let human = crate::human();
     let untagged = ChannelPost::new(c.clone(), human.clone(), "anyone?");
     assert_eq!(entry.woken(&untagged, &humans), [UserId::messenger()], "the default messenger triages");
     entry.messenger = Some(p("messenger"));
@@ -119,7 +119,7 @@ fn channel_entries_list_members_and_wake_those_mentioned() {
 #[test]
 fn a_mention_notifies_human_members_and_wakes_ant_members() {
     let (c, alice, bob) = ("ops".parse::<ChannelId>().unwrap(), p("alice"), p("bob"));
-    let mut humans = Humans::default();
+    let mut humans = crate::humans();
     for h in [&alice, &bob] {
         humans.add(h.as_str(), HumanEntry::new(h.clone())).unwrap();
     }
@@ -155,7 +155,7 @@ fn a_mention_notifies_human_members_and_wakes_ant_members() {
 #[test]
 fn the_messenger_relays_the_mention_notices_of_a_webhook_s_post() {
     let (c, alice) = ("ops".parse::<ChannelId>().unwrap(), p("alice"));
-    let mut humans = Humans::default();
+    let mut humans = crate::humans();
     humans.add("alice", HumanEntry::new(alice.clone())).unwrap();
     let mut entry = ChannelEntry::new(c.clone());
     entry.add_member(alice.clone());
@@ -180,7 +180,7 @@ fn the_messenger_relays_the_mention_notices_of_a_webhook_s_post() {
 #[test]
 fn any_human_s_posts_count_as_human_and_threads_keep_the_owner_who_started_them() {
     let (c, alice, bob) = ("ops".parse::<ChannelId>().unwrap(), p("alice"), p("bob"));
-    let mut humans = Humans::default();
+    let mut humans = crate::humans();
     for h in [&alice, &bob] {
         humans.add(h.as_str(), HumanEntry::new(h.clone())).unwrap();
     }
@@ -188,7 +188,7 @@ fn any_human_s_posts_count_as_human_and_threads_keep_the_owner_who_started_them(
     entry.add_member(p("dev-a"));
     let top = ChannelPost::new(c.clone(), alice.clone(), "the build is red").with_owner(Some(alice.clone()));
     assert_eq!(entry.woken(&top, &humans), [UserId::messenger()], "alice's post goes to the messenger");
-    assert!(entry.woken(&top, &Humans::default()).is_empty(), "unless alice is no human");
+    assert!(entry.woken(&top, &crate::humans()).is_empty(), "unless alice is no human");
     let at_alice = ChannelPost::new(c.clone(), p("dev-a"), "@alice @dev-a look");
     assert!(entry.woken(&at_alice, &humans).is_empty() && !at_alice.wakes_ants(&humans));
 
@@ -218,7 +218,7 @@ fn any_human_s_posts_count_as_human_and_threads_keep_the_owner_who_started_them(
 
 #[test]
 fn a_webhook_s_post_that_mentions_nobody_is_triaged_and_its_mentions_come_from_the_ingress() {
-    let humans = Humans::default();
+    let humans = crate::humans();
     let c: ChannelId = "ops".parse().unwrap();
     let mut entry = ChannelEntry::new(c.clone());
     entry.add_member(p("dev-a"));
@@ -240,7 +240,7 @@ fn a_webhook_s_post_that_mentions_nobody_is_triaged_and_its_mentions_come_from_t
 #[test]
 fn a_webhook_under_a_human_s_name_is_no_human() {
     let (c, bob) = ("ops".parse::<ChannelId>().unwrap(), p("bob"));
-    let mut humans = Humans::default();
+    let mut humans = crate::humans();
     humans.add(bob.as_str(), HumanEntry::new(bob.clone())).unwrap();
     let hook = ChannelPost::new(c.clone(), bob.clone(), "red").from_webhook(Vec::new());
     assert!(!hook.by_human(&humans) && ChannelPost::new(c.clone(), bob.clone(), "hi").by_human(&humans));
@@ -266,7 +266,7 @@ fn a_webhook_under_a_human_s_name_is_no_human() {
 #[test]
 fn a_thread_s_origin_comes_from_its_posts_not_from_what_a_later_post_carries() {
     let (c, alice, bob) = ("ops".parse::<ChannelId>().unwrap(), p("alice"), p("bob"));
-    let mut humans = Humans::default();
+    let mut humans = crate::humans();
     for h in [&alice, &bob] {
         humans.add(h.as_str(), HumanEntry::new(h.clone())).unwrap();
     }
@@ -309,7 +309,7 @@ fn a_thread_s_origin_comes_from_its_posts_not_from_what_a_later_post_carries() {
 #[test]
 fn threads_keep_the_ant_that_created_them_and_only_its_own_post_makes_it_so() {
     let (c, alice) = ("ops".parse::<ChannelId>().unwrap(), p("alice"));
-    let mut humans = Humans::default();
+    let mut humans = crate::humans();
     humans.add(alice.as_str(), HumanEntry::new(alice.clone())).unwrap();
     // A top-level post's creator is its author, whatever it says.
     let top = ChannelPost::new(c.clone(), p("lead"), "@dev-a fix it").with_creator(Some(p("boss")));

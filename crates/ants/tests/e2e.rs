@@ -131,7 +131,7 @@ fn exercise_daemon(custom_tools: bool) {
         std::fs::write(
             &config,
             format!(
-                "messenger = false\nsage = \"none\"\nharness = \"copilot\"\nmetrics = {metrics:?}\n\
+                "messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\nmetrics = {metrics:?}\n\
                  [[ant]]\nname = \"dev-a\"\nworkdir = {dir:?}\nhome = {home:?}\n\
                  whoami = \"Maintain the Rust backend.\"\n\
                  model = \"stub-model\"\nreasoning_effort = \"high\"\ncontext = \"long_context\"\n\
@@ -143,7 +143,7 @@ fn exercise_daemon(custom_tools: bool) {
         command.arg("--config").arg(config);
     } else {
         command.env("ANTS_ANT", "dev-a").arg("--home").arg(&home).arg("--workdir").arg(dir);
-        command.arg("--harness").arg("copilot");
+        command.arg("--harness").arg("copilot").arg("--human").arg("human");
         command.arg("--metrics").arg(&metrics);
     }
     command.env("PATH", &fixture.bin).env_remove("BD_DB").env_remove("BD_REMOTE").env("RUST_LOG", "info");
@@ -193,7 +193,8 @@ fn exercise_daemon(custom_tools: bool) {
     // linking on its own.
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let record = runtime.block_on(async {
-        let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "e2e").await.unwrap();
+        let (_, js) =
+            ants_daemon::bus::connect(&server.url, None, None, &ants_test_support::human(), "e2e").await.unwrap();
         let dev_a = "dev-a".parse().unwrap();
         Identity::new(&js, None, &dev_a).await.unwrap().read().await.unwrap().expect("the daemon created it")
     });
@@ -530,7 +531,19 @@ fn a_daemon_exits_once_its_executable_was_replaced() {
     std::fs::copy(ANTS, &installed).unwrap();
     let mut daemon = ants_command(&installed);
     daemon
-        .args(["--nats", &server.url, "daemon", "--ant", "dev-a", "--harness", "copilot", "--upgrade-check", "1s"])
+        .args([
+            "--nats",
+            &server.url,
+            "daemon",
+            "--ant",
+            "dev-a",
+            "--harness",
+            "copilot",
+            "--human",
+            "human",
+            "--upgrade-check",
+            "1s",
+        ])
         .arg("--workdir")
         .arg(dir)
         .arg("--home")
@@ -593,10 +606,12 @@ fn the_builtin_messenger_has_a_standby_and_the_short_name_is_ordinary() {
 
     let primary = daemon(
         "primary",
-        &format!("harness = \"copilot\"\nsage = \"none\"\n[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\n"),
+        &format!(
+            "harness = \"copilot\"\nhuman = \"human\"\nsage = \"none\"\n[[ant]]\nname = \"messenger\"\nworkdir = {dir:?}\n"
+        ),
     );
     primary.wait_log("serving inbox", 2);
-    let standby = daemon("standby", "harness = \"copilot\"\n");
+    let standby = daemon("standby", "harness = \"copilot\"\nhuman = \"human\"\n");
     assert!(served_from().ends_with("primary/.ants/agents/system-messenger"), "{}", logs());
     ask("first");
     let ordinary = run(ants(&["ask", "--wait", "@messenger", "ordinary request"]));
@@ -646,7 +661,7 @@ fn the_last_messenger_drains_when_its_credentials_are_removed() {
     std::fs::write(
         &config,
         format!(
-            "harness = \"stubby\"\n[host]\ncreds = \"~/.config/ants/auth/host-reload.creds\"\n\
+            "harness = \"stubby\"\nhuman = \"human\"\n[host]\ncreds = \"~/.config/ants/auth/host-reload.creds\"\n\
              [harnesses.stubby]\ncommand = \"./stub-adapter\"\nenv = {{ ANTS_TEST_PROMPT_GATE = {gate:?} }}\n"
         ),
     )
@@ -691,7 +706,7 @@ fn a_configured_adapter_serves_ants_the_messenger_and_the_cli() {
     std::fs::create_dir_all(&user_home).unwrap();
     let config = dir.join("config.toml");
     let original = format!(
-        "harness = \"stubby\"\nsage = \"none\"\n\
+        "harness = \"stubby\"\nhuman = \"human\"\nsage = \"none\"\n\
          [harnesses.stubby]\ncommand = \"bin/stub-adapter\"\nargs = [\"--flag\", \"two words\"]\n\
          env = {{ ANTS_TEST_ADAPTER = \"1\", OVERRIDDEN = \"definition\" }}\n\
          [harnesses.strict]\ncommand = \"bin/stub-adapter\"\nmode = \"default\"\n\
@@ -904,7 +919,9 @@ fn a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread() {
     let ants = |args: &[&str]| fixture.ants(args);
     assert!(run(ants(&["init"])).status.success());
     let metrics = format!("127.0.0.1:{}", free_port());
-    let mut config = format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\nmetrics = {metrics:?}\n");
+    let mut config = format!(
+        "messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\nmetrics = {metrics:?}\n"
+    );
     for name in ["dev-a", "dev-b"] {
         let (workdir, home) = (dir.join(name), dir.join(format!("{name}-home")));
         std::fs::create_dir_all(&workdir).unwrap();
@@ -920,7 +937,7 @@ fn a_trail_run_steps_through_a_served_ant_and_tells_its_owner_on_its_thread() {
     let script = "meta = {\"name\": \"e2e\", \"description\": \"one step\", \"phases\": [\"asking\"]}\n\
                   phase(\"asking\")\nlog(\"to dev-b\")\nawait agent(\"say hi\", ant=\"dev-b\")\n";
     let thread = ThreadId::generate();
-    let (dev_a, human) = ("dev-a".parse::<UserId>().unwrap(), UserId::human());
+    let (dev_a, human) = ("dev-a".parse::<UserId>().unwrap(), ants_test_support::human());
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let outcome = runtime.block_on(async {
         let (client, _) = ants_daemon::bus::connect(&server.url, None, None, &human, "e2e").await.unwrap();

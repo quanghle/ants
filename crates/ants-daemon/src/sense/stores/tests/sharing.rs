@@ -16,7 +16,7 @@ async fn calls_of_an_ant_that_come_together_share_a_catch_up() {
     let items = stores.synced(&dev_a()).await.unwrap();
     items.create("note", json!({"title":"kept"}).as_object().unwrap().clone(), "t").await.unwrap();
 
-    let client = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().0;
+    let client = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().0;
     #[expect(clippy::disallowed_methods, reason = "counting the direct gets asked of the stream")]
     let mut gets = client.subscribe(format!("$JS.API.DIRECT.GET.{SENSE_STREAM}")).await.unwrap();
     client.flush().await.unwrap();

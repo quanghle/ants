@@ -56,7 +56,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
     let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
-    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = crate::connection::Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
     let repo = server.dir().join("repo");
@@ -102,7 +102,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
 
     let path = server.dir().join("config.toml");
     let text = format!(
-        "harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\nhome = {:?}\nmodel = \"o3\"\n\
+        "harness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {:?}\nhome = {:?}\nmodel = \"o3\"\n\
          escalate_to = [\"lead\"]\n\n[[ant]]\nname = \"dev-b\"\nworkdir = {:?}\n",
         repo.display().to_string(),
         home_a.display().to_string(),

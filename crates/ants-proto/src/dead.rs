@@ -126,7 +126,7 @@ mod tests {
         const MAX: usize = 1 << 20;
         // Quotes and control characters take more bytes as JSON than as text.
         let text = "\"é\u{1}x".repeat(MAX / 4);
-        let msg = Envelope::new(UserId::human(), p("dev-a"), text);
+        let msg = Envelope::new(crate::human(), p("dev-a"), text);
         let error = "e".repeat(2 * MAX);
         let dead = DeadLetter::of_envelope(p("dev-a"), 7, 5, error, msg.clone()).fit(MAX - 1024);
         let json = serde_json::to_vec(&dead).unwrap();
@@ -146,7 +146,7 @@ mod tests {
             8,
             5,
             "harness crashed",
-            Envelope::new(UserId::human(), p("dev-a"), "hi"),
+            Envelope::new(crate::human(), p("dev-a"), "hi"),
         );
         assert_eq!(small.clone().fit(MAX), small, "a letter that fits is kept whole");
         let excerpt = small.fit(100);
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn dead_letters_keep_the_envelope_or_an_excerpt_of_the_payload() {
-        let msg = Envelope::new(UserId::human(), p("dev-a"), "build it");
+        let msg = Envelope::new(crate::human(), p("dev-a"), "build it");
         let dead = DeadLetter::of_envelope(p("dev-a"), 7, 5, "harness crashed", msg.clone());
         assert_eq!((dead.subject().as_str(), dead.msg_id().as_str()), ("ants.dead.dev-a", "dead-7"));
         let json = serde_json::to_string(&dead).unwrap();

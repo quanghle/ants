@@ -36,7 +36,7 @@ pub fn a_channel_storm_ends_at_the_turn_budget() {
     ok(&["init"]);
 
     let names: Vec<String> = (0..members).map(|i| format!("s{i}")).collect();
-    let mut config = "messenger = true\nsage = \"none\"\nharness = \"copilot\"\n".to_owned();
+    let mut config = "messenger = true\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\n".to_owned();
     for name in &names {
         let home = dir.join("homes").join(name);
         std::fs::create_dir_all(&home).unwrap();

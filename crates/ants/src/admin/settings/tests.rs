@@ -90,6 +90,7 @@ fn the_order_expects_each_field_as_read_and_a_secret_by_its_digest() {
 }
 
 const FILE: &str = r#"harness = "copilot"
+human = "human"
 
 [harnesses.custom]
 command = "custom-acp"
@@ -117,7 +118,7 @@ async fn an_admin_reads_the_settings_and_changes_them_expecting_what_was_read() 
     let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
-    let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     assert!(may_order(&admin));
     let (_, js) = admin.connect("test").await.unwrap();
     let path = server.dir().join("config.toml");
@@ -158,7 +159,7 @@ async fn an_admin_reads_the_settings_and_changes_them_expecting_what_was_read() 
     let fresh = read(&admin, &js, &dev_a, WAIT).await.unwrap();
     assert_eq!(fresh.read.unwrap().settings.get(&["model".to_owned()]), Some(&json!("o4")));
     let bob_creds = server.creds_as(&bob, Role::Human);
-    let bob_nats = Nats::new(&server.url, Some(&bob_creds), None).unwrap();
+    let bob_nats = Nats::new(&server.url, Some(&bob_creds), None, None).unwrap();
     let as_bob = read(&bob_nats, &js, &dev_a, WAIT).await.unwrap();
     assert!(as_bob.stale.unwrap().starts_with("as last read"));
     let last = as_bob.read.expect("as last read");
@@ -212,7 +213,7 @@ async fn sets_at_once_on_an_ant_never_read_wait_for_the_pending_read() {
     let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
-    let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let path = server.dir().join("config.toml");
     std::fs::write(&path, FILE).unwrap();
@@ -255,7 +256,7 @@ async fn a_read_held_for_consent_is_waited_for_and_told_as_waiting() {
     let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
-    let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
 
     let m1: Machine = "m1".parse().unwrap();
@@ -310,7 +311,7 @@ async fn the_shared_settings_are_created_once_changed_by_orders_and_served_on_ev
     let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
-    let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
+    let admin = Nats::new(&server.url, Some(&admin_creds), None, None).unwrap();
     let (_, js) = admin.connect("test").await.unwrap();
     let path = server.dir().join("config.toml");
     let a_creds = server.creds_as(&dev_a, Role::Ant);
@@ -368,6 +369,7 @@ async fn the_shared_settings_are_created_once_changed_by_orders_and_served_on_ev
     let standby = ants_daemon::profile::shared::Shared::default();
     let mut own = ants_daemon::config::Ant::new(dev_a.clone(), server.dir().to_path_buf());
     (own.model, own.harness) = (Some("gpt-4".to_owned()), Some("copilot".to_owned()));
+    own.human = Some(ants_test_support::human());
     standby.listed(std::slice::from_ref(&own));
     let m2: Machine = "m2".parse().unwrap();
     let m2_js = host_js(&server, &m2).await;
@@ -455,7 +457,7 @@ async fn shared_settings_put_back_or_signed_with_revoked_credentials_are_not_ver
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
     ants_daemon::hub::create_identities(&h_js).await.unwrap();
     let alice_creds = server.creds_as(&alice, Role::Human);
-    let human = Nats::new(&server.url, Some(&alice_creds), None).unwrap();
+    let human = Nats::new(&server.url, Some(&alice_creds), None, None).unwrap();
     let (_, js) = human.connect("test").await.unwrap();
     let a_creds = server.creds_as(&dev_a, Role::Ant);
     let accounts = vec![ants_daemon::secrets::creds::account(&a_creds).unwrap()];
@@ -532,7 +534,7 @@ async fn shared_settings_of_a_bucket_without_a_marker_or_of_an_earlier_incarnati
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::identities_config()).await.unwrap();
     let alice_creds = server.creds_as(&alice, Role::Human);
-    let human = Nats::new(&server.url, Some(&alice_creds), None).unwrap();
+    let human = Nats::new(&server.url, Some(&alice_creds), None, None).unwrap();
     let (_, js) = human.connect("test").await.unwrap();
     let a_creds = server.creds_as(&dev_a, Role::Ant);
     let accounts = vec![ants_daemon::secrets::creds::account(&a_creds).unwrap()];

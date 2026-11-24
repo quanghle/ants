@@ -6,7 +6,7 @@ use super::*;
 #[expect(clippy::too_many_lines, reason = "every role checked in turn against one server")]
 async fn credentials_confine_each_user_to_its_role() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
 
     assert!(bus::connect(&server.url, None, None, &human, "anonymous").await.is_err(), "credentials are required");
 
@@ -230,14 +230,11 @@ async fn credentials_confine_each_user_to_its_role() {
 async fn every_human_has_the_same_rights_and_reads_only_its_own_inbox() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
-    assert_eq!(
-        (role(&alice, true), role(&alice, false), role(&UserId::human(), false)),
-        (Role::Human, Role::Ant, Role::Human)
-    );
-    let (a_client, a_js) = server.connect_as(&alice, role(&alice, true)).await;
-    let (b_client, b_js) = server.connect_as(&bob, role(&bob, true)).await;
+    assert_eq!((role(true), role(false)), (Role::Human, Role::Ant), "whatever the name");
+    let (a_client, a_js) = server.connect_as(&alice, role(true)).await;
+    let (b_client, b_js) = server.connect_as(&bob, role(true)).await;
     let (d_client, d_js) = server.connect(&dev_a).await;
-    let (_, carol_js) = server.connect_as(&p("carol"), role(&p("carol"), false)).await;
+    let (_, carol_js) = server.connect_as(&p("carol"), role(false)).await;
 
     // Either human creates the stream and the buckets; a name issued without --human does not.
     assert!(bus::ensure_stream(&carol_js).await.is_err(), "carol is no human");
@@ -436,7 +433,7 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
 async fn only_a_human_creates_and_reads_its_own_notification_consumer() {
     let Some(server) = Server::start() else { return };
     let (alice, bob, dev_a) = (p("alice"), p("bob"), p("dev-a"));
-    let (_, h_js) = server.connect(&UserId::human()).await;
+    let (_, h_js) = server.connect(&ants_test_support::human()).await;
     bus::ensure_stream(&h_js).await.unwrap();
     let config = |of: &UserId| jetstream::consumer::pull::Config {
         durable_name: Some(ants_proto::notify_consumer(of)),
@@ -467,7 +464,7 @@ async fn only_a_human_creates_and_reads_its_own_notification_consumer() {
 #[tokio::test]
 async fn a_humans_domain_wildcards_reach_no_further_than_its_plain_rights() {
     let Some(hub) = Server::start_with("domain: hub", "") else { return };
-    let (domain, human) = ("hub".parse::<JsDomain>().unwrap(), UserId::human());
+    let (domain, human) = ("hub".parse::<JsDomain>().unwrap(), ants_test_support::human());
     let creds = hub.creds_in(&human, Some(&domain));
     let (client, mut js) = bus::connect(&hub.url, Some(&creds), Some(&domain), &human, "test").await.unwrap();
     js.set_timeout(Duration::from_secs(1));
@@ -497,7 +494,7 @@ async fn a_humans_domain_wildcards_reach_no_further_than_its_plain_rights() {
 async fn ordered_consumers_of_a_bucket_are_recreated_under_a_name() {
     use jetstream::consumer::push::OrderedConfig;
     let Some(server) = Server::start() else { return };
-    let (human, dev_a) = (UserId::human(), p("dev-a"));
+    let (human, dev_a) = (ants_test_support::human(), p("dev-a"));
     let (h_client, h_js) = server.connect_as(&human, Role::Human).await;
     h_js.create_key_value(ants_daemon::hub::channels_config()).await.unwrap();
     let (a_client, a_js) = server.connect_as(&dev_a, Role::Ant).await;

@@ -50,8 +50,6 @@ fn the_config_names_one_destination_and_its_mentions_per_webhook() {
     }
     let unset = HOOK.replace("HOOK_SECRET", "NOT_SET");
     assert!(error(&format!("{unset}ant = \"dev-a\"\n")).contains("NOT_SET is not set"));
-    let human = HOOK.replace("github", "human");
-    assert!(error(&format!("{human}ant = \"dev-a\"\n")).contains("the default human is no webhook"));
     assert!(error(&format!("{HOOK}ant = \"dev-a\"\n{HOOK}ant = \"dev-b\"\n")).contains("listed twice"));
     assert!(error("nats = \"nats://hub:4222\"\n").contains("nothing to serve"));
     let err = error(&format!("nats = \"nats://dev:secret@hub\"\n{HOOK}ant = \"dev-a\"\n"));

@@ -236,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn the_first_record_of_a_thread_stays() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let owners = Owners::new(js.clone());
         let thread = ThreadId::generate();
         let [dev, other]: [UserId; 2] = ["dev".parse().unwrap(), "other".parse().unwrap()];
@@ -282,7 +282,7 @@ mod tests {
     #[tokio::test]
     async fn the_bucket_drops_a_repeated_record() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         bus::ensure_owners(&js).await.unwrap();
         let config = js.get_stream(owners_stream()).await.unwrap().cached_info().config.clone();
         assert_eq!(config.duplicate_window, config.max_age, "as long as a record is kept");

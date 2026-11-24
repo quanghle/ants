@@ -13,7 +13,7 @@ use super::*;
 use crate::bus;
 
 async fn connect(server: &NatsServer) -> jetstream::Context {
-    bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1
+    bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1
 }
 
 /// A user JWT of `name`, for `key`, signed by `account`.

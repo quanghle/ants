@@ -639,7 +639,7 @@ mod tests {
         let (alice, bob, carol, dave): (UserId, UserId, UserId, UserId) =
             ("alice".parse().unwrap(), "bob".parse().unwrap(), "carol".parse().unwrap(), "dave".parse().unwrap());
         let creds: Vec<_> = [&alice, &bob, &carol].iter().map(|h| server.creds_as(h, Role::Human)).collect();
-        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None, None).unwrap()).collect();
         let mut js = Vec::new();
         for n in &nats {
             js.push(n.connect("test").await.unwrap().1);
@@ -761,7 +761,7 @@ mod tests {
         let (alice, bob, carol): (UserId, UserId, UserId) =
             ("alice".parse().unwrap(), "bob".parse().unwrap(), "carol".parse().unwrap());
         let creds: Vec<_> = [&alice, &bob, &carol].iter().map(|h| server.creds_as(h, Role::Human)).collect();
-        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None, None).unwrap()).collect();
         let mut js = Vec::new();
         for n in &nats {
             js.push(n.connect("test").await.unwrap().1);

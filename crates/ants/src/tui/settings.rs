@@ -3,10 +3,11 @@
 //! stands, pending ones included while its daemon is away. Enter on a field writes a change to it, `n` one to another
 //! field, sent as `ants ant set` sends it, expecting the value read; its outcome shows below.
 
-use std::path::PathBuf;
+use crate::connection::Reach;
+
 use std::time::Duration;
 
-use ants_proto::{AdminOp, JsDomain, Machine, OrderState, UserId, Uuid};
+use ants_proto::{AdminOp, Machine, OrderState, UserId, Uuid};
 use async_nats::jetstream;
 use chrono::{DateTime, Utc};
 use futures::FutureExt as _;
@@ -318,9 +319,7 @@ fn sent_line(sent: &Sent) -> (String, Color) {
 /// The reads of the shown ant's settings and orders, and the orders sent.
 pub struct Io {
     js: jetstream::Context,
-    url: String,
-    creds: Option<PathBuf>,
-    domain: Option<JsDomain>,
+    reach: Reach,
     watched: Option<UserId>,
     /// The ant whose settings [`Io::read`] reads, if it reads any rather than its orders.
     reading: Option<UserId>,
@@ -330,9 +329,9 @@ pub struct Io {
 }
 
 impl Io {
-    pub fn new(js: jetstream::Context, url: &str, creds: Option<PathBuf>, domain: Option<JsDomain>) -> Self {
+    pub fn new(nats: &crate::connection::Nats<'_>, js: jetstream::Context) -> Self {
         let every = tokio::time::interval(LIST_EVERY);
-        Self { js, url: url.to_owned(), creds, domain, watched: None, reading: None, every, read: None, set: None }
+        Self { js, reach: nats.reach(), watched: None, reading: None, every, read: None, set: None }
     }
 
     /// The next read or order's outcome. Cancel-safe, so it can race the terminal's keys and the live feed.
@@ -377,13 +376,13 @@ impl Io {
     }
 
     pub fn ask(&mut self, ask: Ask) {
-        let (js, url, creds, domain) = (self.js.clone(), self.url.clone(), self.creds.clone(), self.domain.clone());
+        let (js, reach) = (self.js.clone(), self.reach.clone());
         match ask {
             Ask::Read(ant) => {
                 self.reading = Some(ant.clone());
                 let to = ant.clone();
                 let read = async move {
-                    let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                    let nats = reach.nats()?;
                     settings::read(&nats, &js, &to, settings::READ_WAIT).await
                 };
                 let read = async move { Event::Read(ant, read.await.map_err(|e| format!("{e:#}"))) };
@@ -392,7 +391,7 @@ impl Io {
             Ask::Set(ant, machine, op) => {
                 let to = ant.clone();
                 let sent = async move {
-                    let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                    let nats = reach.nats()?;
                     if !settings::may_order(&nats) {
                         anyhow::bail!("changing settings needs a human device's admin credentials");
                     }

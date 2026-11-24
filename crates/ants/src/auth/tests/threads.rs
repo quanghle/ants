@@ -237,7 +237,7 @@ async fn revoking_a_retired_ant_cleans_up_only_its_channel_and_done_consumers() 
         drop(bus::chan_consumer(&stream, ant, WAIT, 5, 1).await.unwrap());
         drop(done::consumer(&js, ant).await.unwrap());
     }
-    let conn = crate::connection::Connection { nats: &server.url, creds: None, js_domain: domain };
+    let conn = crate::connection::Connection { nats: &server.url, creds: None, js_domain: domain, human: None };
     let revoke = async |key: &str| {
         crate::cmd::auth::revoke_credentials(None, vec![key.to_owned()], Vec::new(), false, Some(team.clone()), &conn)
             .await
@@ -302,7 +302,8 @@ async fn a_human_adopts_an_ant_s_title_only_on_a_thread_never_titled() {
 #[tokio::test]
 async fn only_humans_and_webhooks_to_ants_record_a_thread_s_owner_and_the_first_record_stays() {
     let Some(server) = Server::start() else { return };
-    let (human, alice, dev_a, hook, alerts) = (UserId::human(), p("alice"), p("dev-a"), p("github"), p("alerts"));
+    let (human, alice, dev_a, hook, alerts) =
+        (ants_test_support::human(), p("alice"), p("dev-a"), p("github"), p("alerts"));
     let (_a, a_js) = server.connect(&dev_a).await;
     assert!(bus::ensure_owners(&a_js).await.is_err(), "only the human creates the bucket");
     let (_h, h_js) = server.connect(&human).await;
@@ -361,7 +362,8 @@ async fn only_humans_and_webhooks_to_ants_record_a_thread_s_owner_and_the_first_
 #[tokio::test]
 async fn the_human_s_side_tells_the_owner_the_thread_s_posts_name_not_the_one_an_ant_claims() {
     let Some(server) = Server::start() else { return };
-    let (human, alice, dev_a, dev_b, lead) = (UserId::human(), p("alice"), p("dev-a"), p("dev-b"), p("lead"));
+    let (human, alice, dev_a, dev_b, lead) =
+        (ants_test_support::human(), p("alice"), p("dev-a"), p("dev-b"), p("lead"));
     // alice runs the human's side, and gets what goes to a thread with no owner.
     let (h_client, h_js) = server.connect_as(&alice, Role::Human).await;
     let (_, b_js) = server.connect(&dev_b).await;

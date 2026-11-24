@@ -5,7 +5,7 @@ use super::*;
 #[tokio::test]
 async fn ants_post_to_channels_as_themselves_and_read_but_never_write_the_channels_bucket() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let ops: ChannelId = "ops".parse().unwrap();
     let (_h, h_js) = server.connect(&human).await;
     let stream = bus::ensure_stream(&h_js).await.unwrap();
@@ -92,7 +92,8 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     use ants_proto::{ChannelAdminOutcome, ChannelAdminRequest, ChannelOp, Refusal};
 
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b, manager) = (UserId::human(), p("dev-a"), p("dev-b"), UserId::channel_manager());
+    let (human, dev_a, dev_b, manager) =
+        (ants_test_support::human(), p("dev-a"), p("dev-b"), UserId::channel_manager());
     let ops: ChannelId = "ops".parse().unwrap();
     let (h_client, h_js) = server.connect(&human).await;
     bus::ensure_stream(&h_js).await.unwrap();
@@ -209,7 +210,7 @@ async fn an_ant_reads_where_its_own_inbox_and_channel_consumers_stand_and_no_oth
     let Some(server) = Server::start_with("domain: hub", "") else { return };
     let domain: JsDomain = "hub".parse().unwrap();
     let domain = Some(&domain);
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let human_js = connect_to(&server.url, &server.creds_in(&human, domain), domain, &human).await;
     bus::ensure_stream(&human_js).await.unwrap();
     let creds = server.creds_in(&dev_a, domain);

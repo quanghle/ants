@@ -26,7 +26,7 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::cmd::harness::HarnessPick;
 use crate::completions::{self, Shell};
-use crate::connection::{Connection, Nats};
+use crate::connection::Connection;
 use crate::node::natsd::bundled;
 use crate::service::{self, Action, Installed, Outcome, Service, Services, Values};
 use crate::{auth, doctor};
@@ -47,6 +47,11 @@ pub struct SetupArgs {
     /// Config file of the machine's ants (default: ~/.ants/config.toml).
     #[arg(long, env = "ANTS_CONFIG")]
     pub config: Option<PathBuf>,
+    /// The default human a new config file names, its top-level `human`, who gets escalations of threads with no
+    /// owner and whom the CLI acts as without credentials (default: the config's `human` or ANTS_HUMAN, else the
+    /// login name).
+    #[arg(long, value_name = "NAME")]
+    pub human: Option<UserId>,
     /// nats-server binary for its service, or with --managed-nats the `command` of `[nats_server]` (default: the one
     /// beside the ants executable, in ~/.ants/bin or on PATH, else the pinned release downloaded into ~/.ants/bin).
     #[arg(long, value_name = "PATH")]
@@ -137,6 +142,12 @@ struct Steps<'a> {
     paths: &'a Paths,
 }
 
+/// The login name of the user running the command, when it is a user name.
+fn login_name() -> Option<UserId> {
+    let name = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok()?;
+    name.to_lowercase().parse().ok()
+}
+
 /// Run the steps of `ants setup`, then `ants doctor`; fail when a step or a check fails.
 pub async fn run(connection: &Connection<'_>, args: SetupArgs) -> Result<()> {
     let home = std::env::home_dir().context("no home directory")?;
@@ -147,6 +158,11 @@ pub async fn run(connection: &Connection<'_>, args: SetupArgs) -> Result<()> {
     let leaf_conf = crate::node::leaf::default_path()?;
     let nats_conf = auth::default_dir()?.with_file_name("nats.conf");
     let paths = Paths { home, config, leaf_conf, nats_conf };
+    let human = args.human.clone().or_else(|| connection.human.cloned()).or_else(login_name).context(
+        "no default human: name one with --human NAME (lowercase letters, digits and '-'), as the login name is no \
+         user name",
+    )?;
+    let connection = &Connection { human: Some(&human), ..*connection };
     let report = Report { dry_run: args.dry_run, failed: 0 };
     let mut steps = Steps { report, args: &args, connection, services: Services::local(), paths: &paths };
     let harness = steps.pick_harness()?;
@@ -280,7 +296,7 @@ impl Steps<'_> {
             return self.report.step(Mark::Skip, step, format!("no server listens on {listen}; {then}"));
         }
         let done = async {
-            let nats = Nats::new(connection.nats, connection.creds, connection.js_domain)?;
+            let nats = connection.nats()?;
             crate::cmd::init::hub(&nats, false).await
         };
         match done.await {
@@ -480,6 +496,7 @@ impl Steps<'_> {
         let setup = doctor::Setup {
             nats: connection.nats.to_owned(),
             creds: connection.creds.map(Path::to_owned),
+            human: connection.human.cloned(),
             js_domain: connection.js_domain.cloned(),
             config: paths.config.clone(),
             leaf_config: paths.leaf_conf.clone(),
@@ -545,6 +562,7 @@ mod tests {
             workdir: None,
             harness: None,
             config: None,
+            human: None,
             nats_server: nats_server.map(PathBuf::from),
             managed_nats: true,
             web: false,
@@ -568,7 +586,7 @@ mod tests {
     /// The steps of a setup with `args` on `paths`, at the default server, nothing reported yet.
     pub(super) fn steps<'a>(args: &'a SetupArgs, paths: &'a Paths) -> Steps<'a> {
         const CONNECTION: Connection<'static> =
-            Connection { nats: crate::cli::DEFAULT_NATS, creds: None, js_domain: None };
+            Connection { nats: crate::cli::DEFAULT_NATS, creds: None, js_domain: None, human: None };
         let report = Report { dry_run: false, failed: 0 };
         Steps { report, args, connection: &CONNECTION, services: Services::local(), paths }
     }

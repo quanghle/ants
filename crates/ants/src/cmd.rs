@@ -71,7 +71,12 @@ use crate::{
 
 /// Run the command `cli` names, or the terminal UI without one.
 pub(crate) async fn run(cli: Cli) -> Result<()> {
-    let conn = Connection { nats: &cli.nats, creds: cli.creds.as_deref(), js_domain: cli.js_domain.as_ref() };
+    let conn = Connection {
+        nats: &cli.nats,
+        creds: cli.creds.as_deref(),
+        js_domain: cli.js_domain.as_ref(),
+        human: cli.human.as_ref(),
+    };
     let nats = || conn.nats();
     let Some(command) = cli.command else {
         tui::usage_without_terminal();

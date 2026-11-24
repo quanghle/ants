@@ -35,7 +35,7 @@ async fn conducting(server: &NatsServer) -> (Trails, async_nats::jetstream::Cont
         ant: user("dev-a"),
         worker: PathBuf::from("ants"),
         trails_dir: None,
-        humans: Registry::default(),
+        humans: Registry::new(ants_test_support::human()),
         colony,
         outbox,
         attempts: crate::bus::ensure_attempts(&js, None, &user("dev-a")).await.unwrap(),

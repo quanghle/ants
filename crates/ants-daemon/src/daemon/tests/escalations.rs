@@ -182,7 +182,7 @@ async fn a_leader_s_answer_resumes_a_channel_thread_with(turn_budget: u32) {
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut posts) = bus.channel("ops", &["dev-a", "dev-b"]).await;
-    let root = ChannelPost::new(ops.clone(), UserId::human(), "deploy friday?");
+    let root = ChannelPost::new(ops.clone(), ants_test_support::human(), "deploy friday?");
     bus.post(&root).await;
     let mut spent = root.reply(dev_b.clone(), "@dev-a agree?", &[], &Humans::default()).unwrap();
     spent.turn_budget = 0;
@@ -415,7 +415,7 @@ async fn a_member_sending_the_escalation_higher_moves_the_stuck_thread_up_with_i
 #[tokio::test]
 async fn a_thread_a_human_started_stays_hers_and_goes_back_to_her_out_of_turns() {
     let Some((mut bus, _)) = Bus::start().await else { return };
-    bus.humans = Registry::with(UserId::human(), &["alice"]);
+    bus.humans = Registry::with(ants_test_support::human(), &["alice"]);
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     // dev-a is the channel's messenger and a member.

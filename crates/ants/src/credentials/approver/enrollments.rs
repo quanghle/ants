@@ -170,9 +170,6 @@ impl Approver {
         public_key: Option<&str>,
         host: bool,
     ) -> Result<Approved> {
-        if ant.is_human() {
-            bail!("{ant} is the default human; issue its credentials with `ants auth user`");
-        }
         let request = self.one(ant, public_key).await?;
         let domain = self.js_domain.as_ref();
         // First, as it records nothing: an uplink the hub would refuse leaves no ant signed.
@@ -266,9 +263,6 @@ impl Approver {
         destinations: &[Destination],
         public_key: Option<&str>,
     ) -> Result<String> {
-        if webhook.is_human() {
-            bail!("{webhook} is the default human, no webhook");
-        }
         let request = self.one(webhook, public_key).await?;
         if let Some(leaf) = &request.leaf {
             bail!("{webhook} asks through the leaf node of {}; a webhook connects to the hub", leaf.machine);

@@ -316,7 +316,7 @@ impl Shown<'_> {
             (_, _, Some(to)) => format!(" → {to}"),
             _ => String::new(),
         };
-        let human = self.data.is_human(e.from.as_ref().unwrap_or(&UserId::human()));
+        let human = e.from.as_ref().is_none_or(|from| self.data.is_human(from));
         let who = Style::new().fg(if human { Color::Cyan } else { Color::Magenta });
         let (what, style) = match e.kind {
             Kind::Escalation => {

@@ -302,10 +302,10 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     };
     let team = hub.dir().join("auth");
     let domain: JsDomain = "hub".parse().unwrap();
-    let (human, dev_a, dev_c) = (UserId::human(), p("dev-a"), p("dev-c"));
+    let (human, dev_a, dev_c) = (ants_test_support::human(), p("dev-a"), p("dev-c"));
     let creds = |user: &UserId| {
         let out = hub.dir().join(format!("{user}.creds"));
-        crate::test_support::issue(&team, user, Role::by_default(user), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, user, crate::test_support::role_of(user), Some(&domain), &out).unwrap();
         out
     };
     let (h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();

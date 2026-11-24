@@ -55,7 +55,7 @@ async fn bootstrap_credentials_only_ask_the_signer_to_register_and_hear_its_answ
 #[tokio::test]
 async fn a_host_records_only_its_own_machine_s_ants_and_humans_read_where_each_ant_is() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let m1: Machine = "m1".parse().unwrap();
     let (_h, h_js) = server.connect(&human).await;
     let (_a, a_js) = server.connect(&dev_a).await;
@@ -130,7 +130,7 @@ async fn only_a_host_reaches_the_sense_event_logs() {
     use ants_sense::log::{AccountVerifier, AntLog, EventLog as _};
 
     let Some(server) = Server::start() else { return };
-    let (human, dev_a) = (UserId::human(), p("dev-a"));
+    let (human, dev_a) = (ants_test_support::human(), p("dev-a"));
     let m1: Machine = "m1".parse().unwrap();
     let (_h, h_js) = server.connect(&human).await;
     let (_a, a_js) = server.connect(&dev_a).await;

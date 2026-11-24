@@ -257,7 +257,7 @@ After rating, end the turn with complete: nothing needs a reply.",
 
     #[test]
     fn a_stopped_or_unended_run_invites_no_rating() {
-        assert!(invitation(&lead(), &ended(RunState::Stopped { by: UserId::human() })).is_none());
+        assert!(invitation(&lead(), &ended(RunState::Stopped { by: ants_test_support::human() })).is_none());
         assert!(invitation(&lead(), &TrailRun { ended_at: None, ..ended(RunState::Running) }).is_none());
         assert!(!rating_hint(&ended(RunState::Done { result: json!(null) })).contains("find_trails"));
     }

@@ -377,7 +377,7 @@ pub fn earlier_lines(attachments: &[Attachment], handle_of: impl Fn(Uuid) -> Att
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{AttachmentScope, UserId};
+    use ants_proto::AttachmentScope;
     use ants_test_support::NatsServer;
 
     use super::*;
@@ -386,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn attachments_come_back_as_stored_and_only_once() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         js.create_stream(hub::files_config()).await.unwrap();
         let handle_of = |attachment: &Attachment| AttachmentHandle {
             from: "alice".parse().unwrap(),
@@ -474,7 +474,7 @@ mod tests {
         }) else {
             return;
         };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let files = js.create_stream(hub::files_config()).await.unwrap();
         let filler = jetstream::stream::Config {
             name: "FILLER".to_owned(),

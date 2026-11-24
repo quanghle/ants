@@ -104,7 +104,7 @@ async fn a_goto_the_conductor_cannot_follow_raises_where_it_is_called() {
     let start = StartRun {
         trail: TrailSource::Script(LOOP.to_owned()),
         args: Value::Null,
-        owner: Some(UserId::human()),
+        owner: Some(ants_test_support::human()),
         origin: human_origin(),
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
@@ -248,7 +248,8 @@ async fn a_restart_after_a_goto_stored_its_next_leg_gives_up_the_steps_of_the_le
     init(&server).await;
     let (dir, run, thread, mine, yours) = left_by_a_goto(&server, "trail-goto-crash").await;
 
-    let (watcher, _) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "watch").await.unwrap();
+    let (watcher, _) =
+        ants_daemon::bus::connect(&server.url, None, None, &ants_test_support::human(), "watch").await.unwrap();
     let mut status = watcher.subscribe(subject::status(&ant("lead"), &thread)).await.unwrap();
     let mut again = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
     let next = again.step().await;
@@ -285,7 +286,7 @@ async fn a_stop_before_the_restarted_run_s_first_pass_lists_the_steps_of_the_leg
     // Not polled yet: the run gets no pass before the stop.
     again.serving.abort();
 
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let waiting = again.trails.stop(&run, &human).await.unwrap();
     let waiting: Vec<_> = waiting.iter().map(|step| (step.to.clone(), step.message)).collect();
     assert_eq!(waiting, [(ant("dev"), yours.id)], "the step left in another ant's queue is the human's to withdraw");
@@ -442,7 +443,7 @@ async def second(state):
     assert!(error.ends_with("the run reached its limit of 2 steps"), "{error}");
     assert_eq!(limit, Some(RunLimit::Steps), "refused by the conductor, the leg's own steps within the limit");
 
-    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits { steps: 3, ..limits })).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), Some(TrailLimits { steps: 3, ..limits })).await.unwrap();
     let c = lead.step().await;
     assert_eq!(c.text, "c", "the refused call is sent anew");
     drop(lead);

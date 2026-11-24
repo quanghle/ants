@@ -200,7 +200,7 @@ async fn the_longest_uplink_credentials_connect() {
     ) else {
         return;
     };
-    let (domain, human, m1) = ("hub".parse::<JsDomain>().unwrap(), UserId::human(), "m1".parse().unwrap());
+    let (domain, human, m1) = ("hub".parse::<JsDomain>().unwrap(), ants_test_support::human(), "m1".parse().unwrap());
     let team = hub.dir().join("auth");
     let (_h_client, mut h_js) =
         bus::connect(&hub.url, Some(&hub.creds_in(&human, Some(&domain))), Some(&domain), &human, "test")
@@ -247,7 +247,7 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
         return;
     };
     let domain: JsDomain = "hub".parse().unwrap();
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let team = hub.dir().join("auth");
 
     let (h_client, mut h_js) =

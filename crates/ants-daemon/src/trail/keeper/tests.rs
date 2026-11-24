@@ -42,7 +42,7 @@ fn refused(outcome: Option<SaveTrailOutcome>, says: &str) {
 #[tokio::test]
 async fn the_keeper_writes_an_ant_s_own_trails_only() {
     let Some(server) = NatsServer::start() else { return };
-    let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     js.create_stream(crate::hub::trails_config()).await.unwrap();
     let kv = DirectKv::whole(&js, None, TRAILS_BUCKET).await.unwrap();
     let serving = tokio::spawn(serve(client, js.clone(), None));
@@ -84,7 +84,8 @@ async fn the_keeper_writes_an_ant_s_own_trails_only() {
     assert!(kv.get("deploy").await.unwrap().is_none());
 
     // A human's trail is no ant's to replace or remove.
-    let theirs = SavedTrail { saved_by: Saver::Human { user: UserId::human() }, ..trail("release", "dev-a") };
+    let theirs =
+        SavedTrail { saved_by: Saver::Human { user: ants_test_support::human() }, ..trail("release", "dev-a") };
     kv.put("release", serde_json::to_vec(&theirs).unwrap()).await.unwrap();
     let seq = last("release").await;
     refused(request(&a, &remove("dev-a", "release", seq)).await.unwrap(), "saved by");
@@ -104,7 +105,7 @@ fn run(conductor: &str, script: &str, state: RunState) -> TrailRun {
 #[tokio::test]
 async fn the_keeper_records_only_an_ant_s_own_finished_run_as_a_source() {
     let Some(server) = NatsServer::start() else { return };
-    let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     js.create_stream(crate::hub::trails_config()).await.unwrap();
     let serving = tokio::spawn(serve(client, js.clone(), None));
     let (a, _) = bus::connect(&server.url, None, None, &p("dev-a"), "test").await.unwrap();

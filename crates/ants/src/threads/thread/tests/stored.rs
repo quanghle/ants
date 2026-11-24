@@ -255,9 +255,9 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
         creds
     };
     let desk = enrolled("desk");
-    crate::connection::Nats::new(&server.url, Some(&desk), None).unwrap().connect("test").await.unwrap();
+    crate::connection::Nats::new(&server.url, Some(&desk), None, None).unwrap().connect("test").await.unwrap();
     let bob_creds = server.creds_as(&bob, Role::Human);
-    let bob_nats = crate::connection::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
+    let bob_nats = crate::connection::Nats::new(&server.url, Some(&bob_creds), None, None).unwrap();
     let (_, bob_js) = bob_nats.connect("test").await.unwrap();
     // One keyring per read, each loaded before the device was enrolled and learning it on its own.
     let load = async || crate::people::sealed::Keyring::load(&bob_nats, &bob_js).await.map(Arc::new);
@@ -282,7 +282,7 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
     let asked = async {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let laptop = enrolled("laptop");
-        let alice_nats = crate::connection::Nats::new(&server.url, Some(&laptop), None).unwrap();
+        let alice_nats = crate::connection::Nats::new(&server.url, Some(&laptop), None, None).unwrap();
         alice_nats.connect("test").await.unwrap();
         let words = vec!["@bob".to_owned(), "lunch at noon?".to_owned()];
         let args = crate::cmd::send::AskArgs { words, ..Default::default() };

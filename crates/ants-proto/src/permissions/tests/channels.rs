@@ -23,7 +23,7 @@ fn channels_are_readable_by_ants_and_written_by_humans_only() {
     assert!(a.subscribe.iter().any(|s| s == subject::ALL_CHANNELS));
     assert!(!a.publish.iter().any(|s| s.contains("$KV.ants_channels") || s.contains("STREAM.CREATE.KV_ants_channels")));
     assert!(!a.publish.iter().any(|s| s == "ants.chan.>" || s == "$JS.API.CONSUMER.CREATE.ANTS.chan-dev-a"));
-    let human = Permissions::for_user(&UserId::human(), Role::Human);
+    let human = Permissions::for_user(&crate::human(), Role::Human);
     for s in ["ants.chan.*.human", "$KV.ants_channels.>", "$JS.API.STREAM.CREATE.KV_ants_channels"] {
         assert!(human.publish.iter().any(|have| have == s), "{s} missing from {:?}", human.publish);
     }
@@ -55,7 +55,7 @@ fn only_ants_get_spare_readers_pinned_like_their_own() {
     }
     let spares = a.publish.iter().filter(|s| s.contains("-dev-a_")).count();
     assert_eq!(spares, 3 * 3 * SPARE_READERS, "no spare with any other filter, and none acks");
-    let human = Permissions::for_user(&UserId::human(), Role::Human);
+    let human = Permissions::for_user(&crate::human(), Role::Human);
     assert!(!human.publish.iter().any(|s| s.contains("-human_")));
     let named_like = |spare: String| spare.strip_prefix("chanread-").is_some_and(|user| user.parse::<UserId>().is_ok());
     assert!(!spare_readers("chanread-dev-a").any(named_like), "no spare is another user's reader");
@@ -161,7 +161,7 @@ fn the_channel_manager_hears_requests_and_writes_channels_only() {
     assert!(!manager.publish.iter().any(|s| s.starts_with("_INBOX") || s.contains("STREAM.CREATE")));
     // Humans read its version.
     let read = "$JS.API.DIRECT.GET.KV_ants_webhooks.$KV.ants_webhooks.channel-manager.serve";
-    assert!(Permissions::for_user(&UserId::human(), Role::Human).publish.iter().any(|s| s == read));
+    assert!(Permissions::for_user(&crate::human(), Role::Human).publish.iter().any(|s| s == read));
     let marker = Serving::here("m1");
     let json = serde_json::to_string(&marker).unwrap();
     assert_eq!(json, format!(r#"{{"machine":"m1","version":"{ANTS_VERSION}","perms":{PERMISSIONS_VERSION}}}"#));

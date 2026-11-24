@@ -59,12 +59,18 @@ async fn the_human_decides_and_silence_rejects() {
     let thread: ThreadId = "t1".parse().unwrap();
     let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
     let stream = bus::ensure_stream(&js).await.unwrap();
-    let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
+    let (human, human_js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "human").await.unwrap();
     let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
     let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
     subscribed(&human_js).await;
 
-    let approver = NatsApprover::new(client.clone(), js.clone(), ant.clone(), Duration::from_secs(10));
+    let approver = NatsApprover::new(
+        client.clone(),
+        js.clone(),
+        ant.clone(),
+        Duration::from_secs(10),
+        Registry::new(ants_test_support::human()),
+    );
     let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
     let always = "Yes, and don't ask again for git push commands in /work";
     let labels = [(Verdict::AllowAlways, always.to_owned())].into();
@@ -83,10 +89,10 @@ async fn the_human_decides_and_silence_rejects() {
         assert_eq!(status.update, expected);
     }
 
-    let decision = request.decide(Verdict::AllowAlways).by(Some(UserId::human()));
+    let decision = request.decide(Verdict::AllowAlways).by(Some(ants_test_support::human()));
     human_js.publish(decision.subject(), serde_json::to_vec(&decision).unwrap().into()).await.unwrap().await.unwrap();
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::AllowAlways);
-    let told = (Verdict::AllowAlways, DecidedBy::Human, Some(UserId::human()));
+    let told = (Verdict::AllowAlways, DecidedBy::Human, Some(ants_test_support::human()));
     assert_eq!(decided_update(&mut statuses).await, told, "the human the decision names");
 
     // Both the request and the decision stay in the stream for a late `ants tools list`.
@@ -99,10 +105,13 @@ async fn the_human_decides_and_silence_rejects() {
     let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));
     let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
     let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
-    let decision = request.decide(Verdict::Reject).by(Some(UserId::human()));
+    let decision = request.decide(Verdict::Reject).by(Some(ants_test_support::human()));
     human_js.publish(decision.subject(), serde_json::to_vec(&decision).unwrap().into()).await.unwrap().await.unwrap();
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::Reject);
-    assert_eq!(decided_update(&mut statuses).await, (Verdict::Reject, DecidedBy::Human, Some(UserId::human())));
+    assert_eq!(
+        decided_update(&mut statuses).await,
+        (Verdict::Reject, DecidedBy::Human, Some(ants_test_support::human()))
+    );
     let (message, rejected) = rejection(&stream, &thread, &ant).await;
     assert_eq!(message, Uuid::nil());
     let expected = TimelineRejection {
@@ -110,15 +119,15 @@ async fn the_human_decides_and_silence_rejects() {
         kind: "execute".into(),
         title: "git push".into(),
         by: DecidedBy::Human,
-        decider: Some(UserId::human()),
+        decider: Some(ants_test_support::human()),
         via: None,
     };
     assert_eq!(rejected, expected);
 
     // Silence rejects, and the thread's owner is told before the ant goes on.
     let alice: UserId = "alice".parse().unwrap();
-    let humans = Registry::with(UserId::human(), &["alice"]);
-    let impatient = NatsApprover::new(client, js, ant.clone(), Duration::from_millis(300)).with_humans(humans.clone());
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
+    let impatient = NatsApprover::new(client, js, ant.clone(), Duration::from_millis(300), humans.clone());
     let asked = Envelope::on_thread(thread.clone(), alice.clone(), ant.clone(), "push").with_owner(Some(alice.clone()));
     let turn = impatient.begin(&asked);
     assert_eq!(
@@ -149,9 +158,9 @@ async fn the_human_decides_and_silence_rejects() {
         Verdict::Reject
     );
     assert_eq!(impatient.asked(&thread), 0, "counted only while a turn lasts");
-    let stored = stream.direct_get_last_for_subject(subject::inbox(&UserId::human(), &ant)).await.unwrap();
+    let stored = stream.direct_get_last_for_subject(subject::inbox(&ants_test_support::human(), &ant)).await.unwrap();
     let told: Envelope = serde_json::from_slice(&stored.payload).unwrap();
-    assert_eq!((&told.to, &told.owner), (&UserId::human(), &None));
+    assert_eq!((&told.to, &told.owner), (&ants_test_support::human(), &None));
 }
 
 #[tokio::test]
@@ -167,9 +176,8 @@ async fn a_request_names_its_human_and_stand_in_who_is_told_of_another_human_dec
     subscribed(&human_js).await;
 
     let chain = Chain { stand_in: Some(bob.clone()), ..Chain::default() };
-    let humans = Registry::with(UserId::human(), &["alice", "bob"]);
-    let approver =
-        NatsApprover::new(client, js, ant.clone(), Duration::from_secs(10)).with_chain(chain).with_humans(humans);
+    let humans = Registry::with(ants_test_support::human(), &["alice", "bob"]);
+    let approver = NatsApprover::new(client, js, ant.clone(), Duration::from_secs(10), humans).with_chain(chain);
     let asked = Envelope::on_thread(thread.clone(), alice.clone(), ant.clone(), "push").with_owner(Some(alice.clone()));
     let _turn = approver.begin(&asked);
     let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));
@@ -193,7 +201,7 @@ async fn a_request_names_its_human_and_stand_in_who_is_told_of_another_human_dec
 #[test]
 fn an_expired_request_is_told_to_the_owner_else_the_default_human() {
     let (ant, lead): (UserId, UserId) = ("dev-a".parse().unwrap(), "lead".parse().unwrap());
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
     let thread: ThreadId = "t1".parse().unwrap();
     let tool = ToolCall { locations: vec!["src/main.rs".into()], ..tool() };
     let request = ApprovalRequest::new(ant.clone(), thread.clone(), tool, vec![Verdict::AllowOnce], DEFAULT_TIMEOUT);
@@ -217,9 +225,9 @@ fn an_expired_request_is_told_to_the_owner_else_the_default_human() {
     }
     let by_ant = asked.with_owner(Some("dev-c".parse().unwrap()));
     let told = expired_notice(&ant, &request, DEFAULT_TIMEOUT, Some(&by_ant), &humans);
-    assert_eq!((&told.to, &told.owner), (&UserId::human(), &None), "an ant owns no thread");
+    assert_eq!((&told.to, &told.owner), (&ants_test_support::human(), &None), "an ant owns no thread");
     let told = expired_notice(&ant, &request, DEFAULT_TIMEOUT, None, &humans);
-    assert_eq!((&told.to, &told.owner, &told.creator), (&UserId::human(), &None, &None));
+    assert_eq!((&told.to, &told.owner, &told.creator), (&ants_test_support::human(), &None, &None));
 }
 
 /// A decision the stream refuses, as `ants tools approve` loses to another human's, still reaches the ant.
@@ -239,7 +247,7 @@ async fn the_ant_acts_on_the_stored_decision_not_the_first_heard() {
     let thread: ThreadId = "t1".parse().unwrap();
     let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
     let stream = bus::ensure_stream(&js).await.unwrap();
-    let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
+    let (human, human_js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "human").await.unwrap();
     let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
     subscribed(&human_js).await;
     let mut next_request = async || {
@@ -247,7 +255,8 @@ async fn the_ant_acts_on_the_stored_decision_not_the_first_heard() {
         serde_json::from_slice::<ApprovalRequest>(&msg.payload).unwrap()
     };
 
-    let approver = NatsApprover::new(client.clone(), js.clone(), ant.clone(), WAIT);
+    let approver =
+        NatsApprover::new(client.clone(), js.clone(), ant.clone(), WAIT, Registry::new(ants_test_support::human()));
     let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
     let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (options.clone(), BTreeMap::new())));
     let request = next_request().await;
@@ -264,7 +273,13 @@ async fn the_ant_acts_on_the_stored_decision_not_the_first_heard() {
     assert_eq!(serde_json::from_slice::<ApprovalDecision>(&stored.payload).unwrap(), winner);
 
     // A decision that is never stored leaves the request to expire.
-    let impatient = NatsApprover::new(client.clone(), js.clone(), ant.clone(), Duration::from_secs(1));
+    let impatient = NatsApprover::new(
+        client.clone(),
+        js.clone(),
+        ant.clone(),
+        Duration::from_secs(1),
+        Registry::new(ants_test_support::human()),
+    );
     let decided = tokio::spawn(impatient.decide(thread, tool(), (options, BTreeMap::new())));
     publish_refused(&human, &next_request().await.decide(Verdict::AllowOnce)).await;
     assert_eq!(timeout(WAIT, decided).await.unwrap().unwrap(), Verdict::Reject);
@@ -287,13 +302,14 @@ async fn the_chain_hears_the_request_and_only_its_decision_counts() {
     let thread: ThreadId = "t1".parse().unwrap();
     let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
-    let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
+    let (human, human_js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "human").await.unwrap();
     let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
     let mut asked = human.subscribe(subject::inbox_of(&lead)).await.unwrap();
     let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
     subscribed(&human_js).await;
 
-    let approver = NatsApprover::new(client, js, ant.clone(), WAIT).with_chain(chain(&[&lead]));
+    let approver = NatsApprover::new(client, js, ant.clone(), WAIT, Registry::new(ants_test_support::human()))
+        .with_chain(chain(&[&lead]));
     let decided = tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));
     let msg = timeout(WAIT, requests.next()).await.unwrap().unwrap();
     let request: ApprovalRequest = serde_json::from_slice(&msg.payload).unwrap();
@@ -337,9 +353,15 @@ async fn an_expired_request_is_told_to_the_chain_asked_and_pushed_to_the_human_o
     let mut stream = bus::ensure_stream(&js).await.unwrap();
 
     // A human in the chain, as a misconfigured escalate_to may hold, is told once, as the default human.
-    let human = UserId::human();
-    let approver =
-        NatsApprover::new(client, js, ant.clone(), Duration::from_millis(300)).with_chain(chain(&[&lead, &human]));
+    let human = ants_test_support::human();
+    let approver = NatsApprover::new(
+        client,
+        js,
+        ant.clone(),
+        Duration::from_millis(300),
+        Registry::new(ants_test_support::human()),
+    )
+    .with_chain(chain(&[&lead, &human]));
     assert_eq!(
         approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())).await,
         Verdict::Reject
@@ -372,11 +394,12 @@ async fn the_first_decision_wins_whoever_makes_it() {
     let thread: ThreadId = "t1".parse().unwrap();
     let (client, js) = bus::connect(&server.url, None, None, &ant, "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
-    let (human, human_js) = bus::connect(&server.url, None, None, &UserId::human(), "human").await.unwrap();
+    let (human, human_js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "human").await.unwrap();
     let mut requests = human.subscribe(subject::approvals(&ant)).await.unwrap();
     let mut statuses = human.subscribe(subject::status(&ant, &thread)).await.unwrap();
     subscribed(&human_js).await;
-    let approver = NatsApprover::new(client, js, ant.clone(), WAIT).with_chain(chain(&[&lead]));
+    let approver = NatsApprover::new(client, js, ant.clone(), WAIT, Registry::new(ants_test_support::human()))
+        .with_chain(chain(&[&lead]));
     let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
     let decide =
         |request: &ApprovalRequest, verdict| Envelope::decision(thread.clone(), lead.clone(), request.decide(verdict));
@@ -401,7 +424,7 @@ async fn the_first_decision_wins_whoever_makes_it() {
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let (_human, js) = bus::connect(&url, None, None, &UserId::human(), "human-2").await.unwrap();
+            let (_human, js) = bus::connect(&url, None, None, &ants_test_support::human(), "human-2").await.unwrap();
             js.publish(human_says.subject(), serde_json::to_vec(&human_says).unwrap().into())
                 .await
                 .unwrap()
@@ -434,7 +457,7 @@ async fn an_assistant_s_decision_takes_effect_only_with_its_human_s_consent() {
     subscribed(&human_js).await;
 
     let device = TestDevice::default();
-    let humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
+    let humans = Registry::with(ants_test_support::human(), &["alice"]).verifying_grants(Some(device.account()));
     let at = || chrono::Utc::now();
     let mut grant = ants_proto::AssistantGrant::new(alice.clone(), Some(pa.clone()), at(), device.jwt(&alice));
     grant.signature = device.sign(&grant.signed());
@@ -448,7 +471,7 @@ async fn an_assistant_s_decision_takes_effect_only_with_its_human_s_consent() {
         humans.put_record(&ants_proto::confirmations_key(&alice), Some(&serde_json::to_vec(&record).unwrap()));
     };
 
-    let approver = NatsApprover::new(client, js, ant.clone(), WAIT).with_humans(humans.clone());
+    let approver = NatsApprover::new(client, js, ant.clone(), WAIT, humans.clone());
     let options = vec![Verdict::AllowOnce, Verdict::AllowAlways];
     let ask = async |requests: &mut async_nats::Subscriber| {
         let pushing = ToolCall { input: Some(r#"{"command":"git push"}"#.into()), ..tool() };
@@ -561,8 +584,7 @@ async fn a_request_goes_to_the_human_s_assistant_too_while_it_can_act() {
         })
     };
     let assistants = AssistantFirst::new(humans.clone(), colony, record);
-    let approver =
-        NatsApprover::new(client, js, ant.clone(), WAIT).with_humans(humans.clone()).with_assistants(assistants);
+    let approver = NatsApprover::new(client, js, ant.clone(), WAIT, humans.clone()).with_assistants(assistants);
     let ask = async |requests: &mut async_nats::Subscriber| {
         let decided =
             tokio::spawn(approver.decide(thread.clone(), tool(), (vec![Verdict::AllowOnce], BTreeMap::new())));

@@ -62,7 +62,7 @@ impl MaxDeliveries {
             Consumer::Inbox => inbox_consumer(&user),
             Consumer::Channels => chan_consumer(&user),
         };
-        (!user.is_human() && own == self.consumer).then_some((user, kind))
+        (own == self.consumer).then_some((user, kind))
     }
 }
 
@@ -82,7 +82,7 @@ pub async fn watch(
         .await
         .context("subscribing to max-deliveries advisories")?;
     let stream = js.get_stream(STREAM).await.context("opening the ANTS stream")?;
-    let humans = Registry::default();
+    let humans = Registry::new(reader.clone());
     let _watching = humans.watch(js.clone(), crate::people::humans::RETRY);
     // The human's side neither reads nor writes sessions, which its credentials do not allow.
     let sessions = DirectKv::new(js, None, SESSIONS_BUCKET).await?;
@@ -142,7 +142,7 @@ pub async fn bury_undelivered(
     advisory: &MaxDeliveries,
     claims: &Claims<'_>,
 ) -> Result<Option<(u64, DeadLetter)>> {
-    let Some((ant, consumer)) = advisory.ant() else {
+    let Some((ant, consumer)) = advisory.ant().filter(|(user, _)| !claims.humans.is_human(user)) else {
         tracing::debug!(consumer = advisory.consumer, "ignoring an advisory of a consumer that is no ant's inbox");
         return Ok(None);
     };
@@ -239,9 +239,7 @@ mod tests {
         assert_eq!(advisory.ant(), Some(("dev-a".parse().unwrap(), Consumer::Inbox)));
         let chan = MaxDeliveries { consumer: "chan-dev-a".into(), ..advisory.clone() };
         assert_eq!(chan.ant(), Some(("dev-a".parse().unwrap(), Consumer::Channels)));
-        for (stream, consumer) in
-            [("ANTS", "inbox-human"), ("ANTS", "notes-dev-a"), ("ANTS", "chanread-dev-a"), ("OTHER", "inbox-dev-a")]
-        {
+        for (stream, consumer) in [("ANTS", "notes-dev-a"), ("ANTS", "chanread-dev-a"), ("OTHER", "inbox-dev-a")] {
             let other = MaxDeliveries { stream: stream.into(), consumer: consumer.into(), ..advisory.clone() };
             assert_eq!(other.ant(), None, "{stream} {consumer}");
         }

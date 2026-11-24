@@ -177,11 +177,14 @@ fn rejects_invalid_environment_without_exposing_values() {
 }
 
 #[test]
-fn falls_back_to_the_default_server_and_human() {
-    let ants = parse_here("[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
-    assert_eq!((&ants[0].nats, &ants[0].human), (&None, &None));
+fn falls_back_to_the_default_server_and_needs_a_human() {
+    let ants = parse_here("human = \"alice\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"").unwrap();
+    assert_eq!((&ants[0].nats, ants[0].human.as_ref().map(UserId::as_str)), (&None, Some("alice")));
     let config = ants[0].clone().into_config("nats://leaf:4222", &Harnesses::builtin()).unwrap();
-    assert_eq!((config.connection.nats_url.as_str(), config.policy.human), ("nats://leaf:4222", UserId::human()));
+    assert_eq!((config.connection.nats_url.as_str(), config.policy.human.as_str()), ("nats://leaf:4222", "alice"));
+    let unnamed = Ant { human: None, ..ants[0].clone() };
+    let err = format!("{:#}", unnamed.into_config("nats://leaf:4222", &Harnesses::builtin()).unwrap_err());
+    assert!(err.contains("ant dev-a: no default human") && err.contains("`human`"), "{err}");
     let err = parse_here("human = \"Not A Name\"").unwrap_err();
     assert!(format!("{err:#}").contains("human"), "{err:#}");
 }

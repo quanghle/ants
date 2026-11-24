@@ -219,10 +219,10 @@ async fn a_generated_leaf_reaches_the_hub_and_switches_its_uplink_on_reload() {
     };
     let team = hub.dir().join("auth");
     let domain: JsDomain = "hub".parse().unwrap();
-    let (human, dev_a) = (UserId::human(), "dev-a".parse::<UserId>().unwrap());
+    let (human, dev_a) = (ants_test_support::human(), "dev-a".parse::<UserId>().unwrap());
     let creds = |p: &UserId| {
         let out = hub.dir().join(format!("{p}.creds"));
-        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, p, crate::test_support::role_of(p), Some(&domain), &out).unwrap();
         out
     };
     let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();
@@ -314,10 +314,11 @@ async fn renewed_uplink_credentials_reconnect_the_uplink_alone_on_reload() {
     };
     let team = hub.dir().join("auth");
     let domain: JsDomain = "hub".parse().unwrap();
-    let (human, dev_a, dev_b) = (UserId::human(), "dev-a".parse::<UserId>().unwrap(), "dev-b".parse().unwrap());
+    let (human, dev_a, dev_b) =
+        (ants_test_support::human(), "dev-a".parse::<UserId>().unwrap(), "dev-b".parse().unwrap());
     let creds = |p: &UserId| {
         let out = hub.dir().join(format!("{p}.creds"));
-        crate::test_support::issue(&team, p, Role::by_default(p), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, p, crate::test_support::role_of(p), Some(&domain), &out).unwrap();
         out
     };
     let (_h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();

@@ -151,7 +151,7 @@ async fn an_assistant_withdraws_and_cancels_for_its_human_and_no_other_ant_does(
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [alice, pa, pb] = ants(["alice", "pa", "pb"]);
     let device = crate::people::humans::TestDevice::default();
-    bus.humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
+    bus.humans = Registry::with(ants_test_support::human(), &["alice"]).verifying_grants(Some(device.account()));
     bus.account = Some(device.account());
     let mut grant =
         ants_proto::AssistantGrant::new(alice.clone(), Some(pa.clone()), chrono::Utc::now(), device.jwt(&alice));

@@ -29,7 +29,7 @@ impl Inbox<'_> {
         let buried = if kept {
             self.bury_kept_junk(msg, error).await
         } else {
-            dead::bury(self.js, self.ant, msg, None, error).await
+            dead::bury(self.js, self.humans, self.ant, msg, None, error).await
         };
         match buried {
             Ok(burial) => {

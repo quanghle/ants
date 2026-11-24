@@ -229,7 +229,7 @@ pub async fn serve(url: &str, creds: Option<&std::path::Path>, domain: Option<&a
     let key = ants_proto::channel_manager_serving_key();
     let publishing = crate::release::versions::keep_putting(published, key, crate::release::versions::serving().await);
     let account = ants_daemon::people::humans::account(creds);
-    let humans = ants_daemon::people::humans::Registry::new(UserId::human()).verifying_grants(account.clone());
+    let humans = ants_daemon::people::humans::Registry::listed().verifying_grants(account.clone());
     let _watching = humans.watch(js.clone(), ants_daemon::people::humans::RETRY);
     let colony = ants_daemon::mcp::jetstream_colony(js.clone());
     let behalf = ants_daemon::people::behalf::Records::new(js.clone(), domain.cloned(), account);

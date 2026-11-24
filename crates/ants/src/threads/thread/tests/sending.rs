@@ -9,7 +9,7 @@ async fn ask_reply_to_answers_the_message_s_author_on_its_thread_quoting_it() {
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a) = (p("alice"), p("dev-a"));
     let creds = server.creds_as(&alice, ants_proto::Role::Human);
-    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
     let asked = Envelope::new(alice.clone(), dev_a.clone(), "build it");
@@ -52,7 +52,7 @@ async fn ask_forward_hands_a_message_and_its_files_to_another_ant_on_a_thread_li
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let creds = server.creds_as(&alice, ants_proto::Role::Human);
-    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
     js.create_stream(ants_daemon::hub::files_config()).await.unwrap();
@@ -90,7 +90,7 @@ async fn ask_forward_thread_hands_its_kept_tldr_to_another_ant_and_refuses_witho
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let creds = server.creds_as(&alice, ants_proto::Role::Human);
-    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let (_, js) = nats.connect("test").await.unwrap();
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
     js.create_stream(ants_daemon::hub::threads_config()).await.unwrap();

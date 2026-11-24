@@ -41,7 +41,7 @@ fn serve(stores: &SenseStores, ant: &UserId, home: &Path) {
 }
 
 async fn link(server: &NatsServer) -> Link {
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     Link::new(js, None, vec![], Machine::from_hostname("studio"))
 }
 
@@ -120,7 +120,7 @@ async fn sense_s_own_link_reaches_the_data_and_records_no_machine() {
     let unkept = stores.items(&dev_a()).await.err().unwrap();
     assert!(matches!(&unkept, StoreError::NotKept(said) if said == why), "{unkept:?}");
     stores.unkept(None);
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     let machines = js.create_key_value(crate::hub::machines_config()).await.unwrap();
     let studio = Some(Machine::from_hostname("studio"));
     let host = crate::host::Host::quietly(studio, None, server.url.clone(), None, None, [false].into_iter()).unwrap();
@@ -211,7 +211,7 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
     assert!(card.returned(), "read back from the log, the cache gone");
     assert_eq!(identity::read_id(&home).unwrap(), Some(id));
 
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     let messages = js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages;
     assert_eq!(messages, 2);
     std::fs::remove_dir_all(&home).unwrap();
@@ -225,7 +225,7 @@ async fn an_ant_s_items_open_on_first_use_with_its_sense_id_and_log() {
 #[tokio::test]
 async fn the_identity_record_names_one_sense_identity_for_every_home() {
     let Some(server) = NatsServer::start() else { return };
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     crate::hub::create_identities(&js).await.unwrap();
     let record = Identity::new(&js, None, &dev_a()).await.unwrap();
     let homes = [scratch_dir("sense-named-a"), scratch_dir("sense-named-b"), scratch_dir("sense-named-c")];
@@ -301,7 +301,7 @@ async fn the_identity_record_names_one_sense_identity_for_every_home() {
 #[tokio::test]
 async fn an_ant_added_again_keeps_its_birth_and_its_growth() {
     let Some(server) = NatsServer::start() else { return };
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     crate::hub::create_identities(&js).await.unwrap();
     let (home, home_b) = (scratch_dir("sense-growth-a"), scratch_dir("sense-growth-b"));
     let record = Identity::new(&js, None, &dev_a()).await.unwrap();
@@ -359,7 +359,7 @@ async fn an_ant_added_again_keeps_its_birth_and_its_growth() {
 #[tokio::test]
 async fn an_ant_added_again_after_its_daemon_stopped_keeps_every_prompt() {
     let Some(server) = NatsServer::start() else { return };
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     crate::hub::create_identities(&js).await.unwrap();
     let home = scratch_dir("sense-growth-stop");
     let record = Identity::new(&js, None, &dev_a()).await.unwrap();
@@ -398,7 +398,7 @@ async fn an_ant_added_again_after_its_daemon_stopped_keeps_every_prompt() {
 #[tokio::test]
 async fn revoking_a_live_or_crashed_ant_restores_growth_not_yet_on_its_card() {
     let Some(server) = NatsServer::start() else { return };
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     crate::hub::create_identities(&js).await.unwrap();
     let ant = dev_a();
     let record = Identity::new(&js, None, &ant).await.unwrap();
@@ -487,7 +487,7 @@ impl tracing::Subscriber for NamingWarnings {
 #[tokio::test]
 async fn an_unreadable_card_holds_up_only_a_record_naming_no_sense_id() {
     let Some(server) = NatsServer::start() else { return };
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     crate::hub::create_identities(&js).await.unwrap();
     let ants = [dev_a(), "dev-b".parse::<UserId>().unwrap()];
     let homes = ants.each_ref().map(|_| scratch_dir("sense-card-unread"));
@@ -646,7 +646,7 @@ async fn an_export_moves_the_sense_data_to_another_bus() {
     assert_eq!(std::fs::read_to_string(Home::new(&home_b).skills().join("review/SKILL.md")).unwrap(), "review well");
     let card = identity::card(&*stores.items(&dev_a()).await.unwrap()).await.unwrap().unwrap();
     assert_eq!((&card.sense, card.identities.as_slice()), (&id, &["id1".to_owned()][..]));
-    let js = bus::connect(&bus_b.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&bus_b.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     let messages = js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages;
     assert_eq!(messages, 3, "the events and the anchor");
     sense.import(request(&exported)).await.unwrap();
@@ -761,7 +761,7 @@ async fn cached_writes_survive_process_restart_and_the_new_host_link_drains_them
     hosting.up(link(&server).await);
     eventually("restarted pending sense writes appended", async || items.pending().await.unwrap() == 0).await;
     assert!(Arc::ptr_eq(&items, &stores.items(&dev_a()).await.unwrap()));
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     assert_eq!(js.get_stream(SENSE_STREAM).await.unwrap().info().await.unwrap().state.messages, 2);
     drop((items, hosting));
     std::fs::remove_dir_all(home).unwrap();
@@ -836,7 +836,7 @@ async fn a_disconnected_initial_host_opens_the_cache_before_its_log_can_be_opene
 async fn a_new_stream_incarnation_opens_the_items_again_unless_writes_are_pending() {
     let Some(server) = NatsServer::start() else { return };
     let home = scratch_dir("sense-stores-incarnation");
-    let js = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap().1;
+    let js = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap().1;
     let stores = SenseStores::new();
     serve(&stores, &dev_a(), &home);
     let hosting = stores.hosting();

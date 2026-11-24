@@ -78,7 +78,7 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     let Some(server) = crate::test_support::Server::start() else { return };
     let (alice, dev_a, dev_b) = (p("alice"), p("dev-a"), p("dev-b"));
     let creds = server.creds_as(&alice, ants_proto::Role::Human);
-    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let js = nats.connect("test").await.unwrap().1;
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
     let _ = js.create_stream(ants_daemon::hub::threads_config()).await;
@@ -126,7 +126,7 @@ async fn a_human_picks_its_threads_by_a_start_of_their_id_or_the_last() {
     assert_eq!(resolve(others.thread_id.as_str()).await.unwrap(), others.thread_id);
 
     let ant_creds = server.creds_as(&dev_a, ants_proto::Role::Ant);
-    let ant = crate::connection::Nats::new(&server.url, Some(&ant_creds), None).unwrap();
+    let ant = crate::connection::Nats::new(&server.url, Some(&ant_creds), None, None).unwrap();
     let refused = Pick::Last.resolve(&ant, &js).await.unwrap_err().to_string();
     assert!(refused.contains("give the whole thread id"), "{refused}");
 }

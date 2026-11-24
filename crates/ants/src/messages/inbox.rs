@@ -491,7 +491,7 @@ mod tests {
     }
 
     async fn read(js: &jetstream::Context, select: Select) -> Vec<Envelope> {
-        read_as(js, &UserId::human(), select).await
+        read_as(js, &ants_test_support::human(), select).await
     }
 
     async fn read_as(js: &jetstream::Context, human: &UserId, select: Select) -> Vec<Envelope> {
@@ -530,13 +530,15 @@ mod tests {
     #[test]
     fn a_message_shows_without_control_or_reordering_characters() {
         use crate::test_support::hostile::{HOSTILE, assert_printable};
-        let said = Envelope::on_thread("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), HOSTILE);
+        let said =
+            Envelope::on_thread("t1".parse().unwrap(), "dev-a".parse().unwrap(), ants_test_support::human(), HOSTILE);
         let shown = render(&said, &Acting::Own, &[], None);
         assert_printable(&shown);
         assert!(shown.contains("\n  [2J]0;pwned]52;c;cHduZWQ=spoof31m\n  line two\n"), "{shown}");
         let mut question = Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
         (question.text, question.options[0].label) = (HOSTILE.to_owned(), HOSTILE.to_owned());
-        let asked = Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), question);
+        let asked =
+            Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), ants_test_support::human(), question);
         assert_printable(&render(&asked, &Acting::Own, &[], None));
     }
 
@@ -544,7 +546,8 @@ mod tests {
     fn a_question_shows_its_options_numbered_and_how_to_answer_it() {
         let options = ["yes".to_owned(), "not yet".to_owned()];
         let question = Question::new("Ship it?", &options, false).unwrap();
-        let asked = Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), question);
+        let asked =
+            Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), ants_test_support::human(), question);
         let shown = render(&asked, &Acting::Own, &[], None);
         assert!(shown.contains(&format!("dev-a asks on thread t1, message {}\n  Ship it?\n", asked.id)), "{shown}");
         assert!(shown.contains("\n  1. yes\n  2. not yet\n"), "{shown}");
@@ -558,7 +561,8 @@ mod tests {
         let regions = Question::new("Which regions?", &options, false).unwrap().multi().headed("Regions");
         let ship = Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], true).unwrap();
         let questions = ants_proto::Questions::new(vec![regions, ship]).unwrap();
-        let asked = Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), UserId::human(), questions);
+        let asked =
+            Envelope::asking("t1".parse().unwrap(), "dev-a".parse().unwrap(), ants_test_support::human(), questions);
         let shown = render(&asked, &Acting::Own, &[], None);
         assert!(shown.contains("\n  Question 1 of 2, Regions: Which regions?\n  \n  1. eu\n"), "{shown}");
         assert!(shown.contains("\n  Question 2 of 2: Ship it?\n"), "{shown}");
@@ -572,10 +576,10 @@ mod tests {
         let identities = crate::ants::avatars::Identities::from([(dev_a.clone(), record)]);
         let faces = Faces::new(identities, crate::ants::avatars::Depth::Plain, ants_proto::Theme::Dark);
         let face = ants_proto::Avatar::derive("a-id").face();
-        let reply = Envelope::new(dev_a, UserId::human(), "done");
+        let reply = Envelope::new(dev_a, ants_test_support::human(), "done");
         let shown = render(&reply, &Acting::Own, &[], Some(&faces));
         assert!(shown.contains(&format!("  {face} dev-a on thread ")), "{shown}");
-        let from_human = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "go");
+        let from_human = Envelope::new(ants_test_support::human(), "dev-a".parse().unwrap(), "go");
         assert!(
             render(&from_human, &Acting::Own, &[], Some(&faces)).contains("  human on thread "),
             "no record, no face"
@@ -584,7 +588,7 @@ mod tests {
 
     #[test]
     fn attachments_are_listed_with_their_handles() {
-        let mut reply = Envelope::new("dev-a".parse().unwrap(), UserId::human(), "the screenshot");
+        let mut reply = Envelope::new("dev-a".parse().unwrap(), ants_test_support::human(), "the screenshot");
         let shot = ants_daemon::files::reference("shot.png", "image/png", &[0; 2048]).unwrap();
         reply.attachments = vec![shot.clone()];
         let handle = format!("dev-a.inbox.human.{}", shot.id);
@@ -602,16 +606,18 @@ mod tests {
     async fn replies_stay_unread_until_shown() {
         let Some(server) = Server::start() else { return };
         let dev_a: UserId = "dev-a".parse().unwrap();
-        let (_, human) = server.connect(&UserId::human()).await;
+        let (_, human) = server.connect(&ants_test_support::human()).await;
         bus::ensure_stream(&human).await.unwrap();
         let (_, ant_js) = server.connect(&dev_a).await;
-        let asks =
-            [Envelope::new(UserId::human(), dev_a.clone(), "a"), Envelope::new(UserId::human(), dev_a.clone(), "b")];
+        let asks = [
+            Envelope::new(ants_test_support::human(), dev_a.clone(), "a"),
+            Envelope::new(ants_test_support::human(), dev_a.clone(), "b"),
+        ];
         for (ask, text) in [(&asks[0], "one"), (&asks[1], "two"), (&asks[0], "three")] {
             bus::publish(&ant_js, &ask.reply(dev_a.clone(), text, Role::Human).unwrap()).await.unwrap();
         }
         let forged = asks[0].reply(dev_a.clone(), "forged", Role::Human).unwrap();
-        let subject = ants_proto::subject::inbox(&UserId::human(), &UserId::human());
+        let subject = ants_proto::subject::inbox(&ants_test_support::human(), &ants_test_support::human());
         bus::publish_json(&human, subject, &forged, None).await.unwrap();
 
         let peek = Select { peek: true, ..Default::default() };
@@ -625,25 +631,32 @@ mod tests {
 
         let last = asks[0].reply(dev_a.clone(), "four", Role::Human).unwrap();
         bus::publish(&ant_js, &last).await.unwrap();
-        assert!(mark_read(&human, &UserId::human(), &last).await.unwrap(), "ask --wait marks its reply read");
+        assert!(
+            mark_read(&human, &ants_test_support::human(), &last).await.unwrap(),
+            "ask --wait marks its reply read"
+        );
         assert_eq!(texts(&read(&human, Select::default()).await), ["three"]);
         assert!(read(&human, Select::default()).await.is_empty());
-        assert!(!mark_read(&human, &UserId::human(), &last).await.unwrap());
+        assert!(!mark_read(&human, &ants_test_support::human(), &last).await.unwrap());
     }
 
     #[tokio::test]
     async fn an_assistant_s_reports_are_counted_apart_unless_asked_for() {
         let Some(server) = Server::start() else { return };
         let dev_a: UserId = "dev-a".parse().unwrap();
-        let (_, human) = server.connect(&UserId::human()).await;
+        let (_, human) = server.connect(&ants_test_support::human()).await;
         bus::ensure_stream(&human).await.unwrap();
         let (_, ant_js) = server.connect(&dev_a).await;
-        let acts = ThreadId::activity(&UserId::human(), chrono::Utc::now().date_naive());
-        let report = |text: &str| Envelope::on_thread(acts.clone(), dev_a.clone(), UserId::human(), text);
-        for e in [report("sent bob a message"), Envelope::new(dev_a.clone(), UserId::human(), "done"), report("held")] {
+        let acts = ThreadId::activity(&ants_test_support::human(), chrono::Utc::now().date_naive());
+        let report = |text: &str| Envelope::on_thread(acts.clone(), dev_a.clone(), ants_test_support::human(), text);
+        for e in [
+            report("sent bob a message"),
+            Envelope::new(dev_a.clone(), ants_test_support::human(), "done"),
+            report("held"),
+        ] {
             bus::publish(&ant_js, &e).await.unwrap();
         }
-        let mut inbox = Inbox::open(&human, &UserId::human()).await.unwrap();
+        let mut inbox = Inbox::open(&human, &ants_test_support::human()).await.unwrap();
         let peek = Select { peek: true, ..Default::default() };
         assert_eq!(texts(&inbox.unread(&peek).await.unwrap()), ["done"]);
         assert_eq!(inbox.reports(), BTreeMap::from([(acts.clone(), 2)]));

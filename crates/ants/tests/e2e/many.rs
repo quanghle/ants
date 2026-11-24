@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ants_proto::{SESSIONS_BUCKET, UserId};
+use ants_proto::SESSIONS_BUCKET;
 use ants_test_support::{NatsServer, have, wait_until};
 
 use super::{Fixture, count_tokens, run, wait_answered};
@@ -38,7 +38,7 @@ pub fn many_ants_in_worktrees_answer_once_and_clean_up() {
     assert!(init.status.success(), "ants init: {}", String::from_utf8_lossy(&init.stderr));
 
     let names: Vec<String> = (0..count).map(|i| format!("m-{i:03}")).collect();
-    let mut config = "messenger = false\nsage = \"none\"\nharness = \"copilot\"\n".to_owned();
+    let mut config = "messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\n".to_owned();
     let shared = dir.join("repos").join("shared");
     make_repo(&shared);
     let mut repos = vec![shared.clone()];
@@ -117,7 +117,8 @@ pub fn many_ants_in_worktrees_answer_once_and_clean_up() {
     daemon.kill();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "e2e").await.unwrap();
+        let (_, js) =
+            ants_daemon::bus::connect(&server.url, None, None, &ants_test_support::human(), "e2e").await.unwrap();
         let sessions = js.get_key_value(SESSIONS_BUCKET).await.unwrap();
         for (name, _, thread) in &sent {
             sessions.delete(format!("{name}.{thread}")).await.unwrap();

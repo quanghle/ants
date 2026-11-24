@@ -1,9 +1,9 @@
 //! The team's humans as a daemon sees them.
 //!
-//! A human is a user listed in the [`HUMANS_BUCKET`], which only humans write; `human` and the daemon's default
-//! human (config `human`) are humans without an entry. The daemon keeps the bucket's humans in a [`Registry`], kept
-//! current by a watch ([`Registry::watch`]). Until the bucket exists only the humans without an entry are known; the
-//! daemon looks for the bucket again every little while, since an ant may read it but not create it.
+//! A human is a user listed in the [`HUMANS_BUCKET`], which only humans write; the daemon's default human (config
+//! `human`) is a human without an entry. The daemon keeps the bucket's humans in a [`Registry`], kept current by a
+//! watch ([`Registry::watch`]). Until the bucket exists only the default human is known; the daemon looks for the
+//! bucket again every little while, since an ant may read it but not create it.
 //!
 //! The same watch keeps the humans' assistant grants ([`ants_proto::AssistantGrant`], under `<human>.assistant`),
 //! verified for the team's account ([`Registry::verifying_grants`]): a withdrawal holds as soon as the watch delivers
@@ -39,7 +39,8 @@ const WITHDRAWALS: usize = 64;
 #[derive(Debug, Clone)]
 pub struct Registry {
     humans: Arc<RwLock<Humans>>,
-    default: UserId,
+    /// The default human; none for a registry that tells no human anything ([`Registry::listed`]).
+    default: Option<UserId>,
     assistants: Arc<Assistants>,
 }
 
@@ -78,15 +79,20 @@ pub struct Withdrawal {
     pub assistant: UserId,
 }
 
-impl Default for Registry {
-    fn default() -> Self {
-        Self::new(UserId::human())
-    }
-}
-
 impl Registry {
-    /// A registry knowing only the humans without an entry: `human` and `default`, the default human.
+    /// A registry knowing only `default`, the default human, a human without an entry, until its watch reads the
+    /// bucket.
     pub fn new(default: UserId) -> Self {
+        Self::of(Some(default))
+    }
+
+    /// A registry of only the humans the bucket lists, with no default human, for a process that tells no human of a
+    /// thread: [`Registry::default_human`] and what falls back on it are not to be called on it.
+    pub fn listed() -> Self {
+        Self::of(None)
+    }
+
+    fn of(default: Option<UserId>) -> Self {
         let registry = Self { humans: Arc::default(), default, assistants: Arc::new(Assistants::new(None)) };
         registry.replace(registry.base());
         registry
@@ -156,9 +162,10 @@ impl Registry {
         *self.assistants.loaded.borrow()
     }
 
-    /// The human who gets what is meant for the owner of a thread that has none.
+    /// The human who gets what is meant for the owner of a thread that has none. Panics on a registry with none
+    /// ([`Registry::listed`]).
     pub fn default_human(&self) -> &UserId {
-        &self.default
+        self.default.as_ref().expect("a registry telling humans names a default human")
     }
 
     /// `owner`, the owner a message names for its thread, when it is a human. Any ant can name any owner, and an
@@ -176,7 +183,7 @@ impl Registry {
     /// The human who gets what is meant for the owner `owner` names: it when a human ([`Registry::human_owner`]),
     /// else the default human.
     pub fn owner_or_default(&self, owner: Option<&UserId>) -> UserId {
-        self.human_owner(owner).unwrap_or_else(|| self.default.clone())
+        self.human_owner(owner).unwrap_or_else(|| self.default_human().clone())
     }
 
     /// The human who gets the escalations of `envelope`'s thread: its owner when a human, else the default human.
@@ -330,16 +337,14 @@ impl Registry {
     }
 
     fn remove(&self, humans: &mut Humans, human: &UserId) {
-        if *human != self.default {
+        if self.default.as_ref() != Some(human) {
             humans.remove(human);
         }
     }
 
-    /// The humans without an entry.
+    /// The humans without an entry: the default human, if any.
     fn base(&self) -> Humans {
-        let mut humans = Humans::default();
-        let _ = humans.add(self.default.as_str(), HumanEntry { human: self.default.clone(), registered_at: None });
-        humans
+        Humans::of(self.default.clone())
     }
 
     fn replace(&self, humans: Humans) {
@@ -454,7 +459,7 @@ mod tests {
     #[test]
     fn humans_without_an_entry() {
         let registry = Registry::new(user("alice"));
-        assert!(registry.is_human(&UserId::human()));
+        assert!(!registry.is_human(&ants_test_support::human()), "no name is a human by itself");
         assert!(registry.is_human(&user("alice")));
         assert!(!registry.is_human(&user("bob")));
     }

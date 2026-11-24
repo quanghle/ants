@@ -45,7 +45,7 @@ fn an_allow_all_says_in_one_line_how_many_were_allowed_answered_already_or_faile
 #[tokio::test]
 async fn an_allow_all_allows_once_each_request_in_turn_counting_those_answered_elsewhere() {
     let Some(server) = Server::start() else { return };
-    let (client, js) = server.connect(&UserId::human()).await;
+    let (client, js) = server.connect(&ants_test_support::human()).await;
     bus::ensure_stream(&js).await.unwrap();
     let (_ant, ant_js) = server.connect(&user("dev-a")).await;
     let thread = ThreadId::generate();
@@ -58,7 +58,7 @@ async fn an_allow_all_allows_once_each_request_in_turn_counting_those_answered_e
         bus::publish_json(&ant_js, r.subject(), r, None).await.unwrap();
     }
     let mut feed = Feed::new(client, js.clone(), Duration::from_hours(1)).await.unwrap();
-    feed.decide(test.clone(), Verdict::Reject, UserId::human());
+    feed.decide(test.clone(), Verdict::Reject, ants_test_support::human());
     let rejected = until(&mut feed, |e| match e {
         Event::Decided(outcome) => Some(outcome),
         _ => None,
@@ -66,7 +66,7 @@ async fn an_allow_all_allows_once_each_request_in_turn_counting_those_answered_e
     .await;
     assert!(rejected.is_ok(), "{rejected:?}");
 
-    feed.allow_all(vec![push.clone(), test.clone(), build.clone()], UserId::human());
+    feed.allow_all(vec![push.clone(), test.clone(), build.clone()], ants_test_support::human());
     let line = until(&mut feed, |e| match e {
         Event::Decided(outcome) => Some(outcome),
         _ => None,
@@ -96,7 +96,8 @@ async fn until<T>(feed: &mut Feed, mut pick: impl FnMut(Event) -> Option<T>) -> 
 
 /// Sends `text` from dev-a to the human on `thread`.
 async fn tell(js: &jetstream::Context, thread: &ThreadId, text: &str) {
-    let envelope = Envelope { thread_id: thread.clone(), ..Envelope::new(user("dev-a"), UserId::human(), text) };
+    let envelope =
+        Envelope { thread_id: thread.clone(), ..Envelope::new(user("dev-a"), ants_test_support::human(), text) };
     bus::publish_json(js, subject::inbox(&envelope.to, &envelope.from), &envelope, None).await.unwrap();
 }
 
@@ -108,7 +109,7 @@ fn texts<'a>(entries: &'a [Entry], thread: &ThreadId) -> Vec<&'a str> {
 #[tokio::test]
 async fn the_feed_reads_follows_and_answers_what_the_human_sees() {
     let Some(server) = Server::start() else { return };
-    let (client, js) = server.connect(&UserId::human()).await;
+    let (client, js) = server.connect(&ants_test_support::human()).await;
     bus::ensure_stream(&js).await.unwrap();
     let (ant, ant_js) = server.connect(&user("dev-a")).await;
     let thread = ThreadId::generate();
@@ -195,7 +196,7 @@ async fn the_feed_reads_follows_and_answers_what_the_human_sees() {
     .await;
     assert_eq!((&loaded, texts(&read, &thread)), (&thread, vec!["first", "second", "cargo test", "noted"]));
 
-    feed.decide(push.clone(), Verdict::AllowOnce, UserId::human());
+    feed.decide(push.clone(), Verdict::AllowOnce, ants_test_support::human());
     let (mut decided, mut resolved) = (None, None);
     until(&mut feed, |e| {
         match e {
@@ -224,7 +225,7 @@ async fn the_feed_opens_a_sealed_message_from_a_device_added_since_its_keyring_w
     let Some(server) = Server::start() else { return };
     let (alice, bob) = (user("alice"), user("bob"));
     let bob_creds = server.creds_as(&bob, Role::Human);
-    let bob_nats = crate::connection::Nats::new(&server.url, Some(&bob_creds), None).unwrap();
+    let bob_nats = crate::connection::Nats::new(&server.url, Some(&bob_creds), None, None).unwrap();
     let (_, bob_js) = bob_nats.connect("test").await.unwrap();
     let keyring = crate::people::sealed::Keyring::load(&bob_nats, &bob_js).await.map(Arc::new);
     assert!(keyring.is_some());
@@ -232,7 +233,7 @@ async fn the_feed_opens_a_sealed_message_from_a_device_added_since_its_keyring_w
     // A device of alice's registered after bob's keyring was loaded.
     let alice_creds = server.dir().join("alice-laptop.creds");
     crate::test_support::issue(&server.dir().join("auth"), &alice, Role::Human, None, &alice_creds).unwrap();
-    let alice_nats = crate::connection::Nats::new(&server.url, Some(&alice_creds), None).unwrap();
+    let alice_nats = crate::connection::Nats::new(&server.url, Some(&alice_creds), None, None).unwrap();
     alice_nats.connect("test").await.unwrap();
     let words = vec!["@bob".to_owned(), "lunch at noon?".to_owned()];
     let args = crate::cmd::send::AskArgs { words, ..Default::default() };

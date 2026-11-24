@@ -134,12 +134,14 @@ async fn a_thread_is_told_started_in_the_repository_of_the_workdir_by_its_first_
 
 /// Ask the daemon which messages it holds until it answers, as the daemon may not listen yet.
 async fn queue(bus: &Bus) -> ants_proto::QueueReply {
-    queue_with(bus, QueueRequest::new(bus.dev.clone(), UserId::human())).await
+    queue_with(bus, QueueRequest::new(bus.dev.clone(), ants_test_support::human())).await
 }
 
 /// Withdraw `message` as the human, returning the mark found instead if the withdrawal lost.
 async fn withdraw(bus: &Bus, message: &Envelope) -> Option<ants_proto::MessageMark> {
-    crate::delivery::attempts::withdraw(&bus.markers, &bus.dev, &message.id, &UserId::human(), None).await.unwrap()
+    crate::delivery::attempts::withdraw(&bus.markers, &bus.dev, &message.id, &ants_test_support::human(), None)
+        .await
+        .unwrap()
 }
 
 const WITHDRAWN: &str = "[ants] Withdrawn by human before dev-a was prompted with it (ants withdraw).";
@@ -170,7 +172,7 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
         .await
         .expect("all three in hand");
         let at = |m: &QueuedMessage| (m.id, m.seq, m.running, m.ahead, m.from.clone(), m.thread_id.clone());
-        let human = UserId::human();
+        let human = ants_test_support::human();
         assert_eq!(
             listed.messages.iter().map(at).collect::<Vec<_>>(),
             [
@@ -647,7 +649,7 @@ async fn a_withdrawal_an_assistant_records_while_no_daemon_serves_is_honoured_be
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let [alice, pa, pb] = ants(["alice", "pa", "pb"]);
     let device = crate::people::humans::TestDevice::default();
-    bus.humans = Registry::with(UserId::human(), &["alice"]).verifying_grants(Some(device.account()));
+    bus.humans = Registry::with(ants_test_support::human(), &["alice"]).verifying_grants(Some(device.account()));
     bus.account = Some(device.account());
     let mut grant =
         ants_proto::AssistantGrant::new(alice.clone(), Some(pa.clone()), chrono::Utc::now(), device.jwt(&alice));
@@ -720,7 +722,7 @@ async fn a_schedule_s_trail_firing_is_never_prompted_and_its_failed_start_is_tol
         limits: ants_proto::TrailLimits::DEFAULT,
     };
     let firing = Envelope::new(hook.clone(), bus.dev.clone(), "Scheduled run of trail review.")
-        .with_owner(Some(UserId::human()))
+        .with_owner(Some(ants_test_support::human()))
         .from_webhook()
         .starting(Some(start.clone()));
     let seq = bus::publish_json(&bus.js, firing.subject(), &firing, None).await.unwrap();

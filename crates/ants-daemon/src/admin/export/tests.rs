@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use ants_proto::provider::Capabilities;
-use ants_proto::{AdminOp, Machine, OrderState, UserId};
+use ants_proto::{AdminOp, Machine, OrderState};
 use ants_test_support::NatsServer;
 use serde_json::json;
 use tokio::sync::Notify;
@@ -41,7 +41,7 @@ fn order(op: AdminOp) -> AdminOrder {
 
 async fn store() -> Option<(NatsServer, jetstream::Context)> {
     let server = NatsServer::start()?;
-    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     js.create_stream(crate::hub::files_config()).await.unwrap();
     Some((server, js))
 }

@@ -218,7 +218,7 @@ async fn conductor(server: &crate::test_support::Server, ant: &UserId) {
 /// The jobs' context, as `me`, a human.
 async fn human(server: &crate::test_support::Server, me: &UserId) -> Ctx {
     let creds = server.creds_as(me, Role::Human);
-    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let (client, js) = nats.connect("test").await.unwrap();
     let (me, sealing) = (nats.me.clone(), crate::people::sealed::Sealing::of(&nats));
     Ctx {

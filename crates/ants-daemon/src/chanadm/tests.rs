@@ -18,7 +18,7 @@ const WAIT: Duration = Duration::from_secs(10);
 #[tokio::test]
 async fn only_a_human_s_assistant_describes_a_channel_for_it() {
     let Some(server) = Server::start() else { return };
-    let (human, alice, pa, pb, lead) = (UserId::human(), p("alice"), p("pa"), p("pb"), p("lead"));
+    let (human, alice, pa, pb, lead) = (ants_test_support::human(), p("alice"), p("pa"), p("pb"), p("lead"));
     let ops: ChannelId = "ops".parse().unwrap();
     let (h_client, h_js) = bus::connect(&server.url, None, None, &human, "test").await.unwrap();
     bus::ensure_stream(&h_js).await.unwrap();

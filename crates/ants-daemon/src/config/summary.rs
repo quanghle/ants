@@ -14,7 +14,7 @@ use crate::limits::caps::Caps;
 use crate::profile::template::AntTemplate;
 
 /// What adding an ant, running a harness directly or reporting spend needs to know of a config file: its top-level
-/// `nats`, `js_domain` and `harness`, its harnesses, and the ants it lists with their credentials, resolved as
+/// `nats`, `js_domain`, `harness` and `human`, its harnesses, and the ants it lists with their credentials, resolved as
 /// [`parse`] does, and their spend caps. Nothing else is checked.
 ///
 /// [`parse`]: super::parse
@@ -23,6 +23,7 @@ pub struct Summary {
     pub nats: Option<String>,
     pub js_domain: Option<JsDomain>,
     pub harness: Option<String>,
+    pub human: Option<UserId>,
     pub harnesses: Harnesses,
     pub ants: Vec<(UserId, Option<PathBuf>)>,
     pub caps: BTreeMap<UserId, Caps>,
@@ -50,7 +51,16 @@ impl Summary {
         let harnesses = define(file.harnesses, path, home)?;
         let caps = file.ants.iter().map(|ant| (ant.name.clone(), summary_caps(ant, &file.ant_templates))).collect();
         let ants = file.ants.into_iter().map(|ant| (ant.name, ant.creds.map(|c| resolve(&c, base, home)))).collect();
-        Ok(Self { nats: file.nats, js_domain: file.js_domain, harness: file.harness, harnesses, ants, caps, host })
+        Ok(Self {
+            nats: file.nats,
+            js_domain: file.js_domain,
+            harness: file.harness,
+            human: file.human,
+            harnesses,
+            ants,
+            caps,
+            host,
+        })
     }
 
     /// The harness named `name`, else the file's top-level `harness`; with neither, an [`harness::Unset`] error.

@@ -51,7 +51,8 @@ fn every_ant_names_the_builtin_sage_by_default_which_the_file_then_serves() {
     assert_eq!(sage.harness.as_deref(), Some("copilot"), "the file's top-level harness");
 
     let home = ants_test_support::scratch_dir("sage-home").canonicalize().unwrap();
-    let config = builtin_sage(Some("copilot"), &home).into_config("nats://unused", &Harnesses::builtin()).unwrap();
+    let sage = Ant { human: Some(ants_test_support::human()), ..builtin_sage(Some("copilot"), &home) };
+    let config = sage.into_config("nats://unused", &Harnesses::builtin()).unwrap();
     assert_eq!(config.presence.builtin, Some(ants_proto::BuiltinAnt::Sage));
     assert_eq!(config.harness.workdir, home.join(".ants/agents/system-sage").canonicalize().unwrap());
     assert_eq!(config.policy.sage, None);

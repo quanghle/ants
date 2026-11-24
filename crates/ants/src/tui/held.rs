@@ -606,7 +606,7 @@ mod tests {
         let account = crate::people::devices::account_of(Some(&creds)).unwrap();
         let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
         crate::people::humans::ensure(&js).await.unwrap();
-        let (_, human) = server.connect(&UserId::human()).await;
+        let (_, human) = server.connect(&ants_test_support::human()).await;
         let stream = bus::ensure_stream(&human).await.unwrap();
         crate::people::assistant::designate(&js, &creds, &alice, &pa).await.unwrap();
         let (_, ant_js) = server.connect(&dev_a).await;

@@ -100,7 +100,7 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{Snooze, UserId};
+    use ants_proto::Snooze;
     use chrono::TimeDelta;
 
     use super::*;
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn done_after_the_latest_read_muted_or_snoozed_each_heed_the_escalation() {
         let (thread, now) = (ThreadId::generate(), Utc::now());
-        let done = |after| Some(ThreadDone::new(thread.clone(), UserId::human(), after));
+        let done = |after| Some(ThreadDone::new(thread.clone(), ants_test_support::human(), after));
         let heeded = |state: State, seqs: &[u64]| state.heeded(&thread, seqs, now);
         assert_eq!(heeded(State::default(), &[3]), Heeded::No);
         assert_eq!(heeded(State { done: done(5), ..State::default() }, &[3, 5]), Heeded::Done);

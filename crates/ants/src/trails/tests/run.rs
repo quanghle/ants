@@ -323,7 +323,7 @@ async fn run_confirms_asks_the_conductor_and_reports_its_refusal() {
     let file = write(&dir, "deploy.py", &script("deploy"));
     let file = file.to_str().unwrap();
     let creds = server.creds_as(&p("alice"), Role::Human);
-    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     conductor(&server, &p("lead"), |request| match &request.action {
         TrailAction::Start { args, .. } if args["branch"] == "main" => TrailOutcome::Started { run: RunId::generate() },
         _ => TrailOutcome::Refused { error: "no such branch".to_owned() },
@@ -347,7 +347,7 @@ async fn run_confirms_asks_the_conductor_and_reports_its_refusal() {
     assert!(format!("{error:#}").contains("meta"), "{error:#}");
 
     let creds = server.creds_as(&p("dev-a"), Role::Ant);
-    let ant = Nats::new(&server.url, Some(&creds), None).unwrap();
+    let ant = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let error = start::run(&ant, run_args(&[file, "--yes"]), |_| unreachable!()).await.unwrap_err();
     assert!(error.to_string().starts_with("starting a run needs a human's credentials"), "{error}");
     std::fs::remove_dir_all(dir).unwrap();
@@ -441,7 +441,7 @@ async fn humans_stop_and_resume_runs_by_a_unique_start_of_their_id() {
     assert_eq!(error, format!("lead refused: run {} is not stopped", waiting.run));
 
     let creds = server.creds_as(&p("dev-a"), Role::Ant);
-    let ant = Nats::new(&server.url, Some(&creds), None).unwrap();
+    let ant = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let error =
         crate::cmd::trail::run(&ant, TrailCommand::Stop { run: pick("0190aaaa") }).await.unwrap_err().to_string();
     assert!(error.starts_with("stopping a run needs a human's credentials"), "{error}");

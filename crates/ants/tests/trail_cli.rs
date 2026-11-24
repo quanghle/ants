@@ -41,7 +41,8 @@ impl Drop for Conductor {
 
 impl Conductor {
     async fn start(server: &NatsServer) -> Self {
-        let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "init").await.unwrap();
+        let (_, js) =
+            ants_daemon::bus::connect(&server.url, None, None, &ants_test_support::human(), "init").await.unwrap();
         for config in [hub::trails_config(), hub::trail_runs_config(), hub::trail_tips_config()] {
             js.create_stream(config).await.unwrap();
         }
@@ -65,7 +66,7 @@ impl Conductor {
             ant: lead,
             worker: ANTS.into(),
             trails_dir: None,
-            humans: Registry::new(UserId::human()),
+            humans: Registry::new(ants_test_support::human()),
             colony,
             outbox,
             attempts,

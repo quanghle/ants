@@ -1,7 +1,7 @@
 //! Test helpers shared by the ants crates (dev-dependency only): external tools, a throwaway nats-server, a scripted
 //! stub CLI ([`StubCli`]), the `ants` command free of the caller's `ANTS_*` variables ([`ants_command`]), waits for a
 //! condition ([`eventually`], and [`wait_until`] without a runtime), a client's transport over async-nats
-//! ([`NatsTransport`]) and sample records ([`user`], [`colony_entry`], [`trail_run`]).
+//! ([`NatsTransport`]) and sample records ([`user`], [`human`], [`colony_entry`], [`trail_run`]).
 //!
 //! A test that needs `nats-server` skips when the tool is not on PATH, unless [`REQUIRE_TOOLS`] is set to `1`
 //! (CI sets it), where it fails instead, so a broken install cannot pass as skipped tests. Under [`JS_ACK_FC_V2`]`=1`
@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-pub use colony::{colony_entry, user};
+pub use colony::{colony_entry, human, user};
 pub use trails::{trail_leg, trail_run};
 pub use transport::NatsTransport;
 
@@ -128,8 +128,8 @@ pub fn wait_until<T>(limit: Duration, every: Duration, mut check: impl FnMut() -
 
 /// The command running the `ants` executable `program` with none of the `ANTS_*` variables of this process, so what
 /// the calling shell exports (`ANTS_CREDS`, `ANTS_CONFIG`, `ANTS_JS_DOMAIN`, `ANTS_ANT`, `ANTS_METRICS`, …) changes
-/// nothing of what a test runs: a test sets the ones it means. Its home is an empty scratch directory, one per test
-/// process, unless the test sets another: the credentials, config file and ants' homes of whoever runs the tests are
+/// nothing of what a test runs: a test sets the ones it means, but for `ANTS_HUMAN`, set to [`human`] as whom the CLI
+/// acts without credentials. Its home is an empty scratch directory, one per test process, unless the test sets another: the credentials, config file and ants' homes of whoever runs the tests are
 /// neither read nor written.
 pub fn ants_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
@@ -141,6 +141,7 @@ pub fn ants_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
         }
     }
     command.env("HOME", home).env("USERPROFILE", home).env_remove("XDG_CONFIG_HOME").env_remove("XDG_DATA_HOME");
+    command.env("ANTS_HUMAN", human().as_str());
     command
 }
 

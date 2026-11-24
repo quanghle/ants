@@ -18,7 +18,8 @@ async fn runs_take_at_most(js: &async_nats::jetstream::Context, max: i32) {
 async fn hearing(lead: &Conductor) -> async_nats::Subscriber {
     let mut answers = lead.client.subscribe(subject::trailed(&ant("lead"))).await.unwrap();
     loop {
-        let request = TrailRequest::new(ant("lead"), UserId::human(), TrailAction::Stop { run: RunId::generate() });
+        let request =
+            TrailRequest::new(ant("lead"), ants_test_support::human(), TrailAction::Stop { run: RunId::generate() });
         lead.client.publish(request.subject(), serde_json::to_vec(&request).unwrap().into()).await.unwrap();
         if answers_to(&mut answers, request.id, Duration::from_millis(200)).await.is_some() {
             return answers;
@@ -33,7 +34,7 @@ async fn ask_at_once(
     actions: Vec<TrailAction>,
 ) -> Vec<TrailOutcome> {
     let requests: Vec<TrailRequest> =
-        actions.into_iter().map(|action| TrailRequest::new(ant("lead"), UserId::human(), action)).collect();
+        actions.into_iter().map(|action| TrailRequest::new(ant("lead"), ants_test_support::human(), action)).collect();
     for request in &requests {
         lead.client.publish(request.subject(), serde_json::to_vec(request).unwrap().into()).await.unwrap();
     }
@@ -83,7 +84,7 @@ async fn resumes_of_one_run_asked_at_once_resume_it_once_and_a_stop_beside_one_s
     init(&server).await;
     let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
     let mut answers = hearing(&lead).await;
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let run = lead.start(FAN_OUT, TrailLimits::default()).await;
     fan_out_steps(&mut lead).await;
     lead.trails.stop(&run, &human).await.unwrap();
@@ -128,10 +129,10 @@ async fn resumes_of_one_run_asked_at_once_resume_it_once_and_a_stop_beside_one_s
 async fn a_stop_that_cannot_be_stored_is_refused_and_a_stopped_run_lists_only_the_steps_sent() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
-    let humans = Registry::new(UserId::human());
+    let humans = Registry::new(ants_test_support::human());
     let mut lead = conductor_refusing(&server, &ants_binary(), Vec::new(), humans, None, Some(ant("ops"))).await;
     let mut answers = hearing(&lead).await;
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let run = lead.start(FAN_OUT, TrailLimits::default()).await;
     // The step to ops never goes out.
     let a = lead.step().await;
@@ -178,7 +179,7 @@ r = await parallel(human([{"question": "ok?", "options": ["yes", "no"]}]), agent
     assert_eq!(lead.header(&run).await.steps, 1, "the step sent alone counts");
 
     let limits = TrailLimits { steps: 3, turns: 10, ..TrailLimits::default() };
-    lead.trails.resume(&run, &UserId::human(), Some(limits)).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), Some(limits)).await.unwrap();
     let (first, second) = (lead.step().await, lead.step().await);
     let (asked, a) = if first.to == ant("ops") { (second, first) } else { (first, second) };
     assert!(lead.reply(&asked, "yes").await);
@@ -195,7 +196,7 @@ async fn a_resume_tried_again_after_its_records_were_stored_half_way_counts_each
     let meta = json!({"name": "fan", "description": "a test", "phases": []});
     std::fs::write(dir.join("fan.py"), format!("meta = {meta}\n{FAN_OUT}\n")).unwrap();
     let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
-    let human = UserId::human();
+    let human = ants_test_support::human();
     // The first leg's script, pinned in the run's header alone once the run went on to the next, makes the header
     // outweigh the session.
     let script = format!("# {}\nawait goto(\"fan\")\n", "x".repeat(60_000));
@@ -250,10 +251,10 @@ async fn a_run_its_firing_continues_beside_a_resume_or_a_stop_of_it_is_continued
     std::fs::write(dir.join("fan.py"), format!("meta = {meta}\n{FAN_OUT}\n")).unwrap();
     let start = TrailStart { trail: "fan".parse().unwrap(), args: Value::Null, limits: TrailLimits::DEFAULT };
     let firing = Envelope::new(ant("nightly"), ant("lead"), "Scheduled run of trail.")
-        .with_owner(Some(UserId::human()))
+        .with_owner(Some(ants_test_support::human()))
         .from_webhook()
         .starting(Some(start.clone()));
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
     let run = lead.trails.start_fired(&firing, &start).await.unwrap();
     fan_out_steps(&mut lead).await;
@@ -308,7 +309,7 @@ async fn a_human_starts_a_run_fanning_out_to_two_ants_whose_replies_finish_it() 
     let mut lead = conductor(&server, &ants_binary(), vec![colony_entry("reviewer", &["review"])]).await;
     let mut answers = lead.client.subscribe(subject::trailed(&ant("lead"))).await.unwrap();
     let mut ask = async |action: TrailAction, wait: Duration| {
-        let request = TrailRequest::new(ant("lead"), UserId::human(), action);
+        let request = TrailRequest::new(ant("lead"), ants_test_support::human(), action);
         lead.client.publish(request.subject(), serde_json::to_vec(&request).unwrap().into()).await.unwrap();
         let answer = tokio::time::timeout(wait, answers.next()).await.ok()?.unwrap();
         let answer: TrailReply = serde_json::from_slice(&answer.payload).unwrap();
@@ -348,7 +349,7 @@ await parallel(agent("build it", ant="dev", tips="build"), agent("review it", ca
     assert_eq!(marks.tip_key.as_deref(), Some("build"), "the step carries its tip key");
     assert_eq!((&marks.trail, &marks.script), (&None, &None), "an inline script is no saved trail");
     assert_eq!(reviewer.trail_step.as_ref().unwrap().tip_key, None);
-    assert_eq!(dev.owner, Some(UserId::human()), "the step's thread keeps the run's owner");
+    assert_eq!(dev.owner, Some(ants_test_support::human()), "the step's thread keeps the run's owner");
 
     let unrelated = Envelope::new(ant("dev"), ant("lead"), "hello");
     assert!(!lead.trails.take(&unrelated).await.unwrap(), "a message on no step's thread is prompted as ever");
@@ -408,12 +409,12 @@ await human([{"question": "Ship it?", "options": ["yes", "no"]}])
 "#;
     let run = lead.start(script, TrailLimits::default()).await;
     let asked = lead.step().await;
-    assert_eq!(asked.to, UserId::human());
+    assert_eq!(asked.to, ants_test_support::human());
     assert!(asked.asks().is_some(), "the step asks its questions as ask_human does");
     eventually("the run waits for its human", async || lead.header(&run).await.state == RunState::Waiting).await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let answer = Envelope::answering(&asked, UserId::human(), vec![Pick::option(1)]).unwrap();
+    let answer = Envelope::answering(&asked, ants_test_support::human(), vec![Pick::option(1)]).unwrap();
     assert!(lead.trails.take(&answer).await.unwrap());
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("yes") });
 }
@@ -427,7 +428,7 @@ async fn a_stopped_run_gives_up_its_steps_and_resumes_with_fresh_ones() {
         lead.start(r#"await parallel(agent("a", ant="dev"), agent("b", ant="ops"))"#, TrailLimits::default()).await;
     let (first, second) = (lead.step().await, lead.step().await);
 
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let mut waiting = lead.trails.stop(&run, &human).await.unwrap();
     waiting.sort_by_key(|step| step.to.to_string());
     let messages: Vec<_> = waiting.iter().map(|step| (step.to.as_str(), step.message)).collect();
@@ -476,10 +477,11 @@ async fn a_stop_while_the_script_computes_is_told_pending_and_a_start_asked_agai
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
     };
-    let start = TrailRequest::new(ant("lead"), UserId::human(), action);
+    let start = TrailRequest::new(ant("lead"), ants_test_support::human(), action);
     let run: RunId = start.id.to_string().parse().unwrap();
     loop {
-        let heard = TrailRequest::new(ant("lead"), UserId::human(), TrailAction::Stop { run: RunId::generate() });
+        let heard =
+            TrailRequest::new(ant("lead"), ants_test_support::human(), TrailAction::Stop { run: RunId::generate() });
         publish(&heard).await;
         if answers_to(&mut answers, heard.id, Duration::from_millis(200)).await.is_some() {
             break;
@@ -490,7 +492,7 @@ async fn a_stop_while_the_script_computes_is_told_pending_and_a_start_asked_agai
     assert_eq!(started, Some(TrailOutcome::Started { run: run.clone() }), "the run takes the request's id");
     eventually("the script computes", async || computing.exists()).await;
 
-    let stop = TrailRequest::new(ant("lead"), UserId::human(), TrailAction::Stop { run: run.clone() });
+    let stop = TrailRequest::new(ant("lead"), ants_test_support::human(), TrailAction::Stop { run: run.clone() });
     publish(&stop).await;
     let pending = answers_to(&mut answers, stop.id, Duration::from_secs(5)).await;
     assert_eq!(pending, Some(TrailOutcome::Stopping { run: run.clone() }), "the stop waits for the pass");
@@ -504,9 +506,9 @@ async fn a_stop_while_the_script_computes_is_told_pending_and_a_start_asked_agai
     let waiting = vec![WaitingStep { to: ant("dev"), message: step.id }];
     let stopped = answers_to(&mut answers, stop.id, Duration::from_secs(30)).await;
     assert_eq!(stopped, Some(TrailOutcome::Stopped { run: run.clone(), waiting: waiting.clone() }));
-    assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: UserId::human() });
+    assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: ants_test_support::human() });
 
-    let again = TrailRequest::new(ant("lead"), UserId::human(), TrailAction::Stop { run: run.clone() });
+    let again = TrailRequest::new(ant("lead"), ants_test_support::human(), TrailAction::Stop { run: run.clone() });
     publish(&again).await;
     let listed = answers_to(&mut answers, again.id, Duration::from_secs(5)).await;
     assert_eq!(listed, Some(TrailOutcome::Stopped { run, waiting }), "a stopped run lists the steps to withdraw");
@@ -522,10 +524,10 @@ async fn a_resumed_run_counts_the_steps_it_sends_anew_once() {
     let run = lead.start(r#"await parallel(agent("a", ant="dev"), agent("b", ant="ops"))"#, limits).await;
     lead.step().await;
     lead.step().await;
-    lead.trails.stop(&run, &UserId::human()).await.unwrap();
+    lead.trails.stop(&run, &ants_test_support::human()).await.unwrap();
     assert_eq!(lead.header(&run).await.steps, 2);
 
-    lead.trails.resume(&run, &UserId::human(), None).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), None).await.unwrap();
     let (first, second) = (lead.step().await, lead.step().await);
     assert!(lead.reply(&first, &first.text.to_uppercase()).await);
     assert!(lead.reply(&second, &second.text.to_uppercase()).await);
@@ -551,7 +553,7 @@ fn user_jwt(account: &nkeys::KeyPair, key: &nkeys::KeyPair, name: &UserId, tag: 
 async fn the_owners_assistant_answers_a_human_step_while_the_grant_names_it() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
-    let (human, pa) = (UserId::human(), ant("pa"));
+    let (human, pa) = (ants_test_support::human(), ant("pa"));
     let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &human, "grant").await.unwrap();
     let bucket = js.create_key_value(ants_daemon::hub::humans_config()).await.unwrap();
     let (account, device) = (nkeys::KeyPair::new_account(), nkeys::KeyPair::new_user());
@@ -586,7 +588,7 @@ async fn a_schedule_s_firing_starts_its_saved_trail_once_on_its_thread() {
     let lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.clone())).await;
     let fire = |start: &TrailStart| {
         Envelope::new(ant("nightly"), ant("lead"), "Scheduled run of trail.")
-            .with_owner(Some(UserId::human()))
+            .with_owner(Some(ants_test_support::human()))
             .from_webhook()
             .starting(Some(start.clone()))
     };
@@ -598,7 +600,7 @@ async fn a_schedule_s_firing_starts_its_saved_trail_once_on_its_thread() {
     assert_eq!(run.as_str(), firing.id.to_string(), "the run takes the firing's id");
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(2) });
     let header = lead.header(&run).await;
-    assert_eq!((&header.thread, header.owner.as_ref()), (&firing.thread_id, Some(&UserId::human())));
+    assert_eq!((&header.thread, header.owner.as_ref()), (&firing.thread_id, Some(&ants_test_support::human())));
     assert_eq!((header.trail(), header.limits), (Some(&start.trail), limits), "under the limits asked for");
     assert!(!header.origin.trusted(), "a schedule's run is as untrusted as a webhook's: {:?}", header.origin);
     assert_eq!(lead.trails.start_fired(&firing, &start).await.unwrap(), run, "delivered again");
@@ -626,7 +628,8 @@ async fn order_outcome(js: &async_nats::jetstream::Context, order: &AdminOrder) 
 async fn admin_orders_stop_and_resume_a_run_once_the_conductor_s_daemon_is_back() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
-    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "admin").await.unwrap();
+    let (_, js) =
+        ants_daemon::bus::connect(&server.url, None, None, &ants_test_support::human(), "admin").await.unwrap();
     ants_daemon::bus::ensure_stream(&js).await.unwrap();
     js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
     let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
@@ -665,7 +668,7 @@ async fn admin_orders_stop_and_resume_a_run_once_the_conductor_s_daemon_is_back(
         restarts: restarts.clone(),
         providers: Default::default(),
         leaf: None,
-        hold: ants_daemon::admin::held::Hold::new(Registry::new(UserId::human())),
+        hold: ants_daemon::admin::held::Hold::new(Registry::new(ants_test_support::human())),
     };
     let taking = tokio::spawn(ants_daemon::admin::serve(js.clone(), None, orders));
     tokio::time::sleep(Duration::from_millis(500)).await;

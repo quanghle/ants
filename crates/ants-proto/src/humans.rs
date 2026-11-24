@@ -39,18 +39,17 @@ impl HumanEntry {
     }
 }
 
-/// The humans of a team: [`UserId::human`], always, and every user [`HUMANS_BUCKET`] lists under its own key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The humans of a team: every user [`HUMANS_BUCKET`] lists under its own key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Humans(std::collections::BTreeSet<UserId>);
 
-impl Default for Humans {
-    fn default() -> Self {
-        Self([UserId::human()].into())
-    }
-}
-
 impl Humans {
-    /// The default human and the humans of `entries`, as pairs of a KV key and the entry read from it. Entries naming
+    /// The humans `users`, as if [`HUMANS_BUCKET`] listed each under its own key.
+    pub fn of(users: impl IntoIterator<Item = UserId>) -> Self {
+        Self(users.into_iter().collect())
+    }
+
+    /// The humans of `entries`, as pairs of a KV key and the entry read from it. Entries naming
     /// another human than their key are skipped.
     pub fn from_entries<'a>(entries: impl IntoIterator<Item = (&'a str, HumanEntry)>) -> Self {
         let mut humans = Self::default();
@@ -67,11 +66,9 @@ impl Humans {
         Ok(())
     }
 
-    /// Drop `human`, whose entry was deleted. The default human stays a human.
+    /// Drop `human`, whose entry was deleted.
     pub fn remove(&mut self, human: &UserId) {
-        if !human.is_human() {
-            self.0.remove(human);
-        }
+        self.0.remove(human);
     }
 
     pub fn contains(&self, user: &UserId) -> bool {
@@ -101,7 +98,7 @@ mod tests {
     use crate::{p, subject};
 
     #[test]
-    fn humans_are_the_default_one_and_those_listed_under_their_own_key() {
+    fn humans_are_those_listed_under_their_own_key() {
         let entry = HumanEntry::new(p("alice"));
         let json = serde_json::to_string(&entry).unwrap();
         assert_eq!(serde_json::from_str::<HumanEntry>(&json).unwrap(), entry);
@@ -113,14 +110,13 @@ mod tests {
         assert_eq!(subject::human_entry(&p("bob")), "$KV.ants_humans.bob");
 
         let mut humans = Humans::from_entries([("alice", entry), ("dev-a", read(r#"{"human":"carol"}"#))]);
-        assert!(humans.contains(&UserId::human()), "the default human needs no entry");
+        assert!(!humans.contains(&p("human")), "no name is a human without an entry");
         assert!(humans.contains(&p("alice")));
         assert!(!humans.contains(&p("dev-a")) && !humans.contains(&p("carol")), "a mismatched entry is skipped");
         assert_eq!((humans.role(&p("alice")), humans.role(&p("dev-a"))), (Role::Human, Role::Ant));
         assert!(humans.add("dev-b", bob.clone()).is_err() && !humans.contains(&p("bob")));
         humans.add("bob", bob).unwrap();
         humans.remove(&p("bob"));
-        humans.remove(&UserId::human());
-        assert_eq!(humans.iter().map(UserId::as_str).collect::<Vec<_>>(), ["alice", "human"]);
+        assert_eq!(humans.iter().map(UserId::as_str).collect::<Vec<_>>(), ["alice"]);
     }
 }

@@ -42,7 +42,7 @@ pub(super) async fn ant_mcp_sending(
     let attempts = ants_daemon::bus::ensure_attempts(&js, None, &user).await.unwrap();
     let colony: ants_daemon::mcp::Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
     let notes: Arc<dyn NotesStore> = Arc::new(MemoryNotes::default());
-    let humans = Registry::new(UserId::human());
+    let humans = Registry::new(ants_test_support::human());
     let conducting = Conducting {
         js,
         js_domain: None,
@@ -76,7 +76,7 @@ fn step_to(to: &str, tip_key: Option<&str>, script: &str) -> Envelope {
         tip_key: tip_key.map(str::to_owned),
         bounds: None,
     };
-    Envelope::new(ant("lead"), ant(to), "build it").with_owner(Some(UserId::human())).as_step(step)
+    Envelope::new(ant("lead"), ant(to), "build it").with_owner(Some(ants_test_support::human())).as_step(step)
 }
 
 /// The id of the tip `leave_tip` says it left.
@@ -103,7 +103,8 @@ async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_t
 
     let (ok, text) = leave(&ThreadId::generate(), "Run the migrations first").await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");
-    let asked = Envelope::new(UserId::human(), ant("dev"), "build it").with_owner(Some(UserId::human()));
+    let asked =
+        Envelope::new(ants_test_support::human(), ant("dev"), "build it").with_owner(Some(ants_test_support::human()));
     let _asked = dev.begin(&asked);
     let (ok, text) = leave(&asked.thread_id, "Run the migrations first").await;
     assert!(!ok && text.contains("no step of a trail run"), "{text}");
@@ -116,13 +117,13 @@ async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_t
     let start = |by| StartRun {
         trail: TrailSource::Saved(deploy()),
         args: Value::Null,
-        owner: Some(UserId::human()),
+        owner: Some(ants_test_support::human()),
         origin: Origin { by, channel: None },
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
         spends_from: None,
     };
-    let run = lead.trails.start(start(Starter::Human { user: UserId::human() })).await.unwrap();
+    let run = lead.trails.start(start(Starter::Human { user: ants_test_support::human() })).await.unwrap();
     let step = lead.step().await;
     let _step = dev.begin(&step);
     let (ok, text) = leave(&step.thread_id, " \n ").await;
@@ -150,7 +151,7 @@ async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_t
     let (ok, text) = call(&client, "trail_tips", json!({})).await;
     assert!(ok && text.contains(id.as_str()), "any thread reads the tips: {text}");
 
-    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "rm").await.unwrap();
+    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &ants_test_support::human(), "rm").await.unwrap();
     DirectKv::new(&js, None, ants_proto::TRAILS_BUCKET).await.unwrap().delete("deploy").await.unwrap();
     let (ok, text) = leave(&step.thread_id, "Tag the release once built").await;
     assert!(!ok && text.contains("no trail is saved as deploy"), "a trail removed mid-run takes no tips: {text}");
@@ -230,7 +231,8 @@ async fn leave_tip_refuses_a_duplicate_unless_forced_and_vote_tip_counts_each_an
 
     let (ok, text) = call(&client, "vote_tip", json!({"tip": first.as_str(), "verdict": "helpful"})).await;
     assert!(!ok && text.contains("this ant's own"), "{text}");
-    let asked = Envelope::new(UserId::human(), ant("lead"), "vote").with_owner(Some(UserId::human()));
+    let asked =
+        Envelope::new(ants_test_support::human(), ant("lead"), "vote").with_owner(Some(ants_test_support::human()));
     let _asked = lead.begin(&asked);
     let client = mcp_client(&lead, &asked.thread_id).await;
     let vote = async |args: Value| call(&client, "vote_tip", args).await;
@@ -332,7 +334,8 @@ async fn trail_tips_lists_the_live_tips_of_the_step_s_trail_and_tip_key_or_of_a_
          tips in all."
     );
 
-    let asked = Envelope::new(UserId::human(), ant("dev"), "tips?").with_owner(Some(UserId::human()));
+    let asked =
+        Envelope::new(ants_test_support::human(), ant("dev"), "tips?").with_owner(Some(ants_test_support::human()));
     let _asked = dev.begin(&asked);
     let client = mcp_client(&dev, &asked.thread_id).await;
     let (ok, text) = call(&client, "trail_tips", json!({})).await;

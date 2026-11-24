@@ -178,7 +178,7 @@ async fn a_publish_with_no_stream_on_the_hub_names_ants_init() {
     let err = format!("{:#}", publish_json(&js, post.subject(), &post, None).await.unwrap_err());
     assert!(err.contains("`ants init`"), "{err}");
     ensure_stream(&js).await.unwrap();
-    let envelope = Envelope::new(dev(), UserId::human(), "captured");
+    let envelope = Envelope::new(dev(), ants_test_support::human(), "captured");
     assert_eq!(publish(&js, &envelope).await.unwrap(), Stored::Hub);
 }
 
@@ -370,7 +370,7 @@ async fn no_client_can_forge_the_sender_of_a_stored_inbox_message() {
     let Some(server) = NatsServer::start() else {
         return;
     };
-    let (human, dev_b) = (UserId::human(), "dev-b".parse::<UserId>().unwrap());
+    let (human, dev_b) = (ants_test_support::human(), "dev-b".parse::<UserId>().unwrap());
     let (client, js) = connect(&server.url, None, None, &dev_b, "test").await.unwrap();
     ensure_stream(&js).await.unwrap();
     ensure_colony(&js, Duration::from_secs(60)).await.unwrap();
@@ -429,7 +429,7 @@ async fn a_reader_pulled_anew_while_waiting_hears_the_next_message() {
     let Some(server) = NatsServer::start() else {
         return;
     };
-    let (dev, human) = (dev(), UserId::human());
+    let (dev, human) = (dev(), ants_test_support::human());
     let (_client, js) = connect(&server.url, None, None, &dev, "test").await.unwrap();
     let stream = ensure_stream(&js).await.unwrap();
     let mut messages = inbox_consumer(&stream, &dev, Duration::from_secs(30), 5, 1).await.unwrap();
@@ -503,7 +503,7 @@ async fn a_nak_of_an_older_delivery_sets_the_retry_delay() {
     let Some(server) = NatsServer::start() else {
         return;
     };
-    let (dev, human) = (dev(), UserId::human());
+    let (dev, human) = (dev(), ants_test_support::human());
     let (_client, js) = connect(&server.url, None, None, &dev, "test").await.unwrap();
     let stream = ensure_stream(&js).await.unwrap();
     let (ack_wait, retry_delay) = (Duration::from_secs(3), Duration::from_millis(500));

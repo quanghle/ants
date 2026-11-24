@@ -58,7 +58,7 @@ async fn a_reply_refused_by_a_full_store_is_sent_once_there_is_room_unprompted_a
     bus.send(&thread, "b").await;
     // Core subscribers hear each refused publish too; what counts is what the stream stores.
     let stored = async || {
-        let (subject, mut from, mut texts) = (subject::inbox(&UserId::human(), &bus.dev), 1, Vec::new());
+        let (subject, mut from, mut texts) = (subject::inbox(&ants_test_support::human(), &bus.dev), 1, Vec::new());
         while let Ok(msg) = bus.stream.get_first_raw_message_by_subject(&subject, from).await {
             from = msg.sequence + 1;
             let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
@@ -152,7 +152,7 @@ async fn junk_met_while_the_store_is_full_is_a_dead_letter_once_there_is_room() 
     let Some((bus, _)) = start_small().await else { return };
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let junk = subject::inbox(&bus.dev, &UserId::human());
+    let junk = subject::inbox(&bus.dev, &ants_test_support::human());
     let seq = bus.js.publish(junk, "not an envelope".into()).await.unwrap().await.unwrap().sequence;
     fill(&bus.js).await;
 
@@ -215,7 +215,8 @@ async fn an_answer_whose_escalation_a_full_store_refuses_is_sent_once_there_is_r
     let dev_b: UserId = "dev-b".parse().unwrap();
     let thread = ThreadId::generate();
     let (held, seq) = bus.send_from(dev_b.clone(), &thread, "hold cost 2 stall").await;
-    let (to_dev_b, to_human) = (subject::inbox(&dev_b, &bus.dev), subject::inbox(&UserId::human(), &bus.dev));
+    let (to_dev_b, to_human) =
+        (subject::inbox(&dev_b, &bus.dev), subject::inbox(&ants_test_support::human(), &bus.dev));
     let cap = "Thread cost cap reached (2.00 of 1.00 since a human's last message)";
 
     let ctrl_c = Arc::new(Semaphore::new(0));
@@ -265,7 +266,8 @@ async fn a_joined_prompt_a_full_store_refuses_the_outcome_of_is_settled_once_the
     let dev_b: UserId = "dev-b".parse().unwrap();
     let thread = ThreadId::generate();
     let (first, _) = bus.send_from(dev_b.clone(), &thread, "hold cost 2 stall").await;
-    let (to_dev_b, to_human) = (subject::inbox(&dev_b, &bus.dev), subject::inbox(&UserId::human(), &bus.dev));
+    let (to_dev_b, to_human) =
+        (subject::inbox(&dev_b, &bus.dev), subject::inbox(&ants_test_support::human(), &bus.dev));
     let cap = "Thread cost cap reached (2.00 of 1.00 since a human's last message)";
 
     let ctrl_c = Arc::new(Semaphore::new(0));

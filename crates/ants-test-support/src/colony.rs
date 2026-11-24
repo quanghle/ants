@@ -8,6 +8,12 @@ pub fn user(name: &str) -> UserId {
     name.parse().expect("a user name")
 }
 
+/// The human the tests name `human`: the default human of their daemons and the one a CLI without credentials acts
+/// as.
+pub fn human() -> UserId {
+    user("human")
+}
+
 /// The entry of `ant` served now on `machine` by this version's daemon, run `run-1` with the harness `copilot`: idle,
 /// with no capabilities and nothing else set.
 pub fn colony_entry(ant: &str, machine: &str) -> ColonyEntry {

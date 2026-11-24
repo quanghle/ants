@@ -2,9 +2,9 @@
 //! read-only, which [`Io`] asks the daemon of its machine for with an admin order when the pane first shows and on
 //! `u`.
 
-use std::path::PathBuf;
+use crate::connection::Reach;
 
-use ants_proto::{JsDomain, Memories, UserId};
+use ants_proto::{Memories, UserId};
 use async_nats::jetstream;
 use futures::FutureExt as _;
 use futures::future::LocalBoxFuture;
@@ -112,9 +112,7 @@ pub struct Event(pub UserId, pub u32, pub Result<Memories, String>);
 /// The reads of the shown ant's memories, through admin orders signed with the chat's credentials.
 pub struct Io {
     js: jetstream::Context,
-    url: String,
-    creds: Option<PathBuf>,
-    domain: Option<JsDomain>,
+    reach: Reach,
     /// The ant and asking last read.
     asked: Option<(UserId, u32)>,
     read: Option<LocalBoxFuture<'static, Event>>,
@@ -122,8 +120,7 @@ pub struct Io {
 
 impl Io {
     pub fn new(nats: &crate::connection::Nats<'_>, js: jetstream::Context) -> Self {
-        let (url, creds, domain) = (nats.url.to_owned(), nats.creds.map(PathBuf::from), nats.domain.cloned());
-        Self { js, url, creds, domain, asked: None, read: None }
+        Self { js, reach: nats.reach(), asked: None, read: None }
     }
 
     /// The next read. Cancel-safe, so it can race the terminal's keys and the live feed.
@@ -140,11 +137,11 @@ impl Io {
         }
         self.asked.clone_from(&wanted);
         let Some((ant, asked)) = wanted else { return };
-        let (js, url, creds, domain) = (self.js.clone(), self.url.clone(), self.creds.clone(), self.domain.clone());
+        let (js, reach) = (self.js.clone(), self.reach.clone());
         self.read = Some(
             async move {
                 let read = async {
-                    let nats = crate::connection::Nats::new(&url, creds.as_deref(), domain.as_ref())?;
+                    let nats = reach.nats()?;
                     crate::admin::memories::read(&nats, &js, None, &ant).await
                 };
                 Event(ant.clone(), asked, read.await.map_err(|e| format!("{e:#}")))

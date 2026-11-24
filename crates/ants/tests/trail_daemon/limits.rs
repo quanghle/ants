@@ -40,7 +40,7 @@ async fn a_run_past_its_compute_limit_fails_naming_it_and_a_resume_computes_agai
     assert!(lead.sends_no_step(Duration::from_millis(200)).await);
 
     // The resume computes again from the answer its journal holds, and fails the same way.
-    lead.trails.resume(&run, &UserId::human(), None).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), None).await.unwrap();
     let (again, limit) = failed(&lead, &run).await;
     assert_eq!(limit, Some(RunLimit::Compute), "{again}");
     assert!(lead.sends_no_step(Duration::from_millis(200)).await, "the answered step is not asked again");
@@ -56,13 +56,13 @@ async fn a_run_failing_on_a_limit_on_two_resumes_in_a_row_keeps_the_answers_of_i
     assert!(lead.reply(&a, COUNT).await);
     assert_eq!(failed(&lead, &run).await.1, Some(RunLimit::Compute));
     for _ in 0..2 {
-        lead.trails.resume(&run, &UserId::human(), None).await.unwrap();
+        lead.trails.resume(&run, &ants_test_support::human(), None).await.unwrap();
         let (error, limit) = failed(&lead, &run).await;
         assert_eq!(limit, Some(RunLimit::Compute), "{error}");
     }
 
     // A third resume under a limit the run fits computes past the answer of a, which goes out no more.
-    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits::default())).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), Some(TrailLimits::default())).await.unwrap();
     let b = lead.step().await;
     assert_eq!(b.text, format!("b {COUNT}"));
     assert!(lead.reply(&b, "B").await);
@@ -81,7 +81,7 @@ async fn a_run_past_its_compute_limit_resumes_under_a_raised_one_to_its_end() {
     assert_eq!(limit, Some(RunLimit::Compute), "{error}");
 
     // The raised limit reaches the restored session, dumped under the one the run started with.
-    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits::default())).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), Some(TrailLimits::default())).await.unwrap();
     let b = lead.step().await;
     assert_eq!(b.text, format!("b {COUNT}"));
     assert!(lead.reply(&b, "B").await);
@@ -107,7 +107,7 @@ b = await agent("b", ant="ops")
     assert!(error.contains("passes the limit of 50000 bytes"), "{error}");
     assert!(lead.sends_no_step(Duration::from_millis(200)).await);
 
-    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits::default())).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), Some(TrailLimits::default())).await.unwrap();
     let b = lead.step().await;
     assert!(lead.reply(&b, "B").await);
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!([100_000, "B"]) });
@@ -137,7 +137,7 @@ len(x)
     assert!(told.text.contains("No resume continues it: no flag raises its memory limit"), "{}", told.text);
 
     // No limit raises a script's memory, so a resume, which would fail the same way, is refused.
-    let refused = lead.trails.resume(&run, &UserId::human(), Some(TrailLimits::MAX)).await.unwrap_err();
+    let refused = lead.trails.resume(&run, &ants_test_support::human(), Some(TrailLimits::MAX)).await.unwrap_err();
     assert!(refused.contains("failed on its memory limit, which no resume raises"), "{refused}");
     assert!(matches!(lead.header(&run).await.state, RunState::Failed { .. }), "the run stays failed");
     assert!(lead.sends_no_step(Duration::from_millis(200)).await, "the answered step is not asked again");
@@ -156,7 +156,7 @@ async fn a_run_out_of_turns_fails_naming_it_and_resumes_under_more() {
     assert!(error.contains("limit of 1 turns"), "{error}");
 
     lead.trails
-        .resume(&run, &UserId::human(), Some(TrailLimits { turns: 10, ..TrailLimits::default() }))
+        .resume(&run, &ants_test_support::human(), Some(TrailLimits { turns: 10, ..TrailLimits::default() }))
         .await
         .unwrap();
     let b = lead.step().await;
@@ -176,17 +176,17 @@ async fn a_stop_while_the_script_computes_takes_effect_once_it_ends_listing_the_
     assert!(lead.reply(&a, COUNT).await);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let started = std::time::Instant::now();
-    let waiting = lead.trails.stop(&run, &UserId::human()).await.unwrap();
+    let waiting = lead.trails.stop(&run, &ants_test_support::human()).await.unwrap();
     let b = lead.step().await;
     assert!(started.elapsed() > Duration::from_millis(100), "the stop waited for the computation to end");
     assert_eq!(b.text, format!("b {COUNT}"));
     let waiting: Vec<_> = waiting.iter().map(|step| (step.to.clone(), step.message)).collect();
     assert_eq!(waiting, [(ant("ops"), b.id)], "the step sent as the computation ended is for the human to withdraw");
-    assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: UserId::human() });
+    assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: ants_test_support::human() });
     assert!(lead.reply(&b, "late").await, "the stopped step's reply is not prompted");
     assert!(lead.sends_no_step(Duration::from_millis(500)).await);
 
-    lead.trails.resume(&run, &UserId::human(), None).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), None).await.unwrap();
     let again = lead.step().await;
     assert_ne!(again.id, b.id);
     assert!(lead.reply(&again, "B").await);
@@ -202,14 +202,14 @@ async fn a_run_stopped_before_its_daemon_restarted_resumes_from_its_record() {
     let a = lead.step().await;
     assert!(lead.reply(&a, "A").await);
     let b = lead.step().await;
-    lead.trails.stop(&run, &UserId::human()).await.unwrap();
+    lead.trails.stop(&run, &ants_test_support::human()).await.unwrap();
     drop(lead);
 
     let mut again = conductor(&server, &ants_binary(), Vec::new()).await;
     assert!(again.sends_no_step(Duration::from_secs(1)).await, "a stopped run stays stopped");
     assert!(again.reply(&b, "late").await, "the stopped step's reply is not prompted after the restart");
-    assert_eq!(again.header(&run).await.state, RunState::Stopped { by: UserId::human() });
-    again.trails.resume(&run, &UserId::human(), None).await.unwrap();
+    assert_eq!(again.header(&run).await.state, RunState::Stopped { by: ants_test_support::human() });
+    again.trails.resume(&run, &ants_test_support::human(), None).await.unwrap();
     let fresh = again.step().await;
     assert_eq!((fresh.to.as_str(), fresh.text.as_str()), ("ops", "b"));
     assert!(fresh.id != b.id && fresh.thread_id != b.thread_id, "sent anew on a fresh thread");
@@ -240,7 +240,7 @@ async fn a_run_past_its_wall_time_fails() {
     assert!(told.text.ends_with(&raise), "{}", told.text);
 
     let raised = TrailLimits { wall_secs: 3600, ..limits };
-    lead.trails.resume(&run, &UserId::human(), Some(raised)).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), Some(raised)).await.unwrap();
     let step = lead.step().await;
     assert!(lead.reply(&step, "answered").await);
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("answered") }, "resumed past its wall time");
@@ -289,7 +289,7 @@ async fn a_run_failed_on_its_session_size_takes_no_resume() {
     assert!(!told.text.contains("ants trail resume"), "{}", told.text);
 
     for limits in [None, Some(TrailLimits::MAX)] {
-        let refused = lead.trails.resume(&run, &UserId::human(), limits).await.unwrap_err();
+        let refused = lead.trails.resume(&run, &ants_test_support::human(), limits).await.unwrap_err();
         assert!(refused.contains("failed on its session size limit, which this resume does not raise"), "{refused}");
     }
     assert!(matches!(lead.header(&run).await.state, RunState::Failed { .. }), "the run stays failed");

@@ -116,9 +116,9 @@ fn a_device_connects_only_with_unexpired_web_credentials_of_its_key_of_no_newer_
 }
 
 #[test]
-fn without_authentication_a_device_is_the_human() {
-    let session = unauthenticated();
-    assert_eq!((session.human, session.domain, session.account), (UserId::human(), None, None));
+fn without_authentication_a_device_is_the_human_it_names() {
+    let session = unauthenticated("alice".parse().unwrap());
+    assert_eq!((session.human.as_str(), session.domain, session.account), ("alice", None, None));
 }
 
 #[test]

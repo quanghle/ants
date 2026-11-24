@@ -107,7 +107,7 @@ async fn a_human_s_summary_request_is_prompted_as_one_and_the_reply_carries_it_w
     bus.client.flush().await.unwrap();
     let (asked, summarised) = (ThreadId::generate(), ThreadId::generate());
     let request = ants_proto::SummaryRequest::thread(summarised.clone(), 42);
-    for (from, thread) in [(UserId::human(), asked.clone()), (dev_b.clone(), ThreadId::generate())] {
+    for (from, thread) in [(ants_test_support::human(), asked.clone()), (dev_b.clone(), ThreadId::generate())] {
         let mut envelope = Envelope::on_thread(thread, from, bus.dev.clone(), "tokens 7");
         envelope.summary = Some(request.clone());
         bus::publish_json(&bus.js, envelope.subject(), &envelope, None).await.unwrap();
@@ -138,7 +138,7 @@ async fn a_quoted_reply_is_prompted_after_its_quote() {
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let quote = ants_proto::Quote::new("dev-b".parse().unwrap(), "the build fails on main");
-    let envelope = Envelope::on_thread(ThreadId::generate(), UserId::human(), bus.dev.clone(), "why?")
+    let envelope = Envelope::on_thread(ThreadId::generate(), ants_test_support::human(), bus.dev.clone(), "why?")
         .quoting(Uuid::now_v7(), quote);
     bus::publish_json(&bus.js, envelope.subject(), &envelope, None).await.unwrap();
 
@@ -243,7 +243,7 @@ async fn a_prompt_too_large_even_for_a_new_session_goes_to_the_owner_with_the_th
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let t1 = ThreadId::generate();
-    let mut hello = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hello");
+    let mut hello = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "hello");
     let to = hello.clone();
     let notes = attach(&bus, |id| to.attachment_handle(id), "notes.txt", "text/plain", b"notes").await;
     hello.attachments = vec![notes.clone()];
@@ -369,7 +369,7 @@ async fn a_thread_branch_with_new_commits_is_pushed_with_a_draft_pull_request() 
     bus.publisher = Some(crate::publish::Publisher::new(bus.dev.clone()).with_gh(fake_gh(&dir)).with_titles(titles));
     let home = dir.join("home");
     let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
-    let mut title = ants_proto::ThreadTitle::new(t1.clone(), "Lunch plans", UserId::human()).unwrap();
+    let mut title = ants_proto::ThreadTitle::new(t1.clone(), "Lunch plans", ants_test_support::human()).unwrap();
     let sealed =
         ants_proto::Sealed { v: 1, device: ants_proto::DeviceId::generate(), keys: Vec::new(), body: title.title };
     (title.title, title.sealed) = (String::new(), Some(Box::new(sealed)));
@@ -441,8 +441,8 @@ fn a_kept_branch_is_told_to_the_thread_owner_else_the_default_human() {
         "[ants] The session of thread t1 expired and its git worktree was removed; branch ants/dev-a/t1 is kept, \
              holding 2 commits not in the repository's HEAD."
     );
-    let notice = kept_branch_notice(&ant, &branch, Some(UserId::human()), &humans);
-    assert_eq!((&notice.to, notice.owner.as_ref()), (&UserId::human(), Some(&UserId::human())));
+    let notice = kept_branch_notice(&ant, &branch, Some(ants_test_support::human()), &humans);
+    assert_eq!((&notice.to, notice.owner.as_ref()), (&ants_test_support::human(), Some(&ants_test_support::human())));
 }
 
 /// Start the MCP server of `bus`'s ant with `stored` as its `mcp.json`, as left by an earlier run.
@@ -540,11 +540,11 @@ async fn a_human_s_answer_to_the_ant_s_questions_is_prompted_once_with_an_ants_l
     let ship = ants_proto::Question::new("Ship it?", &["yes".to_owned(), "not yet".to_owned()], false).unwrap();
     let regions = ants_proto::Question::new("Which regions?", &["eu".to_owned(), "us".to_owned()], false).unwrap();
     let questions = ants_proto::Questions::new(vec![ship.headed("Ship"), regions.multi()]).unwrap();
-    let asked = Envelope::asking(thread.clone(), bus.dev.clone(), UserId::human(), questions);
+    let asked = Envelope::asking(thread.clone(), bus.dev.clone(), ants_test_support::human(), questions);
     bus::publish_json(&bus.js, asked.subject(), &asked, None).await.unwrap();
     timeout(WAIT, replies.next()).await.expect("the question").unwrap();
     let picks = vec![Pick::option(2), Pick::Options(vec![1, 2])];
-    let picked = Envelope::answering(&asked, UserId::human(), picks).unwrap();
+    let picked = Envelope::answering(&asked, ants_test_support::human(), picks).unwrap();
     bus::publish_json(&bus.js, picked.subject(), &picked, None).await.unwrap();
     // No such option: an ordinary message.
     let mut wrong = picked.clone();
@@ -593,7 +593,7 @@ async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_
         format!("[ants] Attached: {:?} ({}, {} bytes), handle {handle}", a.name, a.mime, a.size)
     };
 
-    let mut message = Envelope::on_thread(ThreadId::generate(), UserId::human(), bus.dev.clone(), "look");
+    let mut message = Envelope::on_thread(ThreadId::generate(), ants_test_support::human(), bus.dev.clone(), "look");
     let to = message.clone();
     let handle = |id| to.attachment_handle(id);
     let shot = attach(&bus, handle, "shot.png", "image/png", b"\x89PNG shot").await;
@@ -605,7 +605,7 @@ async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_
     message.attachments = vec![shot.clone(), log_file.clone(), gone.clone()];
     bus::publish_json(&bus.js, message.subject(), &message, None).await.unwrap();
 
-    let mut post = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a see the chart");
+    let mut post = ChannelPost::new(ops.clone(), ants_test_support::human(), "@dev-a see the chart");
     let on = post.clone();
     let chart = attach(&bus, |id| on.attachment_handle(id), "chart.webp", "image/webp", b"RIFF chart").await;
     post.attachments = vec![chart.clone()];
@@ -617,7 +617,7 @@ async fn attachments_reach_a_harness_taking_images_as_images_and_any_other_as_a_
         next_post(&mut posts).await;
         // A harness started now takes no images.
         log.locked().knobs.takes_images = false;
-        let mut plain = Envelope::on_thread(ThreadId::generate(), UserId::human(), bus.dev.clone(), "again");
+        let mut plain = Envelope::on_thread(ThreadId::generate(), ants_test_support::human(), bus.dev.clone(), "again");
         plain.attachments = vec![attach(&bus, |id| plain.attachment_handle(id), "shot.png", "image/png", b"x").await];
         bus::publish_json(&bus.js, plain.subject(), &plain, None).await.unwrap();
         next_reply(&mut replies).await;
@@ -672,7 +672,7 @@ async fn the_messenger_answers_a_post_mentioning_nobody_with_the_members_it_conc
         ..ants_test_support::colony_entry("dev-b", "m")
     };
     colony.put(dev_b.key(), serde_json::to_vec(&dev_b).unwrap().into()).await.unwrap();
-    let post = ChannelPost::new(entry.channel.clone(), UserId::human(), "the build is red");
+    let post = ChannelPost::new(entry.channel.clone(), ants_test_support::human(), "the build is red");
     let seq = bus.post(&post).await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
@@ -744,5 +744,5 @@ async fn the_first_prompt_of_a_session_carries_the_provider_s_brief_asked_with_t
     let context = &request.context;
     assert_eq!((request.reason, &context.ant, &context.identity), (BriefReason::Started, &bus.dev, &born.id));
     assert_eq!((&context.thread, context.harness.as_str(), context.machine.as_str()), (&t1, "test", "test-machine"));
-    assert_eq!(context.origin, Origin { by: Starter::Human { user: UserId::human() }, channel: None });
+    assert_eq!(context.origin, Origin { by: Starter::Human { user: ants_test_support::human() }, channel: None });
 }

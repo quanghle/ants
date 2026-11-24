@@ -13,8 +13,8 @@ use super::{Managed, Mark, Steps, pick};
 use crate::node::conf::quote as quoted;
 
 impl Steps<'_> {
-    /// Write the config file, unless there is one: the messenger, `harness` and the server given, the `[nats_server]`
-    /// of `managed`, and the ant of --ant. To a file there, only add the ant, when not listed; one naming no harness
+    /// Write the config file, unless there is one: the messenger, `harness`, the server and the default human given,
+    /// the `[nats_server]` of `managed`, and the ant of --ant. To a file there, only add the ant, when not listed; one naming no harness
     /// for its ants fails the step. Returns whether it changed the file.
     pub(super) fn config_file(&mut self, harness: Option<&str>, managed: &Managed) -> bool {
         let (connection, path) = (self.connection, &self.paths.config);
@@ -32,7 +32,7 @@ impl Steps<'_> {
             None
         };
         let entry = match (&self.args.ant, &self.args.workdir) {
-            (Some(name), Some(workdir)) => match ant_entry(name, workdir, connection.nats, summary.as_ref(), harness) {
+            (Some(name), Some(workdir)) => match ant_entry(name, workdir, connection, summary.as_ref(), harness) {
                 Ok(entry) => Some((name, entry)),
                 Err(e) => {
                     self.report.step(Mark::Fail, step, format!("ant {name}: {e:#}"));
@@ -48,6 +48,9 @@ impl Steps<'_> {
             }
             if connection.nats != crate::cli::DEFAULT_NATS {
                 let _ = writeln!(text, "nats = {}", quoted(connection.nats));
+            }
+            if let Some(human) = connection.human {
+                let _ = writeln!(text, "human = {}", quoted(human.as_str()));
             }
             text.push_str("messenger = true\n");
             let mut running = String::new();
@@ -123,18 +126,18 @@ pub(super) fn nats_server_table(conf: &Path, command: Option<&Path>) -> String {
 fn ant_entry(
     name: &UserId,
     workdir: &Path,
-    nats: &str,
+    connection: &crate::connection::Connection<'_>,
     summary: Option<&Summary>,
     harness: Option<&str>,
 ) -> Result<String> {
     let workdir = workdir.canonicalize().with_context(|| format!("workdir {}", workdir.display()))?;
     let ant = Ant::new(name.clone(), workdir);
     let harnesses = summary.map_or_default(|s| s.harnesses.clone());
-    let harness = match summary {
-        Some(summary) => summary.harness.clone(),
-        None => harness.map(str::to_owned),
+    let (harness, human) = match summary {
+        Some(summary) => (summary.harness.clone(), summary.human.clone()),
+        None => (harness.map(str::to_owned), connection.human.cloned()),
     };
-    Ant { harness, ..ant.clone() }.into_config(nats, &harnesses)?;
+    Ant { harness, human, ..ant.clone() }.into_config(connection.nats, &harnesses)?;
     config::entry(&ant)
 }
 

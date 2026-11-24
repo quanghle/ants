@@ -102,6 +102,7 @@ mod tests {
         let sage_of = async |ant: Ant| super::entry(&ant.into_config("nats://unused", &harnesses).unwrap()).await.sage;
         let mut dev_a = Ant::new("dev-a".parse().unwrap(), "/".into());
         dev_a.harness = Some("copilot".to_owned());
+        dev_a.human = Some(ants_test_support::human());
         dev_a.machine = Some("m1".to_owned());
         assert_eq!(sage_of(dev_a.clone()).await, Some(UserId::sage()), "the default");
         let shared = Roles { sage: Some(Sage::Ant("lead".parse().unwrap())), ..Roles::default() };

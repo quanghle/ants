@@ -129,7 +129,7 @@ async fn humans_publish_their_devices_and_readers_take_only_verified_unrevoked_k
         (Own::from_creds(Some(&alice_creds)).unwrap().unwrap(), Own::from_creds(Some(&bob_creds)).unwrap().unwrap());
 
     // Connecting puts the device's entry, once.
-    let nats = crate::connection::Nats::new(&server.url, Some(&alice_creds), None).unwrap();
+    let nats = crate::connection::Nats::new(&server.url, Some(&alice_creds), None, None).unwrap();
     assert_eq!(nats.account.as_deref(), Some(account.as_str()));
     let (_, alice_js) = nats.connect("test").await.unwrap();
     let directory = Directory::open(&alice_js, &account).await.unwrap();
@@ -241,7 +241,7 @@ async fn revoking_an_ant_by_name_deletes_its_identity() {
         vec![],
         false,
         Some(team),
-        &crate::connection::Connection { nats: &server.url, creds: None, js_domain: None },
+        &crate::connection::Connection { nats: &server.url, creds: None, js_domain: None, human: None },
     )
     .await
     .unwrap();

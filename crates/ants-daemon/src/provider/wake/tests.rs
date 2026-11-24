@@ -30,7 +30,7 @@ struct Setup {
 impl Setup {
     async fn start() -> Option<Self> {
         let server = NatsServer::start()?;
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         bus::ensure_stream(&js).await.unwrap();
         let sessions = SessionStore::memory();
         let thread = ThreadId::generate();

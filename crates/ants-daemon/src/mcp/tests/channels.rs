@@ -100,7 +100,7 @@ async fn post_channel_starts_a_thread_the_ant_created_where_it_may_post() {
     let mut ops = ChannelEntry::new("ops".parse().unwrap());
     ops.add_member(user("dev-a"));
     ops.add_member(user("dev-b"));
-    ops.add_member(UserId::human());
+    ops.add_member(ants_test_support::human());
     let mut dev = ChannelEntry::new("dev".parse().unwrap());
     dev.add_member(user("dev-b"));
     let mut triage = ChannelEntry::new("triage".parse().unwrap());

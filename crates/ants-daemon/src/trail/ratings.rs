@@ -265,7 +265,7 @@ mod tests {
             phases: Vec::new(),
             waypoints: Vec::new(),
             script: "agent('build')".to_owned(),
-            saved_by: Saver::Human { user: UserId::human() },
+            saved_by: Saver::Human { user: ants_test_support::human() },
             saved_from: None,
             saved_at: Utc::now(),
         }
@@ -288,7 +288,7 @@ mod tests {
     #[tokio::test]
     async fn the_colony_s_saved_trails_are_read_with_every_rating_of_a_saved_one_counted_whole() {
         let Some(server) = NatsServer::start() else { return };
-        let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+        let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
         let missing = colony_rated(&js, None).await.unwrap_err();
         assert!(format!("{missing:#}").contains("reading the saved trails of the colony"), "{missing:#}");
         js.create_stream(crate::hub::trails_config()).await.unwrap();

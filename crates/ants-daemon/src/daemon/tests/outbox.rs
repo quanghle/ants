@@ -43,7 +43,7 @@ impl Uplinked {
             format!("jetstream {{ store_dir: {:?}, domain: m1 }}\ninclude \"uplink.conf\"\n", dir.join("js"))
         })
         .unwrap();
-        let human = UserId::human();
+        let human = ants_test_support::human();
         let (_, hub_js) = bus::connect(&hub.url, None, None, &human, "test").await.unwrap();
         bus::ensure_stream(&hub_js).await.unwrap();
         let (local, local_js) = bus::connect(&leaf.url, None, None, &human, "test").await.unwrap();
@@ -125,7 +125,7 @@ async fn a_reply_kept_in_the_outbox_answers_its_message_once() {
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
     let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
-    let ask = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
+    let ask = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "hold a");
     let seq = bus::publish_json(&uplinked.hub_js, ask.subject(), &ask, None).await.unwrap();
     let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
 
@@ -184,7 +184,7 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
     let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
-    let ask = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed a");
+    let ask = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "doomed a");
     let seq = bus::publish_json(&uplinked.hub_js, ask.subject(), &ask, None).await.unwrap();
     // Seconds, not tenths: a progress ack late on a slow machine would have the hub deliver the message in hand
     // again, its last delivery, leaving none for the restarted daemon.
@@ -232,7 +232,7 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
     let letters = dead::list(&stream).await.unwrap();
     assert_eq!(letters.len(), 1, "{letters:?}");
     assert_eq!(letters[0].1, kept, "the dead letter of the last attempt");
-    let notice = stream.get_last_raw_message_by_subject(&subject::inbox(&UserId::human(), &bus.dev)).await;
+    let notice = stream.get_last_raw_message_by_subject(&subject::inbox(&ants_test_support::human(), &bus.dev)).await;
     let notice: Envelope = serde_json::from_slice(&notice.unwrap().payload).unwrap();
     assert_eq!((&notice.thread_id, notice.in_reply_to), (&t1, Some(ask.id)));
     assert!(notice.text.contains(&format!("ants dead replay {}", letters[0].0)), "{}", notice.text);
@@ -297,8 +297,8 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
     let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
-    let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
-    let doomed = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed b");
+    let hold = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "hold a");
+    let doomed = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "doomed b");
     let hold_seq = bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
     let seq = bus::publish_json(&uplinked.hub_js, doomed.subject(), &doomed, None).await.unwrap();
     let progress_every = Duration::from_millis(200);
@@ -375,7 +375,7 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
 
     let notices = || async {
         let mut notices = Vec::new();
-        let (subject, mut from) = (subject::inbox(&UserId::human(), &bus.dev), 1);
+        let (subject, mut from) = (subject::inbox(&ants_test_support::human(), &bus.dev), 1);
         while let Ok(msg) = stream.get_first_raw_message_by_subject(&subject, from).await {
             from = msg.sequence + 1;
             let notice: Envelope = serde_json::from_slice(&msg.payload).unwrap();
@@ -391,9 +391,9 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
             stream_seq: seq,
             deliveries: MAX_DELIVER as u64,
         };
-        let humans = Registry::default();
-        let sessions = bus::ensure_sessions(&uplinked.hub_js, None, &UserId::human()).await.unwrap();
-        let threads = Threads::new(uplinked.hub_js.clone(), UserId::human(), sessions);
+        let humans = Registry::new(ants_test_support::human());
+        let sessions = bus::ensure_sessions(&uplinked.hub_js, None, &ants_test_support::human()).await.unwrap();
+        let threads = Threads::new(uplinked.hub_js.clone(), ants_test_support::human(), sessions);
         let claims = Claims { humans: &humans, threads: &threads };
         let watch = || dead::bury_undelivered(&uplinked.hub_js, &stream, &advisory, &claims);
         // As the hub's stream takes the outbox copy once the uplink is back.
@@ -446,8 +446,8 @@ async fn a_message_in_hand_waits_out_the_hub_out_of_reach_spending_no_attempt() 
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
     let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
-    let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
-    let next = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "b");
+    let hold = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "hold a");
+    let next = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "b");
     bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
     bus::publish_json(&uplinked.hub_js, next.subject(), &next, None).await.unwrap();
     // No redelivery for want of an ack within the test: any is the daemon's own.
@@ -487,7 +487,7 @@ async fn a_message_in_hand_waits_out_the_hub_out_of_reach_spending_no_attempt() 
     // Only the held message is left, whose ack failed while the uplink was down: its redelivery acks it.
     assert_eq!(consumer.num_ack_pending, 1);
     assert!(dead::list(&stream).await.unwrap().is_empty());
-    let (subject, mut from, mut answers) = (subject::inbox(&UserId::human(), &bus.dev), 1, 0);
+    let (subject, mut from, mut answers) = (subject::inbox(&ants_test_support::human(), &bus.dev), 1, 0);
     while let Ok(msg) = stream.get_first_raw_message_by_subject(&subject, from).await {
         from = msg.sequence + 1;
         let reply: Envelope = serde_json::from_slice(&msg.payload).unwrap();
@@ -503,7 +503,7 @@ async fn a_direct_get_tells_a_missing_bucket_from_the_hub_out_of_reach() {
     use crate::records::direct_kv::{DirectKv, Lookup};
     let Some((_hub, uplinked)) = Uplinked::start().await else { return };
     let domain: JsDomain = "hub".parse().unwrap();
-    bus::ensure_sessions(&uplinked.hub_js, None, &UserId::human()).await.unwrap();
+    bus::ensure_sessions(&uplinked.hub_js, None, &ants_test_support::human()).await.unwrap();
     let missing = DirectKv::new(&uplinked.hub_js, None, "nowhere").await.unwrap();
     let through = DirectKv::new(&uplinked.through_leaf, Some(&domain), "nowhere").await.unwrap();
     let there = DirectKv::new(&uplinked.through_leaf, Some(&domain), ants_proto::SESSIONS_BUCKET).await.unwrap();
@@ -535,8 +535,8 @@ async fn a_message_held_past_the_ack_wait_keeps_its_attempts() {
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
     let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
-    let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
-    let doomed = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed b");
+    let hold = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "hold a");
+    let doomed = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "doomed b");
     bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
     let seq = bus::publish_json(&uplinked.hub_js, doomed.subject(), &doomed, None).await.unwrap();
     let (progress_every, ack_wait) = (Duration::from_secs(2), Duration::from_secs(6));
@@ -593,7 +593,7 @@ async fn junk_whose_dead_letter_is_kept_in_the_outbox_is_terminated_once_the_upl
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let junk = subject::inbox(&bus.dev, &UserId::human());
+    let junk = subject::inbox(&bus.dev, &ants_test_support::human());
     let seq = uplinked.hub_js.publish(junk, "not an envelope".into()).await.unwrap().await.unwrap().sequence;
     store::fill(&uplinked.hub_js).await;
     // No redelivery for want of an ack within the test: any spends a delivery.
@@ -659,8 +659,8 @@ async fn a_leaf_outage_past_the_ack_wait_has_the_hub_deliver_nothing() {
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
     let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
-    let hold = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "hold a");
-    let next = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "b");
+    let hold = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "hold a");
+    let next = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "b");
     bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
     bus::publish_json(&uplinked.hub_js, next.subject(), &next, None).await.unwrap();
     let (progress_every, ack_wait) = (Duration::from_secs(1), Duration::from_secs(3));

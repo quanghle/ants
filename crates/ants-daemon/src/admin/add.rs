@@ -89,9 +89,6 @@ async fn add(
     if text.lines().any(|line| line.trim() == mark) {
         return Ok(Added::Already);
     }
-    if ant.is_human() {
-        bail!("{ant} is a human's name, not an ant's");
-    }
     if let Some(key) = NOT_GIVEN.iter().find(|key| settings.contains_key(**key)) {
         bail!("the daemon sets {key} itself: an order does not give it");
     }

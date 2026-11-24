@@ -1,6 +1,6 @@
 # Configuration
 
-`~/.ants/config.toml` (`--config` / `ANTS_CONFIG`) configures multi-ant daemons, CLI defaults, custom harnesses, worker templates and schedules. Every ant needs a harness. A top-level `harness` (such as `harness = "claude"` alone) serves the built-in `system-messenger` unless disabled, and `system-sage` while an ant names it ([The sage](#the-sage)). On authenticated servers, each built-in runs only where its credentials are present ([Built-in ants on a server with authentication](#built-in-ants-on-a-server-with-authentication)). A file fails to load if any of its ants, including built-ins served on the machine, needs a harness and has none. `ants setup` writes the top-level `harness` of a new file ([Choosing a harness in `ants setup`](#choosing-a-harness-in-ants-setup)); `ants doctor` tells how to fix an existing file.
+`~/.ants/config.toml` (`--config` / `ANTS_CONFIG`) configures multi-ant daemons, CLI defaults, custom harnesses, worker templates and schedules. Every ant needs a harness. A top-level `harness` (such as `harness = "claude"` alone) serves the built-in `system-messenger` unless disabled, and `system-sage` while an ant names it ([The sage](#the-sage)). On authenticated servers, each built-in runs only where its credentials are present ([Built-in ants on a server with authentication](#built-in-ants-on-a-server-with-authentication)). A file fails to load if any of its ants, including built-ins served on the machine, needs a harness and has none. Every ant needs a default human too: its `human`, else the top-level `human`, with no default, as no name is a human by itself; a daemon refuses to start an ant naming none. `ants setup` writes the top-level `harness` and `human` of a new file ([Choosing a harness in `ants setup`](#choosing-a-harness-in-ants-setup)); `ants doctor` tells how to fix an existing file.
 
 ```toml
 harness = "copilot"                        # for every ant and built-in messenger and sage naming none; no default
@@ -8,7 +8,7 @@ messenger = true                           # default: serve system-messenger whe
 sage = "system-sage"                       # default reviewer; an ant's name or "none" (see The sage)
 nats = "wss://hub.example/nats"            # default NATS URL for ants and schedules without `nats`
 js_domain = "hub"                          # default hub JetStream domain; also per ant and schedule
-human = "alice"                            # fallback human for ownerless escalations (default "human"); also per ant
+human = "alice"                            # default human: ownerless escalations and notices, the CLI without credentials; required (here or per ant); also per ant
 turn_budget = 8                            # default; turns a thread gets from a human's message; also per ant and template
 metrics = "127.0.0.1:9464"                 # serve /healthz and /metrics (default: off)
 timezone = "America/New_York"              # default IANA time zone for schedule cron (default UTC)
@@ -21,6 +21,7 @@ provider = "sense"                         # default provider of every ant: "sen
 creds = "~/.config/ants/auth/alice.creds"  # human credentials (ant credentials are not used here)
 nats = "nats://127.0.0.1:4222"             # default: top-level nats
 js_domain = "hub"                          # default: top-level js_domain
+human = "alice"                            # whom the CLI acts as without credentials (ANTS_HUMAN first; default: top-level human)
 auto_archive = "14d"                       # hide threads idle this long from thread lists, channel reads and chat (default "0": never; docs/cli.md)
 summary_ant = "system-messenger"           # default ant asked for TL;DRs and digests (see Catch-up summaries)
 summaries = "on-demand"                    # default; "ahead" also allows asking for TL;DRs ahead of time (needs the next key)

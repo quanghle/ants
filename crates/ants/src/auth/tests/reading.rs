@@ -5,7 +5,7 @@ use super::*;
 #[tokio::test]
 async fn thread_notes_are_read_back_through_each_reader_own_consumer() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (h, h_js) = server.connect(&human).await;
     bus::ensure_stream(&h_js).await.unwrap();
     let (_a, a_js) = server.connect(&dev_a).await;
@@ -79,7 +79,7 @@ async fn thread_notes_are_read_back_through_each_reader_own_consumer() {
 #[tokio::test]
 async fn an_ant_cli_reads_back_only_its_own_inbox_through_spares_of_its_inbox_consumer() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (_h, h_js) = server.connect(&human).await;
     bus::ensure_stream(&h_js).await.unwrap();
     let (_a, a_js) = server.connect(&dev_a).await;
@@ -131,7 +131,7 @@ async fn an_ant_cli_reads_back_only_its_own_inbox_through_spares_of_its_inbox_co
 #[tokio::test]
 async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (_h, h_js) = server.connect(&human).await;
     bus::ensure_stream(&h_js).await.unwrap();
     let (_a, a_js) = server.connect(&dev_a).await;
@@ -174,7 +174,7 @@ async fn an_ant_reads_back_its_thread_both_ways_and_only_its_own_sent_messages()
 #[tokio::test]
 async fn an_ants_daemon_reads_back_its_own_timeline_only() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (_h, h_js) = server.connect(&human).await;
     bus::ensure_stream(&h_js).await.unwrap();
     let (_a, a_js) = server.connect(&dev_a).await;

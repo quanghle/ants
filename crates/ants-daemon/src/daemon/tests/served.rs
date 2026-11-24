@@ -123,7 +123,7 @@ fn configs(url: &str, harness: &str, dir: &Path, ants: &[&str]) -> Vec<Config> {
         format!("[[ant]]\nname = {ant:?}\nworkdir = {dir:?}\nhome = {home:?}\n")
     });
     let text = format!(
-        "nats = {url:?}\nharness = {harness:?}\nmessenger = false\nsage = \"none\"\n[harnesses.{harness}]\n\
+        "nats = {url:?}\nharness = {harness:?}\nhuman = \"human\"\nmessenger = false\nsage = \"none\"\n[harnesses.{harness}]\n\
          command = {harness:?}\n{}",
         entries.collect::<String>()
     );
@@ -138,7 +138,7 @@ fn configs(url: &str, harness: &str, dir: &Path, ants: &[&str]) -> Vec<Config> {
 #[tokio::test]
 async fn a_harness_asking_an_ant_mid_prompt_gets_its_reply_through_the_daemon() {
     let Some(server) = Server::start() else { return };
-    let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     crate::hub::init(&js, |_| true).await.unwrap();
     let prompts = Arc::new(StdMutex::new(Vec::new()));
     let fake = crate::harness::fakes::install("asking", asking(prompts.clone()));
@@ -150,7 +150,7 @@ async fn a_harness_asking_an_ant_mid_prompt_gets_its_reply_through_the_daemon() 
     let entry = colony::entry(&peer).await;
     colony.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
     let mut asked = client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
-    let mut replies = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+    let mut replies = client.subscribe(subject::inbox_of(&ants_test_support::human())).await.unwrap();
     client.flush().await.unwrap();
 
     let (stop, restarts, providers) = (Stop::default(), Restarts::default(), crate::provider::Providers::default());
@@ -166,7 +166,7 @@ async fn a_harness_asking_an_ant_mid_prompt_gets_its_reply_through_the_daemon() 
         {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let message = Envelope::new(UserId::human(), dev_a.clone(), "ask dev-b 6*7?");
+        let message = Envelope::new(ants_test_support::human(), dev_a.clone(), "ask dev-b 6*7?");
         bus::publish_json(&js, message.subject(), &message, None).await.unwrap();
         let ask = next_envelope(&mut asked).await;
         assert_eq!((&ask.from, &ask.thread_id, ask.text.as_str()), (&dev_a, &message.thread_id, "6*7?"));
@@ -205,7 +205,7 @@ async fn a_harness_asking_an_ant_mid_prompt_gets_its_reply_through_the_daemon() 
 async fn an_ant_started_while_the_stream_is_full_is_served_once_consumers_are_freed() {
     const ROOM: i32 = 4;
     let Some(server) = Server::start() else { return };
-    let (client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     js.create_stream(jetstream::stream::Config { max_consumers: ROOM, ..crate::hub::stream_config() }).await.unwrap();
     crate::hub::init(&js, |_| true).await.unwrap();
     let stream = js.get_stream(ants_proto::STREAM).await.unwrap();
@@ -225,12 +225,12 @@ async fn an_ant_started_while_the_stream_is_full_is_served_once_consumers_are_fr
     let fake = crate::harness::fakes::install("echoing", echoing());
     let [config] = <[Config; 1]>::try_from(configs(&server.url, fake.name(), server.dir(), &["dev-a"]))
         .unwrap_or_else(|_| panic!("one ant"));
-    let mut replies = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+    let mut replies = client.subscribe(subject::inbox_of(&ants_test_support::human())).await.unwrap();
     client.flush().await.unwrap();
     let (stop, restarts, providers) = (Stop::default(), Restarts::default(), crate::provider::Providers::default());
     let daemon = run_until(config, &stop, &restarts, &providers);
     tokio::pin!(daemon);
-    let message = Envelope::new(UserId::human(), dev_a.clone(), "hello");
+    let message = Envelope::new(ants_test_support::human(), dev_a.clone(), "hello");
     let talk = async {
         tokio::time::sleep(RETRY_FIRST.saturating_mul(2)).await;
         let inbox = ants_proto::inbox_consumer(&dev_a);
@@ -262,7 +262,7 @@ async fn an_ant_started_while_the_stream_is_full_is_served_once_consumers_are_fr
 #[tokio::test]
 async fn a_daemon_stopped_while_its_ant_waits_to_be_served_leaves_the_colony() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     js.create_stream(jetstream::stream::Config { max_consumers: 1, ..crate::hub::stream_config() }).await.unwrap();
     crate::hub::init(&js, |_| true).await.unwrap();
     let stream = js.get_stream(ants_proto::STREAM).await.unwrap();

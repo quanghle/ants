@@ -11,7 +11,7 @@ use ants_test_support::user as p;
 #[tokio::test]
 async fn a_record_is_created_only_when_absent() {
     let Some(server) = NatsServer::start() else { return };
-    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let dev = Identity::new(&js, None, &p("dev-a")).await.unwrap();
     assert_eq!(dev.ensure().await.unwrap(), None, "no bucket yet");
     crate::hub::create_identities(&js).await.unwrap();
@@ -36,9 +36,9 @@ async fn a_record_is_created_only_when_absent() {
 #[tokio::test]
 async fn prompts_are_counted_across_a_standby_takeover() {
     let Some(server) = NatsServer::start() else { return };
-    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     crate::hub::create_identities(&js).await.unwrap();
-    let (_, standby_js) = bus::connect(&server.url, None, None, &UserId::human(), "standby").await.unwrap();
+    let (_, standby_js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "standby").await.unwrap();
     let serving = Identity::new(&js, None, &p("dev-a")).await.unwrap();
     let standby = Identity::new(&standby_js, None, &p("dev-a")).await.unwrap();
 
@@ -67,7 +67,7 @@ async fn prompts_are_counted_across_a_standby_takeover() {
 #[tokio::test]
 async fn forgetting_an_identity_does_not_drop_a_prompt_counted_after_the_read() {
     let Some(server) = NatsServer::start() else { return };
-    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     crate::hub::create_identities(&js).await.unwrap();
     let ant = p("dev-a");
     let sense = SenseId::new();
@@ -90,7 +90,7 @@ async fn forgetting_an_identity_does_not_drop_a_prompt_counted_after_the_read() 
 #[tokio::test]
 async fn a_moved_mark_drains_and_holds_the_ant_until_it_goes() {
     let Some(server) = NatsServer::start() else { return };
-    let (_, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let dev = Identity::new(&js, None, &p("dev-a")).await.unwrap();
     assert_eq!(dev.read().await.unwrap(), None, "no bucket yet");
     assert!(!dev.is_moved().await);
@@ -103,7 +103,7 @@ async fn a_moved_mark_drains_and_holds_the_ant_until_it_goes() {
     assert!(tokio::time::timeout(every * 4, dev.moved(every)).await.is_err(), "not moved");
 
     let kv = js.get_key_value(IDENTITIES_BUCKET).await.unwrap();
-    let mark = ants_proto::MovedMark { at: Utc::now(), by: UserId::human() };
+    let mark = ants_proto::MovedMark { at: Utc::now(), by: ants_test_support::human() };
     let moved = AntIdentity { moved: Some(mark.clone()), ..born.clone() };
     let (watching, ()) = tokio::join!(tokio::time::timeout(wait, dev.moved(every)), async {
         tokio::time::sleep(every * 2).await;

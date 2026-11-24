@@ -293,7 +293,7 @@ async fn a_message_answered_before_interrupts_no_prompt_when_it_comes_again() {
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         until("the prompt to run", || log.locked().prompted == 1).await;
-        let answered = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "a");
+        let answered = Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "a");
         let reply = answered.reply(bus.dev.clone(), "s1: a", Role::Human).unwrap();
         bus.marks.answered.add(&answered, &Reply::Message(Box::new(reply))).await.unwrap();
         let seq = bus::publish_json(&bus.js, answered.subject(), &answered, None).await.unwrap();
@@ -463,7 +463,10 @@ async fn a_human_reply_marked_queue_waits_behind_the_running_prompt() {
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         until("the prompt to run", || log.locked().prompted == 1).await;
-        let later = Envelope { queue: true, ..Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "b") };
+        let later = Envelope {
+            queue: true,
+            ..Envelope::on_thread(t1.clone(), ants_test_support::human(), bus.dev.clone(), "b")
+        };
         bus::publish_json(&bus.js, later.subject(), &later, None).await.unwrap();
         let ahead = timeout(WAIT, async {
             loop {
@@ -494,13 +497,13 @@ async fn a_channel_post_a_steer_took_the_answer_from_gets_no_notice_post() {
     log.locked().knobs.steers = true;
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["human", "dev-a"]).await;
-    let root = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a a\nhold: a");
+    let root = ChannelPost::new(ops.clone(), ants_test_support::human(), "@dev-a a\nhold: a");
     bus.post(&root).await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         until("the channel prompt to run", || log.locked().prompted == 1).await;
-        let sent = ChannelPost::on_thread(ops, root.thread_id.clone(), UserId::human(), "@dev-a b");
+        let sent = ChannelPost::on_thread(ops, root.thread_id.clone(), ants_test_support::human(), "@dev-a b");
         let seq = bus.post(&sent).await;
         until("the post to join", || log.locked().steered.len() == 1).await;
         gate.add_permits(1);
@@ -533,7 +536,8 @@ async fn a_human_channel_reply_automatically_steers_but_replies_of_ants_do_not()
             ..ChannelPost::on_thread(ops.clone(), root.thread_id.clone(), "dev-b".parse().unwrap(), "@dev-a queued")
         };
         bus.post(&queued).await;
-        let ignored = ChannelPost::on_thread(ops.clone(), root.thread_id.clone(), UserId::human(), "not addressed");
+        let ignored =
+            ChannelPost::on_thread(ops.clone(), root.thread_id.clone(), ants_test_support::human(), "not addressed");
         let seq = bus.post(&ignored).await;
         timeout(WAIT, async {
             loop {
@@ -548,7 +552,7 @@ async fn a_human_channel_reply_automatically_steers_but_replies_of_ants_do_not()
         .expect("the other posts to arrive");
         assert_eq!(log.locked().cancelled, 0, "ant replies and unaddressed human posts do not interrupt");
 
-        let sent = ChannelPost::on_thread(ops, root.thread_id.clone(), UserId::human(), "@dev-a go left");
+        let sent = ChannelPost::on_thread(ops, root.thread_id.clone(), ants_test_support::human(), "@dev-a go left");
         let seq = bus.post(&sent).await;
         let partial = next_post(&mut replies).await;
         assert_eq!(partial.in_reply_to, Some(root.id));

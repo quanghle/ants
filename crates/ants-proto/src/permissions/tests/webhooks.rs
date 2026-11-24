@@ -35,7 +35,7 @@ fn a_webhook_may_post_only_to_its_destinations_and_keep_only_its_own_events() {
     let domain: JsDomain = "hub".parse().unwrap();
     let in_domain = perms.with_js_domain(Some(&domain));
     assert!(in_domain.publish.iter().any(|s| s == "$JS.hub.API.$KV.ants_webhooks.github.>"));
-    let human = Permissions::for_user(&UserId::human(), Role::Human);
+    let human = Permissions::for_user(&crate::human(), Role::Human);
     assert!(human.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_webhooks"), "ants init creates it");
 }
 
@@ -92,7 +92,7 @@ fn only_humans_get_the_info_of_the_stream_and_of_the_webhooks_bucket() {
         let domain: JsDomain = "hub".parse().unwrap();
         assert_eq!(infos(&perms.with_js_domain(Some(&domain))), Vec::<String>::new());
     }
-    let human = Permissions::for_user(&UserId::human(), Role::Human);
+    let human = Permissions::for_user(&crate::human(), Role::Human);
     assert_eq!(infos(&human), ["$JS.API.STREAM.INFO.ANTS", "$JS.API.STREAM.INFO.KV_ants_webhooks"]);
     // Each finds JetStream on connecting through the info of a consumer named after it.
     let manager = Permissions::for_channel_manager();

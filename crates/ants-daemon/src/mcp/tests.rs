@@ -80,7 +80,7 @@ async fn start(home: &Path) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
 
 /// Like [`start`], with `colony` as the colony.
 async fn start_with_colony(home: &Path, colony: Vec<ColonyEntry>) -> (Mcp, mpsc::UnboundedReceiver<Envelope>) {
-    start_with(home, colony, Arc::default(), Registry::default()).await
+    start_with(home, colony, Arc::default(), Registry::new(ants_test_support::human())).await
 }
 
 /// Thread notes in memory; a post's sequence is its place in the notes of its thread.
@@ -132,7 +132,7 @@ fn listed(name: &str, capabilities: &[&str]) -> ColonyEntry {
 
 /// The human's message `dev-a` is handling on a fresh thread.
 fn from_human() -> Envelope {
-    Envelope::new(UserId::human(), user("dev-a"), "go")
+    Envelope::new(ants_test_support::human(), user("dev-a"), "go")
 }
 
 async fn http_client(url: &str, token: &str) -> Client {

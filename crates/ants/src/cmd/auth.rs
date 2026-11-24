@@ -513,10 +513,10 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     let domain = conn.js_domain;
     auth::check_not_reserved(&user)?;
     let dir = team_dir(dir)?;
-    if admin && auth::role(&user, human) != ants_proto::Role::Human {
+    if admin && !human {
         bail!("only a human's credentials carry the admin role: add --human");
     }
-    if web && auth::role(&user, human) != ants_proto::Role::Human {
+    if web && !human {
         bail!("only a human's device is a web device: add --human");
     }
     if let Some(human) = &assistant_of {
@@ -632,24 +632,16 @@ fn user_rights(
     let kind = match (webhook, observer) {
         (true, _) => issued::Kind::Webhook,
         (_, true) => issued::Kind::Observer,
-        _ => auth::role(user, human).into(),
+        _ => auth::role(human).into(),
     };
     let permissions = match (webhook, observer) {
-        (_, true) => {
-            if user.is_human() {
-                bail!("{user} is the default human, not an observer");
-            }
-            Permissions::for_observer(user)
-        }
+        (_, true) => Permissions::for_observer(user),
         (true, _) => {
-            if user.is_human() {
-                bail!("{user} is the default human, not a webhook");
-            }
             let to = to.into_iter().map(Destination::Ant);
             let destinations: Vec<Destination> = to.chain(channels.into_iter().map(Destination::Channel)).collect();
             Permissions::for_webhook(user, &destinations)
         }
-        _ => match auth::role(user, human) {
+        _ => match auth::role(human) {
             ants_proto::Role::Human => Permissions::for_human_device(user, web),
             role => Permissions::for_user(user, role),
         },
@@ -660,9 +652,6 @@ fn user_rights(
 
 /// `ants auth enroll`.
 fn enrollment(ant: &UserId, ttl: std::time::Duration, dir: Option<PathBuf>, out: Option<PathBuf>) -> Result<()> {
-    if ant.is_human() {
-        bail!("{ant} is the default human, not an ant");
-    }
     let dir = team_dir(dir)?;
     let out = out.unwrap_or_else(|| dir.join(format!("{}.creds", ants_proto::enrollment_user(ant))));
     let expires = match auth::issue_enrollment(&dir, ant, ttl, &out)? {
@@ -894,7 +883,7 @@ mod tests {
         let dir = ants_test_support::scratch_dir("auth-user-web");
         let team = dir.join("auth");
         auth::init(&team).unwrap();
-        let conn = Connection { nats: "nats://127.0.0.1:1", creds: None, js_domain: None };
+        let conn = Connection { nats: "nats://127.0.0.1:1", creds: None, js_domain: None, human: None };
         let key = nkeys::KeyPair::new_user().public_key();
         let xkey = nkeys::XKey::new().public_key();
         let parse = |name: &str, args: &[&str]| {
@@ -925,8 +914,10 @@ mod tests {
         let claims = ants_proto::verified_jwt(&jwt).unwrap().1;
         let may = |subject: &str| crate::people::humans::may_publish(&claims, subject);
         assert!(may("ants.inbox.*.alice") && !may("$JS.API.STREAM.CREATE.ANTS"));
-        // The default human needs no --human, and generated credentials hold no encryption key.
-        issue_user(parse("human", &["--web"]).unwrap(), &conn).await.unwrap();
+        // A web device needs --human; generated credentials hold no encryption key.
+        let err = issue_user(parse("human", &["--web"]).unwrap(), &conn).await.unwrap_err().to_string();
+        assert!(err.contains("add --human"), "{err}");
+        issue_user(parse("human", &["--human", "--web"]).unwrap(), &conn).await.unwrap();
         let text = std::fs::read_to_string(team.join("human.creds")).unwrap();
         assert!(ants_daemon::secrets::creds::Finding::from_creds(&text).unwrap().web);
         assert!(ants_daemon::secrets::creds::xkey_of(&text).is_none());

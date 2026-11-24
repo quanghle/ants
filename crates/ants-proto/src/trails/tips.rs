@@ -76,7 +76,9 @@ pub struct TrailTip {
 /// additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipRetired {
-    pub by: UserId,
+    /// The human who retired it; none for a retirement read from an entry that does not read as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<UserId>,
     pub at: DateTime<Utc>,
 }
 

@@ -89,13 +89,13 @@ fn dead_row(seq: u64, letter: &DeadLetter) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::{Envelope, UserId};
+    use ants_proto::Envelope;
 
     use super::*;
 
     #[test]
     fn dead_rows_show_the_message_or_the_bad_payload() {
-        let mut ask = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "build it\nand test it");
+        let mut ask = Envelope::new(ants_test_support::human(), "dev-a".parse().unwrap(), "build it\nand test it");
         ask.thread_id = "t1".parse().unwrap();
         let letter = DeadLetter::of_envelope("dev-a".parse().unwrap(), 3, 5, "harness crashed", ask);
         let row = dead_row(12, &letter);

@@ -375,7 +375,7 @@ mod tests {
         let pending = escalated(&["lead"], Some(9));
         let reminder = |since, at| Reminder {
             escalation: pending.escalation.clone(),
-            to: UserId::human(),
+            to: ants_test_support::human(),
             owner: None,
             creator: None,
             origin_thread: None,
@@ -409,7 +409,7 @@ mod tests {
         let t = thread(1);
         let reminder = Reminder {
             escalation: escalated(&[], None).escalation,
-            to: UserId::human(),
+            to: ants_test_support::human(),
             owner: None,
             creator: None,
             origin_thread: None,
@@ -430,6 +430,10 @@ mod tests {
         ledger.end_reminder(&t).await.unwrap();
         assert_eq!(ledger.reminder(&t).await.unwrap(), None);
         assert!(ledger.deadlines().await.unwrap().is_empty());
-        assert_eq!(ledger.reset(&t).await.unwrap().reached, Some(UserId::human()), "for telling of another's answer");
+        assert_eq!(
+            ledger.reset(&t).await.unwrap().reached,
+            Some(ants_test_support::human()),
+            "for telling of another's answer"
+        );
     }
 }

@@ -86,7 +86,7 @@ fn colours_follow_the_terminal() {
 #[tokio::test]
 async fn an_ant_keeps_its_own_identity_and_humans_restyle_it() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (_h, h_js) = server.connect(&human).await;
     let (_a, a_js) = server.connect(&dev_a).await;
     assert!(ants_daemon::hub::create_identities(&a_js).await.is_err(), "only a human creates it");

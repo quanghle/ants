@@ -36,7 +36,7 @@ impl Conductor {
         let taken = if call.function == TrailFunction::Human {
             let asked = step.asks().expect("a human step asks questions");
             let picks = asked.questions.iter().map(|_| Pick::option(1)).collect();
-            self.trails.take(&Envelope::answering(step, UserId::human(), picks).unwrap()).await.unwrap()
+            self.trails.take(&Envelope::answering(step, ants_test_support::human(), picks).unwrap()).await.unwrap()
         } else {
             let text = value.as_str().map_or_else(|| value.to_string(), str::to_owned);
             self.reply(step, &text).await
@@ -82,7 +82,7 @@ async fn run_examples(markdown: &str, dir: &str) -> Ran {
         let start = StartRun {
             trail: TrailSource::Saved(name.clone()),
             args,
-            owner: Some(UserId::human()),
+            owner: Some(ants_test_support::human()),
             origin: children::human_origin(),
             thread: ThreadId::generate(),
             limits: TrailLimits::default(),

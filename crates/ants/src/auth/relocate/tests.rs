@@ -33,7 +33,7 @@ async fn states(js: &async_nats::jetstream::Context, rights: &Rights) -> Vec<(St
 #[tokio::test]
 async fn a_hub_moved_to_the_store_account_keeps_every_entry() {
     let Some(mut server) = Server::start_before_store() else { return };
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let (client, js) = server.connect(&human).await;
     let rights = Rights::from_creds(Some(&server.creds(&human))).unwrap();
     hub::init(&js, |s| rights.may_publish(s)).await.unwrap();

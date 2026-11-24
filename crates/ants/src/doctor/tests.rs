@@ -40,6 +40,7 @@ fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
         nats: server.url.clone(),
         creds,
         js_domain: None,
+        human: None,
         config: server.dir().join("no-config.toml"),
         leaf_config: server.dir().join("no-leaf.conf"),
         hub_config: server.dir().join("no-nats.conf"),

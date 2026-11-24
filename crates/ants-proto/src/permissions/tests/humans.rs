@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
     let alice = Permissions::for_user(&p("alice"), Role::Human);
-    let human = Permissions::for_user(&UserId::human(), Role::Human);
+    let human = Permissions::for_user(&crate::human(), Role::Human);
     let rename = |s: &String| s.replace(".human", ".alice").replace("-human", "-alice");
     assert_eq!(alice.publish, human.publish.iter().map(rename).collect::<Vec<_>>(), "the same rights by any name");
     assert_eq!(alice.subscribe, human.subscribe.iter().map(rename).collect::<Vec<_>>());
@@ -34,7 +34,7 @@ fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
         "$JS.FC.KV_ants_humans.>",
         "$JS.FC.*.*.KV_ants_humans.>",
     ];
-    let named_human = Permissions::for_user(&UserId::human(), Role::Ant);
+    let named_human = Permissions::for_user(&crate::human(), Role::Ant);
     for ant in [Permissions::for_user(&p("dev-a"), Role::Ant), named_human] {
         for s in reads {
             assert!(ant.publish.iter().any(|have| have == s), "{s} missing from {:?}", ant.publish);

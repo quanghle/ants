@@ -157,17 +157,18 @@ impl Buried {
     }
 }
 
-/// [`Burying::bury_letter`] of the dead letter of `ant` for `msg` ([`letter_for`]), with no human but the default one
-/// and no escalation chain. `envelope` is `None` for a payload that is not an envelope.
+/// [`Burying::bury_letter`] of the dead letter of `ant` for `msg` ([`letter_for`]), telling `humans`' default human,
+/// with no escalation chain. `envelope` is `None` for a payload that is not an envelope.
 pub async fn bury(
     js: &jetstream::Context,
+    humans: &Registry,
     ant: &UserId,
     msg: &jetstream::Message,
     envelope: Option<&Envelope>,
     error: &str,
 ) -> Result<Burial> {
     let dead = letter_for(ant, msg, envelope, error, bus::max_payload(&js.client()))?;
-    Burying { js, humans: &Registry::default(), escalator: None }.bury_letter(msg, &dead, None).await
+    Burying { js, humans, escalator: None }.bury_letter(msg, &dead, None).await
 }
 
 /// The dead letter of `ant` for `msg`, failed with `error`: of `envelope`, or of the message's payload when there is
@@ -484,7 +485,7 @@ mod tests {
 
     #[test]
     fn the_notice_of_a_channel_post_goes_to_the_thread_s_owner_else_the_default_human() {
-        let (ant, human) = ("dev-a".parse::<UserId>().unwrap(), UserId::human());
+        let (ant, human) = ("dev-a".parse::<UserId>().unwrap(), ants_test_support::human());
         let humans = Registry::with(human.clone(), &["alice"]);
         let post = ChannelPost::new("ops".parse().unwrap(), "dev-b".parse().unwrap(), "@dev-a check");
         let dead = DeadLetter::of_payload(ant.clone(), 3, 5, "harness crashed", b"{}");
@@ -500,7 +501,7 @@ mod tests {
     #[test]
     fn a_notice_sent_directly_carries_a_level_0_dead_letter_escalation_from_the_thread_s_origin() {
         let (ant, lead) = ("dev-a".parse::<UserId>().unwrap(), "lead".parse::<UserId>().unwrap());
-        let humans = Registry::with(UserId::human(), &["alice"]);
+        let humans = Registry::with(ants_test_support::human(), &["alice"]);
         let ask = Envelope::new("dev-b".parse().unwrap(), ant.clone(), "build it");
         let dead = DeadLetter::of_envelope(ant.clone(), 3, 5, "harness crashed", ask.clone());
         let told = direct(notice(&ant, &ask, &dead, 9, &humans), &humans);

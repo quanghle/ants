@@ -88,6 +88,7 @@ async fn a_missing_harness_fails_with_its_fix() {
         nats: "nats://127.0.0.1:1".to_owned(),
         creds: None,
         js_domain: None,
+        human: None,
         config: config.clone(),
         leaf_config: dir.join("leaf.conf"),
         hub_config: dir.join("no-nats.conf"),
@@ -120,7 +121,7 @@ async fn the_reactions_check_names_who_answers_an_ants_requests() {
     std::fs::write(
         &config,
         format!(
-            "messenger = false\nharness = \"copilot\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\ncreds = {creds:?}\n\
+            "messenger = false\nharness = \"copilot\"\nhuman = \"human\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\ncreds = {creds:?}\n\
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n"
         ),
     )
@@ -173,7 +174,7 @@ async fn the_trail_saves_check_tells_whether_the_signer_answers() {
     std::fs::write(
         &config,
         format!(
-            "messenger = false\nharness = \"copilot\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\ncreds = {creds:?}\n\
+            "messenger = false\nharness = \"copilot\"\nhuman = \"human\"\n[[ant]]\nname = \"dev-a\"\nworkdir = \".\"\ncreds = {creds:?}\n\
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\n"
         ),
     )
@@ -213,7 +214,7 @@ fn ants_sharing_a_git_workdir_with_worktrees_turned_off_are_warned() {
     let config = dir.join("config.toml");
     std::fs::write(
         &config,
-        "messenger = false\nharness = \"copilot\"\n\
+        "messenger = false\nharness = \"copilot\"\nhuman = \"human\"\n\
              [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nworktrees = false\n\
              [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nworktrees = true\n\
              [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nmax_harnesses = 1\nworktrees = false\n\
@@ -239,7 +240,7 @@ fn a_home_too_long_for_a_socket_fails_no_check_with_a_runtime_directory_to_bind_
     let long = "a-home-nested-deep-enough-that-its-mcp-socket-path-is-past-sun-len".repeat(2);
     std::fs::write(
         &config,
-        format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\n[[ant]]\nname = \"dev\"\nworkdir = \".\"\nhome = \"{long}\"\n"),
+        format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\n[[ant]]\nname = \"dev\"\nworkdir = \".\"\nhome = \"{long}\"\n"),
     )
     .unwrap();
     let loaded = config::load(&config).unwrap();
@@ -256,7 +257,11 @@ fn an_open_file_limit_below_what_the_ants_need_is_warned() {
     let config = dir.join("config.toml");
     let ants: String =
         (0..50).map(|i| format!("[[ant]]\nname = \"dev-{i}\"\nworkdir = \".\"\nmax_harnesses = 8\n")).collect();
-    std::fs::write(&config, format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\n{ants}")).unwrap();
+    std::fs::write(
+        &config,
+        format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\n{ants}"),
+    )
+    .unwrap();
     let loaded = config::load(&config).unwrap();
     let launchd = Limit { soft: Some(256), hard: Some(256) };
     let low = check_open_files(&loaded.ants, Some(launchd)).unwrap();
@@ -278,8 +283,11 @@ fn a_break_in_an_ant_s_sense_chain_fails_and_a_log_over_its_size_limit_warns() {
     let config = dir.join("config.toml");
     let ants = ["dev-a", "dev-b", "dev-c"]
         .map(|name| format!("[[ant]]\nname = \"{name}\"\nworkdir = \".\"\nhome = \"{name}\"\n"));
-    std::fs::write(&config, format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\n{}", ants.concat()))
-        .unwrap();
+    std::fs::write(
+        &config,
+        format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\n{}", ants.concat()),
+    )
+    .unwrap();
     let loaded = config::load(&config).unwrap();
     let checked_at = "2026-01-02T03:04:05Z".parse().unwrap();
     let status = ChainStatus {

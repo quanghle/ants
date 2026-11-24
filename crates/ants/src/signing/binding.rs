@@ -46,12 +46,9 @@ pub fn check(issued: &[Issued], name: &UserId, github: &GithubAccount, binder: B
     Ok(false)
 }
 
-/// The part of [`check`] no GitHub user changes: fails for `human`, a reserved name, and a name any key other than a
-/// human's was issued to.
+/// The part of [`check`] no GitHub user changes: fails for a reserved name and a name any key other than a human's was
+/// issued to.
 pub fn check_name(issued: &[Issued], name: &UserId) -> Result<()> {
-    if name.is_human() {
-        bail!("{name} is the default human, which no one registers");
-    }
     crate::auth::check_not_reserved(name)?;
     if let Some(other) = issued.iter().find(|i| i.name == name.as_str() && i.kind != Kind::Human) {
         bail!("{name} is taken: {} credentials were issued to it", kind(other.kind));
@@ -109,7 +106,6 @@ mod tests {
             ("bob", 2, Binder::Signer, "bob holds credentials bound to no GitHub user"),
             ("dev-a", 2, Binder::Operator, "dev-a is taken: an ant's credentials"),
             ("enroll-x", 2, Binder::Signer, "enroll-x is taken: enrollment credentials"),
-            ("human", 2, Binder::Operator, "human is the default human"),
             ("channel-manager", 2, Binder::Signer, "reserved"),
             ("bootstrap", 2, Binder::Signer, "reserved"),
             ("signer", 2, Binder::Signer, "reserved"),

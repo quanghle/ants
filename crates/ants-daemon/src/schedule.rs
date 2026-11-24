@@ -116,9 +116,6 @@ impl Schedule {
     /// Check `entry`, reading its cron in `timezone` (UTC when None) unless it names its own, and resolving its
     /// credentials path with `resolve`.
     pub fn from_entry(entry: Entry, timezone: Option<&TimeZone>, resolve: impl Fn(&Path) -> PathBuf) -> Result<Self> {
-        if entry.name.is_human() {
-            bail!("the default human is no schedule");
-        }
         if ants_proto::BuiltinAnt::from_id(entry.name.as_str()).is_some() {
             bail!("{} is reserved for a built-in ant", entry.name);
         }
@@ -615,8 +612,6 @@ mod tests {
         }
         let e = entry("name = \"p\"\ntext = \" \"\ncron = \"@daily\"\nant = \"dev-a\"\n").unwrap_err();
         assert!(e.to_string().contains("empty text"), "{e}");
-        let e = entry("name = \"human\"\ntext = \"t\"\ncron = \"@daily\"\nant = \"dev-a\"\n").unwrap_err();
-        assert!(e.to_string().contains("no schedule"), "{e}");
     }
 
     #[test]

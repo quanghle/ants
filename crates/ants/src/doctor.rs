@@ -13,7 +13,7 @@ use std::time::Duration;
 use ants_daemon::config;
 use ants_daemon::harness::{self, Harnesses};
 use ants_daemon::secrets::creds;
-use ants_proto::{ColonyEntry, JsDomain};
+use ants_proto::{ColonyEntry, JsDomain, UserId};
 use async_nats::jetstream;
 use serde::Serialize;
 
@@ -111,6 +111,8 @@ pub struct Setup {
     pub nats: String,
     pub creds: Option<PathBuf>,
     pub js_domain: Option<JsDomain>,
+    /// Whom the CLI acts as without credentials.
+    pub human: Option<UserId>,
     /// The config file of the machine's ants.
     pub config: PathBuf,
     /// The leaf node configuration of `ants leaf config`.
@@ -207,7 +209,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     // After the CLI's connection, which has the hub load the team's account if no member connected yet.
     checks.push(check_store_account(setup, through_leaf).await);
     checks.extend(check_backup(&setup.team));
-    let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());
+    let human = identity.as_ref().filter(|i| i.finding.is_some()).map(|i| &i.me).filter(|me| me.role.is_human());
     checks.extend(check_leaf(setup, leaf, ants, human, connected.as_ref(), managed, now).await);
     let (services, transports) = {
         let mut services = Services::under(setup.home.clone());

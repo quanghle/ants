@@ -66,7 +66,7 @@ fn ants_write_only_their_own_chain_and_read_every_one() {
     }
     assert!(!a.publish.iter().any(|s| s.starts_with("$KV.ants_chains.") && s != "$KV.ants_chains.dev-a"));
     assert!(!a.publish.iter().any(|s| s.contains("CREATE.KV_ants_chains")), "only humans create the bucket");
-    let human = Permissions::for_user(&UserId::human(), Role::Human);
+    let human = Permissions::for_user(&crate::human(), Role::Human);
     assert!(human.publish.iter().any(|s| s == "$JS.API.STREAM.CREATE.KV_ants_chains"));
     assert!(!human.publish.iter().any(|s| s.starts_with("$KV.ants_chains.")), "only the ant writes its chain");
 

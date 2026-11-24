@@ -26,7 +26,7 @@ fn a_leaf_carries_an_assistant_s_rights_as_it_would_an_ant_s() {
 
 #[test]
 fn leaf_permissions_cover_each_user_once() {
-    let (human, a, b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, a, b) = (crate::human(), p("dev-a"), p("dev-b"));
     let m1: Machine = "m1".parse().unwrap();
     let all = [(&a, Role::Ant), (&b, Role::Ant), (&human, Role::Human)];
     let leaf = Permissions::for_leaf(&m1, all);
@@ -119,7 +119,7 @@ fn outboxes_take_inbox_notes_channel_dead_letter_and_timeline_subjects_only() {
         assert!(a.publish.iter().any(|have| have == s), "{s} missing from {:?}", a.publish);
     }
     assert!(!a.publish.iter().any(|s| s.starts_with("ants.out.approvals")));
-    let human = Permissions::for_user(&UserId::human(), Role::Human);
+    let human = Permissions::for_user(&crate::human(), Role::Human);
     assert!(human.publish.iter().any(|s| s == "ants.out.inbox.>"));
     assert!(human.publish.iter().any(|s| s == "ants.out.chan.*.human"));
     assert!(!human.publish.iter().any(|s| s.starts_with("ants.out.dead")), "a human's dead letters need the hub");
@@ -138,7 +138,7 @@ fn the_hub_admits_from_a_machine_what_its_users_may_send() {
             ("ants.in.m1.ants.out.timeline.*.dev-a".to_owned(), "ants.timeline.{{wildcard(1)}}.dev-a".to_owned()),
         ]
     );
-    let human = m1.admitted(&UserId::human(), Role::Human, true);
+    let human = m1.admitted(&crate::human(), Role::Human, true);
     assert_eq!(human[0], ("ants.in.m1.ants.out.inbox.>".to_owned(), "ants.inbox.>".to_owned()));
     assert!(human.iter().all(|(filter, _)| !filter.contains(".dead.")), "no dead letters of a human");
     assert!(human.iter().all(|(filter, _)| !filter.contains(".timeline.")), "no timeline of a human");

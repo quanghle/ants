@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
 use ants_daemon::colony::{self, Registration, Workload};
-use ants_proto::{Activity, ColonyEntry, MemoryLow, SignInNeeded, UserId};
+use ants_proto::{Activity, ColonyEntry, MemoryLow, SignInNeeded};
 use ants_test_support::{NatsServer as Server, colony_entry, eventually_within};
 use async_nats::jetstream::kv;
 
@@ -34,7 +34,7 @@ async fn read(kv: &kv::Store, ant: &str) -> Option<ColonyEntry> {
 #[tokio::test]
 async fn entries_refresh_leave_and_expire() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let ttl = Duration::from_secs(2);
     let kv = bus::ensure_colony(&js, ttl).await.unwrap();
     let config = js.get_stream("KV_ants_colony").await.unwrap().cached_info().config.clone();
@@ -71,7 +71,7 @@ async fn entries_refresh_leave_and_expire() {
 #[tokio::test]
 async fn listing_gives_every_entry_by_ant() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     assert!(colony::list_entries(&kv).await.unwrap().is_empty());
 
@@ -97,7 +97,7 @@ async fn wait_activity(kv: &kv::Store, ant: &str, activity: Activity, limit: Dur
 #[tokio::test]
 async fn turning_working_or_idle_shows_before_the_next_beat() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     workload.set_harnesses(1);
@@ -123,7 +123,7 @@ async fn wait_signed_out(kv: &kv::Store, ant: &str, signed_out: Option<&SignInNe
 #[tokio::test]
 async fn a_signed_out_harness_shows_until_it_signs_in_before_the_next_beat() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     let beat = Duration::from_secs(60);
@@ -140,7 +140,7 @@ async fn a_signed_out_harness_shows_until_it_signs_in_before_the_next_beat() {
 #[tokio::test]
 async fn memory_turning_low_or_recovering_shows_before_the_next_beat() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     let beat = Duration::from_secs(60);
@@ -164,7 +164,7 @@ async fn memory_turning_low_or_recovering_shows_before_the_next_beat() {
 #[tokio::test]
 async fn the_builtin_messenger_waits_for_another_daemons_messenger() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let every = Duration::from_millis(100);
 
@@ -209,7 +209,7 @@ async fn the_builtin_messenger_waits_for_another_daemons_messenger() {
 #[tokio::test]
 async fn a_waiting_daemon_takes_over_as_soon_as_the_entry_expires() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let ttl = Duration::from_secs(2);
     let kv = bus::ensure_colony(&js, ttl).await.unwrap();
 
@@ -230,7 +230,7 @@ async fn a_waiting_daemon_takes_over_as_soon_as_the_entry_expires() {
 #[tokio::test]
 async fn a_waiting_daemon_takes_over_soon_after_the_last_heartbeat() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let ttl = Duration::from_secs(2);
     let kv = bus::ensure_colony(&js, ttl).await.unwrap();
 
@@ -263,7 +263,7 @@ async fn wait_lost(registration: &Registration, limit: Duration) {
 #[tokio::test]
 async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let every = Duration::from_millis(100);
     // No heartbeat comes during the test: the watch of the entry does it all.
@@ -305,7 +305,7 @@ async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
 #[tokio::test]
 async fn of_two_builtin_messengers_only_the_latest_put_serves() {
     let Some(server) = Server::start() else { return };
-    let (_client, js) = bus::connect(&server.url, None, None, &UserId::human(), "test").await.unwrap();
+    let (_client, js) = bus::connect(&server.url, None, None, &ants_test_support::human(), "test").await.unwrap();
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let (every, beat) = (Duration::from_millis(100), Duration::from_millis(200));
 

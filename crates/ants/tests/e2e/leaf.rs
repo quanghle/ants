@@ -80,7 +80,8 @@ pub fn a_flapping_uplink_loses_no_message() {
     link_self(&bin, "copilot");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let mut daemon = as_user("dev-a", &leaf_url, &["daemon", "--harness", "copilot", "--provider", "none"]);
+    let mut daemon =
+        as_user("dev-a", &leaf_url, &["daemon", "--harness", "copilot", "--human", "human", "--provider", "none"]);
     daemon
         .arg("--home")
         .arg(&home)

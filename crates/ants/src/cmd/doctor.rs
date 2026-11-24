@@ -37,6 +37,7 @@ pub(crate) async fn run(conn: &Connection<'_>, args: DoctorArgs) -> Result<()> {
     let setup = doctor::Setup {
         nats: conn.nats.to_owned(),
         creds: conn.creds.map(Path::to_path_buf),
+        human: conn.human.cloned(),
         js_domain: conn.js_domain.cloned(),
         config: match config {
             Some(path) => path,

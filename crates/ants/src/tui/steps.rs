@@ -211,7 +211,7 @@ mod tests {
     async fn a_thread_reads_only_the_steps_kept_under_it() {
         let Some(server) = Server::start() else { return };
         let creds = server.creds_as(&user("alice"), ants_proto::Role::Human);
-        let (_alice, js) = Nats::new(&server.url, Some(&creds), None).unwrap().connect("test").await.unwrap();
+        let (_alice, js) = Nats::new(&server.url, Some(&creds), None, None).unwrap().connect("test").await.unwrap();
         let lead = user("lead");
         let (_lead, lead_js) = server.connect(&lead).await;
         let run: RunId = "0198c4ab-0000-7000-8000-000000000000".parse().unwrap();

@@ -29,7 +29,6 @@ fn channels_and_ants_parse_with_or_without_their_sigil() {
     assert!(parse_ant("@").is_err());
     assert!(parse_ant("channel-manager").is_err());
     let humans = Humans::from_entries([("alice", ants_proto::HumanEntry::new(p("alice")))]);
-    assert!(check_messenger_not_human(Some(&UserId::human()), &humans).is_err());
     assert!(check_messenger_not_human(Some(&p("alice")), &humans).is_err());
     assert!(check_messenger_not_human(Some(&p("dev-a")), &humans).is_ok());
     assert!(check_messenger_not_human(None, &humans).is_ok());
@@ -76,7 +75,7 @@ fn the_table_shows_members_and_the_messenger_or_its_default() {
 fn mentions_of_non_members_reach_nobody() {
     let mut entry = ChannelEntry::new(ops());
     entry.add_member(p("dev-a"));
-    let post = ChannelPost::new(ops(), UserId::human(), "@dev-a @dev-b @human @alice look");
+    let post = ChannelPost::new(ops(), ants_test_support::human(), "@dev-a @dev-b @human @alice look");
     assert_eq!(idle_mentions(&post, Some(&entry)), [&p("dev-b"), &p("alice")], "a human is no member either");
     entry.add_member(p("alice"));
     assert_eq!(idle_mentions(&post, Some(&entry)), [&p("dev-b")], "a human member is notified");
@@ -119,11 +118,11 @@ fn posts_and_descriptions_show_without_control_or_reordering_characters() {
 
 #[test]
 fn posts_group_by_thread_with_replies_indented() {
-    let a = at(ChannelPost::new(ops(), UserId::human(), "build is red @dev-a"), 0);
+    let a = at(ChannelPost::new(ops(), ants_test_support::human(), "build is red @dev-a"), 0);
     let b = at(ChannelPost::new(ops(), p("dev-b"), "deploying"), 1);
     let a1 = at(a.reply(p("dev-a"), "on it\nsee the log", &[], &Humans::default()).unwrap(), 2);
     // A reply stored before the post that started its thread, as one kept in an outbox can be.
-    let c = at(ChannelPost::new(ops(), UserId::human(), "late start"), 4);
+    let c = at(ChannelPost::new(ops(), ants_test_support::human(), "late start"), 4);
     let c1 = at(c.reply(p("dev-a"), "early reply", &[], &Humans::default()).unwrap(), 3);
     let orphan = at(ChannelPost::on_thread(ops(), "t1".parse().unwrap(), p("dev-b"), "lost root"), 5);
     let grouped = threads(vec![a.clone(), b.clone(), a1.clone(), c1.clone(), c.clone(), orphan.clone()]);
@@ -156,9 +155,9 @@ fn posts_group_by_thread_with_replies_indented() {
 #[test]
 fn archived_and_idle_threads_are_left_out_by_their_last_post() {
     let (done, quiet, busy) = (
-        at(ChannelPost::new(ops(), UserId::human(), "fixed"), 0),
-        at(ChannelPost::new(ops(), UserId::human(), "anyone?"), 1),
-        at(ChannelPost::new(ops(), UserId::human(), "deploying"), 2),
+        at(ChannelPost::new(ops(), ants_test_support::human(), "fixed"), 0),
+        at(ChannelPost::new(ops(), ants_test_support::human(), "anyone?"), 1),
+        at(ChannelPost::new(ops(), ants_test_support::human(), "deploying"), 2),
     );
     let mut archive = Archive { idle_before: Some(quiet.sent_at), ..Archive::default() };
     archive.marks.archive(&done.thread_id, 3);
@@ -173,7 +172,7 @@ fn archived_and_idle_threads_are_left_out_by_their_last_post() {
 #[tokio::test]
 async fn the_human_manages_channels_and_reads_them_back() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a) = (UserId::human(), p("dev-a"));
+    let (human, dev_a) = (ants_test_support::human(), p("dev-a"));
     let (client, js) = server.connect(&human).await;
     bus::ensure_stream(&js).await.unwrap();
     let kv = open(&js).await.unwrap();
@@ -241,7 +240,7 @@ async fn a_human_posts_under_its_own_name_and_keeps_the_thread_it_started() {
         crate::people::humans::register(js, &me(human)).await.unwrap();
     }
     let humans = crate::people::humans::load(&b_js, &me(&bob)).await;
-    assert!(humans.contains(&alice) && humans.contains(&bob) && humans.contains(&UserId::human()));
+    assert!(humans.contains(&alice) && humans.contains(&bob) && !humans.contains(&dev_a));
 
     let mut sub = a_client.subscribe(subject::chan_room(&ops())).await.unwrap();
     a_client.flush().await.unwrap();

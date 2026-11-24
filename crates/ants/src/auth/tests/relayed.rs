@@ -74,7 +74,7 @@ fn trail(script: &str, saved_by: Saver) -> SavedTrail {
 #[tokio::test]
 async fn a_message_a_stream_relayed_onto_a_subject_an_ant_may_not_publish_is_refused_by_its_reader() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (h, h_js) = server.connect(&human).await;
     let (a, _) = server.connect(&dev_a).await;
     let (b, b_js) = server.connect(&dev_b).await;
@@ -175,7 +175,7 @@ async fn a_message_a_stream_relayed_onto_a_subject_an_ant_may_not_publish_is_ref
 #[tokio::test]
 async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_read() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b) = (UserId::human(), p("dev-a"), p("dev-b"));
+    let (human, dev_a, dev_b) = (ants_test_support::human(), p("dev-a"), p("dev-b"));
     let (h, h_js) = server.connect(&human).await;
     let (a, _) = server.connect(&dev_a).await;
     let (_b, b_js) = server.connect(&dev_b).await;
@@ -224,7 +224,7 @@ async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_rea
     };
     let tips = DirectKv::whole(&b_js, None, TRAIL_TIPS_BUCKET).await.unwrap().past_relays();
     tips.put(tip.key(), serde_json::to_vec(&tip).unwrap()).await.unwrap();
-    let retired = TipRetired { by: human.clone(), at: chrono::Utc::now() };
+    let retired = TipRetired { by: Some(human.clone()), at: chrono::Utc::now() };
     let human_tips = DirectKv::whole(&h_js, None, TRAIL_TIPS_BUCKET).await.unwrap();
     human_tips.put(tip.retired_key(), serde_json::to_vec(&retired).unwrap()).await.unwrap();
     relays_onto(&a, &h, TRAIL_TIPS_BUCKET, &tip.key()).await;
@@ -233,7 +233,7 @@ async fn an_entry_put_before_messages_a_stream_relayed_onto_its_key_is_still_rea
         let board = TipBoard::new(tip.trail.clone(), entries);
         board.tip(&tip.id, None, chrono::Utc::now(), None).map(|ranked| ranked.status).ok()
     };
-    let by_human = TipStatus::Retired(Retirement::ByHuman { by: human.clone(), at: retired.at });
+    let by_human = TipStatus::Retired(Retirement::ByHuman { by: Some(human.clone()), at: retired.at });
     assert_eq!(status(latest(TRAIL_TIPS_BUCKET, "deploy.>").await), Some(by_human.clone()), "a human's CLI");
     let mut scanned = Vec::new();
     tips.scan("deploy.>", |key, value| scanned.push((key.to_owned(), value.to_vec()))).await.unwrap();
@@ -284,7 +284,7 @@ async fn ack_onto(client: &Client, own: &str, onto: &str) {
 #[tokio::test]
 async fn an_answer_the_server_sent_onto_a_subject_an_ant_or_a_webhook_may_not_publish_is_refused_by_its_reader() {
     let Some(server) = Server::start() else { return };
-    let (human, dev_a, dev_b, hook) = (UserId::human(), p("dev-a"), p("dev-b"), p("github"));
+    let (human, dev_a, dev_b, hook) = (ants_test_support::human(), p("dev-a"), p("dev-b"), p("github"));
     let (h, h_js) = server.connect(&human).await;
     let (a, _) = server.connect(&dev_a).await;
     let (_, b_js) = server.connect(&dev_b).await;
@@ -336,7 +336,7 @@ async fn an_answer_the_server_sent_onto_a_subject_an_ant_or_a_webhook_may_not_pu
 #[tokio::test]
 async fn a_message_a_stream_relayed_onto_a_human_an_approval_or_a_channel_is_refused_by_its_reader() {
     let Some(server) = Server::start() else { return };
-    let (human, alice, dev_a, dev_b) = (UserId::human(), p("alice"), p("dev-a"), p("dev-b"));
+    let (human, alice, dev_a, dev_b) = (ants_test_support::human(), p("alice"), p("dev-a"), p("dev-b"));
     let (h, h_js) = server.connect(&human).await;
     let (a, _) = server.connect(&dev_a).await;
     let (b, b_js) = server.connect(&dev_b).await;
@@ -346,7 +346,7 @@ async fn a_message_a_stream_relayed_onto_a_human_an_approval_or_a_channel_is_ref
 
     // A human entry: neither a daemon's registry nor a human's CLI takes dev-a for a human.
     let humans = crate::people::humans::ensure(&h_js).await.unwrap();
-    let registry = Registry::default();
+    let registry = Registry::new(ants_test_support::human());
     let _watching = registry.watch(b_js.clone(), Duration::from_secs(1));
     registry.loaded().await;
     let onto = format!("$KV.{HUMANS_BUCKET}.dev-a");

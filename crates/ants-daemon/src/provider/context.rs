@@ -172,24 +172,25 @@ mod tests {
     }
 
     fn by(envelope: &Envelope) -> Starter {
-        origin(envelope, None, &Humans::default()).by
+        origin(envelope, None, &Humans::of([ants_test_support::human()])).by
     }
 
     #[test]
     fn the_origin_is_the_provider_then_the_review_then_the_webhook_then_the_creator_then_the_owner_then_the_sender() {
-        let wake = Envelope { owner: Some(UserId::human()), ..message("dev-a").woken_by("sense") };
+        let wake = Envelope { owner: Some(ants_test_support::human()), ..message("dev-a").woken_by("sense") };
         assert_eq!(by(&wake), Starter::Provider { name: "sense".to_owned() });
         assert_eq!(by(&message("dev-b").woken_by("sense")), Starter::Ant { user: user("dev-b") }, "no wake");
-        let webhook = Envelope { owner: Some(UserId::human()), ..message("hook").from_webhook() };
+        let webhook = Envelope { owner: Some(ants_test_support::human()), ..message("hook").from_webhook() };
         assert_eq!(by(&webhook), Starter::Webhook { user: user("hook") });
         assert!(!origin(&webhook, None, &Humans::default()).trusted());
-        let created = Envelope { creator: Some(user("dev-c")), owner: Some(UserId::human()), ..message("dev-b") };
+        let created =
+            Envelope { creator: Some(user("dev-c")), owner: Some(ants_test_support::human()), ..message("dev-b") };
         assert_eq!(by(&created), Starter::Ant { user: user("dev-c") });
-        let owned = Envelope { owner: Some(UserId::human()), ..message("dev-b") };
-        assert_eq!(by(&owned), Starter::Human { user: UserId::human() });
-        let assisted = message("assistant").on_behalf(Some(UserId::human()));
-        assert_eq!(by(&assisted), Starter::Human { user: UserId::human() });
-        assert_eq!(by(&message("human")), Starter::Human { user: UserId::human() });
+        let owned = Envelope { owner: Some(ants_test_support::human()), ..message("dev-b") };
+        assert_eq!(by(&owned), Starter::Human { user: ants_test_support::human() });
+        let assisted = message("assistant").on_behalf(Some(ants_test_support::human()));
+        assert_eq!(by(&assisted), Starter::Human { user: ants_test_support::human() });
+        assert_eq!(by(&message("human")), Starter::Human { user: ants_test_support::human() });
         assert_eq!(by(&message("dev-b")), Starter::Ant { user: user("dev-b") });
         let narrowed = message("dev-b").with_allow(Some(vec!["read:*".to_owned()]));
         assert_eq!(by(&narrowed), Starter::Webhook { user: user("dev-b") }, "carrying on a webhook's thread");
@@ -199,7 +200,7 @@ mod tests {
         let channel: ChannelId = "ops".parse().unwrap();
         let posted = origin(&review, Some(channel.clone()), &Humans::default());
         assert_eq!(posted.by, Starter::Webhook { user: user("dev-b") }, "a post asks no review");
-        let relayed = Envelope { owner: Some(UserId::human()), ..review.from_webhook() };
+        let relayed = Envelope { owner: Some(ants_test_support::human()), ..review.from_webhook() };
         assert_eq!(by(&relayed), Starter::Webhook { user: user("dev-b") }, "a webhook asks no review");
         assert_eq!(origin(&message("dev-b"), Some(channel.clone()), &Humans::default()).channel, Some(channel));
     }
@@ -230,7 +231,7 @@ mod tests {
     #[test]
     fn the_first_origin_stays_until_one_from_outside_the_bus() {
         let ops: ChannelId = "ops".parse().unwrap();
-        let human = Origin { by: Starter::Human { user: UserId::human() }, channel: None };
+        let human = Origin { by: Starter::Human { user: ants_test_support::human() }, channel: None };
         let ant = Origin { by: Starter::Ant { user: user("dev-b") }, channel: Some(ops.clone()) };
         let hook = Origin { by: Starter::Webhook { user: user("hook") }, channel: None };
         assert_eq!(settled(None, ant.clone()), ant);

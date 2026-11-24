@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn registered_humans_are_humans_to_the_tools() {
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(ants_test_support::human(), &["alice"]);
     let home = home("humans");
     let (mcp, mut sent) = start_with(&home, Vec::new(), Arc::default(), humans).await;
     let mut current = Envelope::new(user("dev-b"), user("dev-a"), "q").with_owner(Some(user("alice")));
@@ -260,6 +260,35 @@ fn an_ant_its_daemon_cannot_serve_is_told_with_why_and_when_it_is_tried_again() 
     assert_eq!(picked, Some("dev-r"), "a served ant first");
 }
 
+/// `human` is no name of its own: a message to it, with the default human another, warns and names the human to
+/// address instead (ants-695wh).
+#[tokio::test]
+async fn a_message_to_human_names_the_default_human_instead() {
+    let colony = vec![listed("dev-a", &["rust"])];
+    let home = home("to-human");
+    let (mcp, mut sent) = start_with(&home, colony.clone(), Arc::default(), Registry::new(user("quang"))).await;
+    mcp.with_lookup(lookup_in(colony));
+    let current = Envelope::new(user("quang"), user("dev-a"), "go");
+    let _turn = mcp.begin(&current);
+    let (url, token) = http_server(&mcp, &current.thread_id);
+    let client = http_client(&url, &token).await;
+
+    let (ok, text) = call(&client, "ask_ant", serde_json::json!({"to": "human", "text": "?"})).await;
+    assert!(
+        !ok && text.contains("nor is human a human: ask_human asks the thread's owner, else the default human quang"),
+        "{text}"
+    );
+    assert!(sent.try_recv().is_err(), "not sent");
+    let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "human", "text": "done"})).await;
+    assert!(
+        ok && text.contains("Warning: the message waits in the inbox of human") && text.contains("default human quang"),
+        "{text}"
+    );
+    assert_eq!(sent.recv().await.unwrap().to, user("human"));
+    let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "quang", "text": "done"})).await;
+    assert!(ok && !text.contains("Warning"), "{text}");
+}
+
 #[tokio::test]
 async fn messages_to_an_ant_no_daemon_serves_say_so() {
     let mut stale = listed("dev-c", &["rust"]);
@@ -268,7 +297,7 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     let since = "2026-01-01T00:00:00Z".parse().unwrap();
     out.signed_out = Some(ants_proto::SignInNeeded { since, sign_in: None });
     let colony = vec![listed("dev-a", &["rust"]), listed("dev-b", &["rust"]), stale, out];
-    let humans = Registry::with(UserId::human(), &["alice"]);
+    let humans = Registry::with(user("quang"), &["alice", "human"]);
     let home = home("unserved");
     let (mcp, mut sent) = start_with(&home, colony.clone(), Arc::default(), humans).await;
     mcp.with_lookup(lookup_in(colony));
@@ -282,11 +311,12 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     assert!(!ok, "{text}");
     assert_eq!(
         text,
-        "Not sent, as dev-bb is not in the colony: no daemon serves dev-bb now. Closest names in the colony: \
-             dev-b, dev-c. send_message leaves a message waiting in the inbox of dev-bb instead."
+        "Not sent, as dev-bb is not in the colony: no daemon serves dev-bb now, nor is dev-bb a human: ask_human \
+             asks the thread's owner, else the default human quang. Closest names in the colony: dev-b, dev-c. \
+             send_message leaves a message waiting in the inbox of dev-bb instead."
     );
     let (ok, text) = call(&client, "ask_ant", ask("zed")).await;
-    assert!(!ok && text.contains("now. In the colony: dev-b, dev-c, ops."), "{text}");
+    assert!(!ok && text.contains("quang. In the colony: dev-b, dev-c, ops."), "{text}");
     let (ok, text) = call(&client, "ask_ant", ask("dev-c")).await;
     assert!(!ok && text.contains("dev-c is stale in the colony: the daemon on m1 last beat 10m"), "{text}");
     assert!(text.contains("Served ants sharing a capability of dev-c: dev-b."), "{text}");
@@ -305,7 +335,8 @@ async fn messages_to_an_ant_no_daemon_serves_say_so() {
     assert!(
         text.ends_with(
             "turns left). Warning: the message waits in the inbox of dev-bb, as dev-bb is not in the colony: no \
-                 daemon serves dev-bb now. Closest names in the colony: dev-b, dev-c."
+                 daemon serves dev-bb now, nor is dev-bb a human: ask_human asks the thread's owner, else the default human \
+                 quang. Closest names in the colony: dev-b, dev-c."
         ),
         "{text}"
     );

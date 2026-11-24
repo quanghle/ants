@@ -266,7 +266,7 @@ mod tests {
         let approval = StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Approval { request_id: Uuid::nil() });
         let escalation = Escalation::new(p("dev-a"), t.clone(), EscalationReason::Asked);
         let escalated =
-            StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Escalated { to: UserId::human(), escalation });
+            StatusEvent::new(p("dev-a"), t.clone(), StatusUpdate::Escalated { to: crate::human(), escalation });
         let json = serde_json::to_value(&escalated).unwrap();
         assert_eq!((json["type"].as_str(), json["to"].as_str()), (Some("escalated"), Some("human")));
         assert_eq!(

@@ -90,7 +90,7 @@ fn tips_list_live_ones_in_rank_order_and_retired_ones_with_all_or_under_a_key() 
     let pinned = tip("dev-a", "aaaaaaaa", Some("build"), "pin the base image", 2, "old");
     let migrations = tip("dev-b", "bbbbbbbb", None, "run the migrations first\n\n\tthen \u{1b}[31mdeploy", 5, "new");
     let mut by_human = tip("dev-a", "cccccccc", Some("build"), "use the cache", 9, "new");
-    by_human.retired = Some(TipRetired { by: p("alice"), at: now() - TimeDelta::days(1) });
+    by_human.retired = Some(TipRetired { by: Some(p("alice")), at: now() - TimeDelta::days(1) });
     let wrong = tip("dev-c", "dddddddd", Some("test"), "skip the flaky test", 3, "new");
     let votes = [
         (&pinned, vote("dev-b", TipVerdict::Helpful, 1)),
@@ -183,7 +183,7 @@ async fn humans_retire_tips_whether_their_trail_is_saved_or_not_and_removing_it_
 
     let dev_a = p("dev-a");
     let creds = server.creds_as(&dev_a, Role::Ant);
-    let ant = Nats::new(&server.url, Some(&creds), None).unwrap();
+    let ant = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let (_, ant_js) = ant.connect("test").await.unwrap();
     assert_eq!(tips::read(&ant_js, &name).await.unwrap().0.len(), 2, "an ant reads the tips");
     let retire = TipsArgs { retire: Some(current.id.clone()), ..args("deploy") };
@@ -192,19 +192,23 @@ async fn humans_retire_tips_whether_their_trail_is_saved_or_not_and_removing_it_
 
     let at = Utc::now();
     let retired = tips::retire(&js, &name, &current.id, None, &alice, at).await.unwrap();
-    assert_eq!(retired, TrailTip { retired: Some(TipRetired { by: alice.clone(), at }), ..current.clone() });
+    assert_eq!(retired, TrailTip { retired: Some(TipRetired { by: Some(alice.clone()), at }), ..current.clone() });
     let later = retired.written_at + TimeDelta::hours(3);
     let said = tips::retired(&retired, later);
     assert_eq!(said, "retired tip aaaaaaaa of trail deploy, left by dev-a 3h ago: pin the base image");
     let (board, _) = tips::read(&js, &name).await.unwrap();
     let status = board.tip(&current.id, None, Utc::now(), None).unwrap().status;
-    assert_eq!(status, TipStatus::Retired(Retirement::ByHuman { by: alice.clone(), at }));
+    assert_eq!(status, TipStatus::Retired(Retirement::ByHuman { by: Some(alice.clone()), at }));
     assert_eq!(board.tip(&current.id, None, Utc::now(), None).unwrap().votes.len(), 1, "its votes stay");
     // Its writer puts it again, under its own credentials: it stays retired.
     put_tip(&ant_js, &current).await;
     let (board, _) = tips::read(&ant_js, &name).await.unwrap();
     let status = board.tip(&current.id, None, Utc::now(), None).unwrap().status;
-    assert_eq!(status, TipStatus::Retired(Retirement::ByHuman { by: alice.clone(), at }), "its writer revives none");
+    assert_eq!(
+        status,
+        TipStatus::Retired(Retirement::ByHuman { by: Some(alice.clone()), at }),
+        "its writer revives none"
+    );
     let error = tips::retire(&js, &name, &current.id, None, &alice, at).await.unwrap_err().to_string();
     assert_eq!(error, "tip aaaaaaaa of trail deploy was retired by alice 0s ago");
     let error = tips::retire(&js, &name, &other.id, None, &alice, at).await.unwrap_err().to_string();

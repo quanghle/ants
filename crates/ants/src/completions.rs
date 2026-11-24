@@ -348,6 +348,7 @@ struct Connection {
     nats: String,
     creds: Option<PathBuf>,
     js_domain: Option<JsDomain>,
+    human: Option<UserId>,
     config: PathBuf,
 }
 
@@ -383,6 +384,7 @@ impl Connection {
             nats: flag("nats").or(file.nats).unwrap_or_else(|| crate::cli::DEFAULT_NATS.to_owned()),
             creds: flag("creds").map(PathBuf::from).or(file.creds),
             js_domain: flag("js-domain").and_then(|d| d.parse().ok()).or(file.js_domain),
+            human: std::env::var(crate::cli::HUMAN_ENV).ok().and_then(|h| h.parse().ok()).or(file.human),
             config,
         }
     }
@@ -412,7 +414,7 @@ fn lookup<T>(find: impl AsyncFnOnce(&jetstream::Context, &UserId) -> Result<Vec<
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return Vec::new() };
     runtime.block_on(async {
         let found = tokio::time::timeout(TIMEOUT, async {
-            let me = humans::Me::from_creds(connection.creds.as_deref())?;
+            let me = humans::Me::from_creds(connection.creds.as_deref(), connection.human.as_ref())?;
             let creds = connection.creds.as_deref();
             let domain = connection.js_domain.as_ref();
             let (_client, js) =

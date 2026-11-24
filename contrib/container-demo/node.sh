@@ -45,6 +45,7 @@ esac
 
 cat > /demo/config.toml <<EOF
 harness = "copilot"
+human = "human"
 machine = "$node"
 messenger = false
 nats = "nats://127.0.0.1:4222"

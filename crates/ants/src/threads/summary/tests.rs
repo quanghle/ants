@@ -60,7 +60,7 @@ async fn a_tldr_is_asked_kept_while_current_and_its_thread_left_out() {
     let (text, request) = tldr_request(&js, &work.thread_id).await.unwrap().unwrap();
     assert!(text.contains("alice -> dev-a: fix the build") && text.contains("dev-a -> alice: fixed"), "{text}");
     let creds = server.creds_as(&alice, Role::Human);
-    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let envelope = request_envelope(&alice, p("dev-a"), text, request.clone());
     let reply = tokio::time::timeout(Duration::from_secs(10), ask(&nats, &js, &envelope)).await.unwrap().unwrap();
     let sent = answering.await.unwrap();

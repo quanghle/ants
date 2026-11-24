@@ -86,7 +86,7 @@ impl super::Sense {
             ant: ant.clone(),
             identity: String::new(),
             thread: threads[0].0.clone(),
-            origin: Origin { by: Starter::Human { user: UserId::human() }, channel: None },
+            origin: Origin { by: Starter::Human { user: ants_test_support::human() }, channel: None },
             harness: "test".to_owned(),
             model: None,
             machine: "m1".to_owned(),

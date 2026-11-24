@@ -12,7 +12,8 @@ async fn run_trail_starts_a_saved_or_inline_trail_and_a_webhook_s_thread_runs_on
     let lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(dir.join("saved"))).await;
     let mcp = lead_mcp(&dir, &lead.js, &lead.trails).await;
 
-    let asked = Envelope::new(UserId::human(), ant("lead"), "count").with_owner(Some(UserId::human()));
+    let asked =
+        Envelope::new(ants_test_support::human(), ant("lead"), "count").with_owner(Some(ants_test_support::human()));
     let _turn = mcp.begin(&asked);
     let client = mcp_client(&mcp, &asked.thread_id).await;
     let script = format!("{META}args[\"n\"] * 10\n");
@@ -23,7 +24,7 @@ async fn run_trail_starts_a_saved_or_inline_trail_and_a_webhook_s_thread_runs_on
     let run = started(&text);
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(5) });
     let header = lead.header(&run).await;
-    assert_eq!((&header.thread, header.owner.as_ref()), (&asked.thread_id, Some(&UserId::human())));
+    assert_eq!((&header.thread, header.owner.as_ref()), (&asked.thread_id, Some(&ants_test_support::human())));
     let (ok, text) = run_trail(&client, json!({"name": "count", "script": script})).await;
     assert!(!ok && text.contains("either `name` or `script`"), "{text}");
     let limits = json!({"steps": 9, "at_once": 2, "turns": 30, "wall": "2h"});
@@ -61,7 +62,8 @@ async fn trail_status_and_stop_trail_reach_only_the_runs_the_ant_conducts() {
     let dir = scratch_dir("trail-mcp-status");
     let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
     let mcp = lead_mcp(&dir, &lead.js, &lead.trails).await;
-    let asked = Envelope::new(UserId::human(), ant("lead"), "review").with_owner(Some(UserId::human()));
+    let asked =
+        Envelope::new(ants_test_support::human(), ant("lead"), "review").with_owner(Some(ants_test_support::human()));
     let _turn = mcp.begin(&asked);
     let client = mcp_client(&mcp, &asked.thread_id).await;
     let script = format!("{META}phase(\"one\")\nawait agent(\"go\", ant=\"dev\", label=\"the go\")\n");
@@ -101,7 +103,7 @@ async fn trail_status_and_stop_trail_reach_only_the_runs_the_ant_conducts() {
     assert!(lead.reply(&step, "late").await, "a stopped step's reply is not prompted");
     assert!(lead.sends_no_step(Duration::from_millis(500)).await);
 
-    lead.trails.resume(&run, &UserId::human(), None).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), None).await.unwrap();
     let step = lead.step().await;
     assert!(lead.reply(&step, "went").await);
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("went") });

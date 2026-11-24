@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn an_image_takes_rows_under_its_line_where_it_fits_and_draws_only_whole() {
-        let message = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "look");
+        let message = Envelope::new(ants_test_support::human(), "dev-a".parse().unwrap(), "look");
         let bytes = png(40, 40);
         let attachment = files::reference("shot.png", "image/png", &bytes).unwrap();
         let [listed] =

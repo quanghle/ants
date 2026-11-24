@@ -34,7 +34,7 @@ fn escalator(js: &jetstream::Context, sessions: &DirectKv) -> Escalator {
     let chain = Chain { escalate_to: vec![ant("lead")], after: Some(Duration::from_millis(300)), ..Chain::default() };
     let ledger = Arc::new(Ledger::kv(sessions.clone(), ant("dev-a"), Caps::default()));
     let send = escalation::jetstream_sender(js.clone());
-    Escalator::new(ant("dev-a"), chain, colony(), Registry::default(), ledger, send)
+    Escalator::new(ant("dev-a"), chain, colony(), Registry::new(ants_test_support::human()), ledger, send)
 }
 
 async fn next(subscriber: &mut async_nats::Subscriber) -> Envelope {
@@ -50,12 +50,12 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
     let sessions = bus::ensure_sessions(&js, None, &ant("dev-a")).await.unwrap();
     let mut to_lead = client.subscribe(subject::inbox_of(&ant("lead"))).await.unwrap();
     let mut to_boss = client.subscribe(subject::inbox_of(&ant("boss"))).await.unwrap();
-    let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+    let mut to_human = client.subscribe(subject::inbox_of(&ants_test_support::human())).await.unwrap();
     let thread = ThreadId::generate();
     let mut status = client.subscribe(subject::status(&ant("dev-a"), &thread)).await.unwrap();
     client.flush().await.unwrap();
     let stuck = |text: &str, id: &str| {
-        let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), UserId::human(), text);
+        let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), ants_test_support::human(), text);
         Stuck::new(EscalationReason::TurnBudget, notice, id.to_owned(), None)
     };
 
@@ -99,13 +99,13 @@ async fn an_escalation_climbs_past_its_deadline_after_a_restart_and_goes_to_the_
 
         // boss's chain leads back to dev-a, so the human gets the thread.
         let escalated = escalator.escalate(stuck("Spent again.", "e3")).await.unwrap();
-        assert_eq!(escalated, Escalated::Owner(UserId::human()));
+        assert_eq!(escalated, Escalated::Owner(ants_test_support::human()));
         let notice = next(&mut to_human).await;
         assert!(notice.text.starts_with("Spent again.\n\n[ants] The escalation of dev-a reached level 2"));
         assert!(notice.text.ends_with("dev-a had it already, so the chains loop."), "{}", notice.text);
         assert_eq!(notice.escalation.as_deref().map(|e| e.level), Some(2));
 
-        let mut human = Envelope::on_thread(thread.clone(), UserId::human(), ant("dev-a"), "carry on");
+        let mut human = Envelope::on_thread(thread.clone(), ants_test_support::human(), ant("dev-a"), "carry on");
         assert!(!escalator.arrived(&mut human, Role::Human).await.unwrap());
         assert_eq!(escalator.ledger().pending(&thread).await.unwrap(), None, "a human ends it");
     };
@@ -140,13 +140,13 @@ async fn an_escalation_climbs_past_a_leader_gone_from_the_colony_through_the_cha
         ant("dev-a"),
         chain,
         offline,
-        Registry::default(),
+        Registry::new(ants_test_support::human()),
         ledger,
         escalation::jetstream_sender(js.clone()),
     )
     .with_chains(chains::jetstream_chains(js.clone()));
     let thread = ThreadId::generate();
-    let notice = Envelope::on_thread(thread, ant("dev-a"), UserId::human(), "Turn budget spent.");
+    let notice = Envelope::on_thread(thread, ant("dev-a"), ants_test_support::human(), "Turn budget spent.");
     let stuck = Stuck::new(EscalationReason::TurnBudget, notice, "e1".to_owned(), None);
     escalator.escalate(stuck).await.unwrap();
     assert_eq!(next(&mut to_lead).await.escalation.as_deref().map(|e| e.level), Some(1));
@@ -168,13 +168,14 @@ async fn an_escalation_on_a_thread_spun_off_a_channel_thread_passes_the_link_on(
     let sessions = bus::ensure_sessions(&js, None, &ant("dev-a")).await.unwrap();
     bus::ensure_links(&js).await.unwrap();
     let mut to_boss = client.subscribe(subject::inbox_of(&ant("boss"))).await.unwrap();
-    let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+    let mut to_human = client.subscribe(subject::inbox_of(&ants_test_support::human())).await.unwrap();
     client.flush().await.unwrap();
     // lead created the channel thread; dev-a got stuck on a thread spun off it.
     let (channel_thread, thread) = (ThreadId::generate(), ThreadId::generate());
-    let notice = Envelope::on_thread(channel_thread.clone(), ant("dev-a"), UserId::human(), "Turn budget spent.")
-        .with_creator(Some(ant("lead")))
-        .spun_off(thread.clone());
+    let notice =
+        Envelope::on_thread(channel_thread.clone(), ant("dev-a"), ants_test_support::human(), "Turn budget spent.")
+            .with_creator(Some(ant("lead")))
+            .spun_off(thread.clone());
     let stuck = Stuck::new(EscalationReason::TurnBudget, notice, "e1".to_owned(), None);
 
     let escalator = escalator(&js, &sessions);
@@ -200,20 +201,20 @@ async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart
     let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
     let sessions = bus::ensure_sessions(&js, None, &ant("dev-a")).await.unwrap();
-    let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+    let mut to_human = client.subscribe(subject::inbox_of(&ants_test_support::human())).await.unwrap();
     client.flush().await.unwrap();
     let escalator = || {
         let chain = Chain { remind: Some(Duration::from_millis(300)), stand_in: Some(ant("bob")), ..Chain::default() };
         let ledger = Arc::new(Ledger::kv(sessions.clone(), ant("dev-a"), Caps::default()));
         let send = escalation::jetstream_sender(js.clone());
-        Escalator::new(ant("dev-a"), chain, colony(), Registry::default(), ledger, send)
+        Escalator::new(ant("dev-a"), chain, colony(), Registry::new(ants_test_support::human()), ledger, send)
     };
     let thread = ThreadId::generate();
-    let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), UserId::human(), "Turn budget spent.");
+    let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), ants_test_support::human(), "Turn budget spent.");
     let stuck = Stuck::new(EscalationReason::TurnBudget, notice, "e1".to_owned(), None);
 
     let first = escalator();
-    assert_eq!(first.escalate(stuck).await.unwrap(), Escalated::Owner(UserId::human()));
+    assert_eq!(first.escalate(stuck).await.unwrap(), Escalated::Owner(ants_test_support::human()));
     let told = next(&mut to_human).await;
     let escalation = told.escalation.as_deref().expect("an escalation, for push sinks").clone();
     assert_eq!((escalation.level, escalation.reason), (0, EscalationReason::TurnBudget));
@@ -249,7 +250,7 @@ async fn an_escalation_reaching_the_human_is_pushed_and_reminded_after_a_restart
             format!("[ants] bob answered the escalation of dev-a on thread {thread} in place of human: carry on");
         assert_eq!((answered.text.as_str(), &answered.escalation), (expected.as_str(), &None));
         assert_ne!(answered.thread_id, thread, "on a thread of its own");
-        let mut again = Envelope::on_thread(thread.clone(), UserId::human(), ant("dev-a"), "thanks");
+        let mut again = Envelope::on_thread(thread.clone(), ants_test_support::human(), ant("dev-a"), "thanks");
         assert!(!escalator.arrived(&mut again, Role::Human).await.unwrap());
     };
     tokio::select! {
@@ -265,20 +266,22 @@ async fn a_stand_in_s_answer_to_an_escalation_reaching_the_human_without_reminde
     let (client, js) = bus::connect(&server.url, None, None, &ant("dev-a"), "test").await.unwrap();
     bus::ensure_stream(&js).await.unwrap();
     let sessions = bus::ensure_sessions(&js, None, &ant("dev-a")).await.unwrap();
-    let mut to_human = client.subscribe(subject::inbox_of(&UserId::human())).await.unwrap();
+    let mut to_human = client.subscribe(subject::inbox_of(&ants_test_support::human())).await.unwrap();
     client.flush().await.unwrap();
     let chain = Chain { remind: None, stand_in: Some(ant("bob")), ..Chain::default() };
     let ledger = Arc::new(Ledger::kv(sessions, ant("dev-a"), Caps::default()));
     let send = escalation::jetstream_sender(js.clone());
-    let escalator = Escalator::new(ant("dev-a"), chain, colony(), Registry::default(), ledger, send);
+    let escalator =
+        Escalator::new(ant("dev-a"), chain, colony(), Registry::new(ants_test_support::human()), ledger, send);
     let thread = ThreadId::generate();
     let escalate = |id: &str| {
-        let notice = Envelope::on_thread(thread.clone(), ant("dev-a"), UserId::human(), "Turn budget spent.");
+        let notice =
+            Envelope::on_thread(thread.clone(), ant("dev-a"), ants_test_support::human(), "Turn budget spent.");
         escalator.escalate(Stuck::new(EscalationReason::TurnBudget, notice, id.to_owned(), None))
     };
     let human_says = |from: UserId, text: &str| Envelope::on_thread(thread.clone(), from, ant("dev-a"), text);
 
-    assert_eq!(escalate("e1").await.unwrap(), Escalated::Owner(UserId::human()));
+    assert_eq!(escalate("e1").await.unwrap(), Escalated::Owner(ants_test_support::human()));
     next(&mut to_human).await;
     let pending = escalator.ledger().pending(&thread).await.unwrap().expect("kept, so the next one waits for it");
     assert!(pending.at_owner() && pending.deadline.is_none(), "{pending:?}");
@@ -291,12 +294,12 @@ async fn a_stand_in_s_answer_to_an_escalation_reaching_the_human_without_reminde
         format!("[ants] bob answered the escalation of dev-a on thread {thread} in place of human: carry on");
     assert_eq!(answered.text, expected);
     // The answer ended it: the human's own message next tells nothing.
-    assert!(!escalator.arrived(&mut human_says(UserId::human(), "thanks"), Role::Human).await.unwrap());
+    assert!(!escalator.arrived(&mut human_says(ants_test_support::human(), "thanks"), Role::Human).await.unwrap());
 
     // Answered by the human it reached, it ends untold, and a later message of the stand-in tells nothing either.
     escalate("e2").await.unwrap();
     next(&mut to_human).await;
-    assert!(!escalator.arrived(&mut human_says(UserId::human(), "on it"), Role::Human).await.unwrap());
+    assert!(!escalator.arrived(&mut human_says(ants_test_support::human(), "on it"), Role::Human).await.unwrap());
     assert!(!escalator.arrived(&mut human_says(ant("bob"), "noted"), Role::Human).await.unwrap());
     assert!(timeout(Duration::from_millis(500), to_human.next()).await.is_err(), "one answer told");
 }
@@ -311,10 +314,13 @@ async fn a_stored_question_is_told_on_the_ant_s_status_without_the_message_s_tex
     client.flush().await.unwrap();
     let options = ["yes".to_owned(), "not yet".to_owned()];
     let question = ants_proto::Question::new("Ship it?", &options, false).unwrap();
-    let asking = Envelope::asking(thread, ant("dev-a"), UserId::human(), question.clone());
+    let asking = Envelope::asking(thread, ant("dev-a"), ants_test_support::human(), question.clone());
     escalation::jetstream_sender(js)(asking.clone(), asking.id.to_string()).await.unwrap();
     let told = timeout(WAIT, status.next()).await.expect("no status").unwrap();
     let told: StatusEvent = serde_json::from_slice(&told.payload).unwrap();
-    assert_eq!(told.update, StatusUpdate::Asked { to: UserId::human(), message: asking.id, question: question.into() });
+    assert_eq!(
+        told.update,
+        StatusUpdate::Asked { to: ants_test_support::human(), message: asking.id, question: question.into() }
+    );
     assert!(!String::from_utf8_lossy(&serde_json::to_vec(&told).unwrap()).contains("1. yes"));
 }

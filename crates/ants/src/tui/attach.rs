@@ -436,7 +436,7 @@ mod tests {
     use crate::test_support::Server;
 
     fn listed(name: &str, bytes: &[u8]) -> Listed {
-        let message = Envelope::new(UserId::human(), "dev-a".parse().unwrap(), "look");
+        let message = Envelope::new(ants_test_support::human(), "dev-a".parse().unwrap(), "look");
         let attachment = files::reference(name, ants_proto::guess_mime(name), bytes).unwrap();
         ants_client::attachments::listed(&[attachment], |id| message.attachment_handle(id)).remove(0)
     }

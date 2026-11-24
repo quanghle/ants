@@ -25,7 +25,7 @@ async fn decide_approval_answers_a_request_from_the_chain() {
         panic!("a chain hop")
     };
     let asked = Envelope::on_thread(request.thread_id.clone(), user("dev-b"), user("dev-a"), "may it?")
-        .with_owner(Some(UserId::human()))
+        .with_owner(Some(ants_test_support::human()))
         .with_escalation(Some(*escalation));
     let client = {
         let (url, token) = http_server(&mcp, &asked.thread_id);
@@ -47,7 +47,7 @@ async fn decide_approval_answers_a_request_from_the_chain() {
     assert!(ok, "{text}");
     let out = sent.recv().await.unwrap();
     assert_eq!((&out.from, &out.to, &out.thread_id), (&user("dev-a"), &user("dev-b"), &request.thread_id));
-    assert_eq!(out.owner, Some(UserId::human()));
+    assert_eq!(out.owner, Some(ants_test_support::human()));
     assert_eq!(out.chain_decision(&request, &[user("dev-a")]).unwrap().verdict, Verdict::AllowOnce);
     assert!(sent.try_recv().is_err(), "one decision");
 }
@@ -79,7 +79,7 @@ async fn start_escalating_with(
     let chain =
         crate::escalation::Chain { escalate_to: escalate_to.iter().map(|p| user(p)).collect(), ..Default::default() };
     let ledger = Arc::new(crate::limits::caps::Ledger::memory(user("dev-a"), crate::limits::caps::Caps::default()));
-    let humans = Registry::default();
+    let humans = Registry::new(ants_test_support::human());
     let escalator = Escalator::new(user("dev-a"), chain, colony.clone(), humans.clone(), ledger, send);
     let notes = Arc::new(MemoryNotes::default());
     let mcp = Mcp::start(user("dev-a"), home, outbox, colony, notes, humans, Some(Arc::new(escalator)));
@@ -175,7 +175,7 @@ async fn escalate_on_a_thread_another_ant_created_goes_up_the_creator_s_chain() 
     let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "stuck"})).await;
     assert!(ok && text.contains("to its owner human"), "{text}");
     let notice = sent.try_recv().unwrap();
-    assert_eq!(notice.to, UserId::human());
+    assert_eq!(notice.to, ants_test_support::human());
     assert!(notice.text.contains("starts at lead, which created thread"), "{}", notice.text);
 }
 
@@ -194,7 +194,7 @@ async fn escalate_without_a_chain_goes_to_the_owner() {
     let (ok, text) = call(&client, "escalate", serde_json::json!({"issue": "stuck"})).await;
     assert!(ok && text.ends_with("to its owner human: dev-a has no escalate_to chain."), "{text}");
     let notice = sent.try_recv().unwrap();
-    assert_eq!((notice.to, notice.in_reply_to), (UserId::human(), Some(current.id)));
+    assert_eq!((notice.to, notice.in_reply_to), (ants_test_support::human(), Some(current.id)));
 }
 
 #[tokio::test]

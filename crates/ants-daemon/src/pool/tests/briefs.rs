@@ -6,7 +6,7 @@ use super::*;
 async fn briefed(answer: Answer, text: &str) -> (Prompt, Arc<Fake>) {
     let (provider, fake) = crate::provider::brief::fake::connected(answer, true).await;
     let caller = Caller { ant: "dev-a".parse().unwrap(), identity: "id-a".to_owned(), machine: "m1".to_owned() };
-    let origin = Origin { by: Starter::Human { user: ants_proto::UserId::human() }, channel: None };
+    let origin = Origin { by: Starter::Human { user: ants_test_support::human() }, channel: None };
     let brief = Briefing::new(provider, Ok(caller), thread(1), origin);
     (Prompt { brief, ..with_history(text) }, fake)
 }

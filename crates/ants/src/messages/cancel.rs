@@ -67,7 +67,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_waits_for_any_daemon_of_the_ant_to_cancel_the_prompt() {
-        let request = CancelRequest::new("dev-a".parse().unwrap(), "t1".parse().unwrap(), UserId::human());
+        let request = CancelRequest::new("dev-a".parse().unwrap(), "t1".parse().unwrap(), ants_test_support::human());
         let msg = |answer: &CancelReply| async_nats::Message {
             subject: answer.subject().into(),
             reply: None,
@@ -77,7 +77,7 @@ mod tests {
             description: None,
             length: 0,
         };
-        let other = CancelRequest::new(request.ant.clone(), request.thread_id.clone(), UserId::human());
+        let other = CancelRequest::new(request.ant.clone(), request.thread_id.clone(), ants_test_support::human());
         let (idle, busy) = (msg(&request.answer(false)), msg(&request.answer(true)));
         let (long, grace) = (Duration::from_secs(60), Duration::from_millis(50));
         let answers = |msgs: Vec<async_nats::Message>| futures::stream::iter(msgs).chain(futures::stream::pending());

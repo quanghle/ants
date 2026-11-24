@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn humans_ask_and_only_the_ant_hears_and_answers_cancel_requests() {
     let t: ThreadId = "t1".parse().unwrap();
-    let request = CancelRequest::new(p("dev-a"), t, UserId::human());
+    let request = CancelRequest::new(p("dev-a"), t, crate::human());
     assert_eq!(
         (request.subject(), request.reply_subject()),
         ("ants.cancel.dev-a.t1".into(), "ants.cancelled.dev-a.t1".into())
@@ -25,7 +25,7 @@ fn humans_ask_and_only_the_ant_hears_and_answers_cancel_requests() {
     let json = serde_json::to_string(&reply).unwrap();
     assert_eq!(serde_json::from_str::<CancelReply>(&json).unwrap(), reply);
 
-    let human = Permissions::for_user(&UserId::human(), Role::Human);
+    let human = Permissions::for_user(&crate::human(), Role::Human);
     assert!(human.publish.iter().any(|s| s == subject::ALL_CANCELS));
     assert!(human.subscribe.iter().any(|s| s == subject::ALL), "the answers");
     let a = Permissions::for_user(&p("dev-a"), Role::Ant);

@@ -59,7 +59,7 @@ async fn the_reply_carries_the_title_suggested_during_its_turn() {
         }
 
         // A reply posted to a channel thread carries it too.
-        let ask = ChannelPost::new(ops.clone(), UserId::human(), "hold: @dev-a the deploy failed");
+        let ask = ChannelPost::new(ops.clone(), ants_test_support::human(), "hold: @dev-a the deploy failed");
         bus.post(&ask).await;
         until("the post to be prompted", || log.locked().prompted == 4).await;
         suggest(&ask.thread_id, "Fix the deploy").await;
@@ -142,7 +142,7 @@ async fn the_answer_carries_the_files_attached_during_its_turn() {
         assert_eq!(bytes, b"# done");
 
         // A channel post carries them too; one gone by the end of the turn leaves them out, the answer saying why.
-        let ask = ChannelPost::new(ops.clone(), UserId::human(), "hold: @dev-a the report?");
+        let ask = ChannelPost::new(ops.clone(), ants_test_support::human(), "hold: @dev-a the report?");
         bus.post(&ask).await;
         until("the post to be prompted", || log.locked().prompted == 2).await;
         attach_to_reply(&ask.thread_id, &["report.md"]).await;
@@ -173,7 +173,7 @@ async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b"]).await;
-    let root = ChannelPost::new(ops.clone(), UserId::human(), "deploy friday?");
+    let root = ChannelPost::new(ops.clone(), ants_test_support::human(), "deploy friday?");
     bus.post(&root).await;
     let ask = root.reply("dev-b".parse().unwrap(), "@dev-a agree?", &[], &Humans::default()).unwrap();
     let ask_seq = bus.post(&ask).await;
@@ -197,9 +197,9 @@ async fn a_mentioned_member_answers_on_the_thread_after_the_posts_it_missed() {
     let mut owned: ChannelEntry = serde_json::from_slice(&bus.channels.get("ops").await.unwrap().unwrap()).unwrap();
     owned.owner = Some(bus.dev.clone());
     bus.channels.put(owned.key(), serde_json::to_vec(&owned).unwrap().into()).await.unwrap();
-    let more = root.reply(UserId::human(), "rollback plan is ready", &[], &Humans::default()).unwrap();
+    let more = root.reply(ants_test_support::human(), "rollback plan is ready", &[], &Humans::default()).unwrap();
     bus.post(&more).await;
-    let again = root.reply(UserId::human(), "@dev-a and now?", &[], &Humans::default()).unwrap();
+    let again = root.reply(ants_test_support::human(), "@dev-a and now?", &[], &Humans::default()).unwrap();
     let again_seq = bus.post(&again).await;
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
@@ -225,9 +225,9 @@ async fn a_member_s_session_on_a_channel_thread_starts_with_the_channel_s_descri
     let mut entry: ChannelEntry = serde_json::from_slice(&bus.channels.get("ops").await.unwrap().unwrap()).unwrap();
     entry.set_description(Some("Incidents and deploys of the shop.")).unwrap();
     bus.channels.put(entry.key(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
-    let root = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a deploy friday?");
+    let root = ChannelPost::new(ops.clone(), ants_test_support::human(), "@dev-a deploy friday?");
     bus.post(&root).await;
-    let again = root.reply(UserId::human(), "@dev-a and now?", &[], &Humans::default()).unwrap();
+    let again = root.reply(ants_test_support::human(), "@dev-a and now?", &[], &Humans::default()).unwrap();
     let again_seq = bus.post(&again).await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
@@ -253,7 +253,7 @@ async fn an_answer_to_a_webhook_goes_to_the_thread_s_owner_or_nowhere() {
     let Some((bus, mut to_human)) = Bus::start().await else { return };
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
-    let (hook, human) = ("github".parse::<UserId>().unwrap(), UserId::human());
+    let (hook, human) = ("github".parse::<UserId>().unwrap(), ants_test_support::human());
     let mut to_hook = bus.client.subscribe(subject::inbox_of(&hook)).await.unwrap();
     bus.client.flush().await.unwrap();
     let owned = Envelope::new(hook.clone(), bus.dev.clone(), "build red").with_owner(Some(human.clone()));
@@ -292,7 +292,7 @@ async fn a_run_s_rating_invitation_rates_it_under_a_webhook_s_own_rules() {
     let trails = bus.conduct().await;
     let (launch, _, _) = fake::launch();
     let pool = Pool::new(launch.with_policy(PermissionPolicy::allow_all()), SessionStore::memory(), 2, IDLE);
-    let (hook, human) = ("github".parse::<UserId>().unwrap(), UserId::human());
+    let (hook, human) = ("github".parse::<UserId>().unwrap(), ants_test_support::human());
     let hooked = Envelope::new(hook.clone(), bus.dev.clone(), "build red: ask rate_trail")
         .with_owner(Some(human.clone()))
         .with_allow(Some(vec!["read:*".to_owned()]))
@@ -365,8 +365,9 @@ async fn the_reply_to_a_step_tells_what_the_runs_started_answering_it_spent() {
         tip_key: None,
         bounds: Some(bounds),
     };
-    let asked =
-        Envelope::new(lead.clone(), bus.dev.clone(), "hold: build it").with_owner(Some(UserId::human())).as_step(step);
+    let asked = Envelope::new(lead.clone(), bus.dev.clone(), "hold: build it")
+        .with_owner(Some(ants_test_support::human()))
+        .as_step(step);
     bus::publish_json(&bus.js, asked.subject(), &asked, None).await.unwrap();
 
     let ctrl_c = Arc::new(Semaphore::new(0));
@@ -403,7 +404,10 @@ async fn the_answer_to_work_an_ant_handed_itself_goes_to_a_human() {
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
         let reply = next_envelope(&mut to_human).await;
-        assert_eq!((&reply.from, &reply.to, reply.in_reply_to), (&bus.dev, &UserId::human(), Some(handed.id)));
+        assert_eq!(
+            (&reply.from, &reply.to, reply.in_reply_to),
+            (&bus.dev, &ants_test_support::human(), Some(handed.id))
+        );
         bus.until_acked(seq).await;
         ctrl_c.add_permits(1);
     };
@@ -419,7 +423,7 @@ async fn members_woken_by_one_post_spend_the_thread_s_turns_together() {
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["dev-a", "dev-b", "dev-c"]).await;
-    let human_id = UserId::human();
+    let human_id = ants_test_support::human();
     let mut review = ChannelPost::new(ops.clone(), human_id.clone(), "@dev-a @dev-b @dev-c review");
     review.turn_budget = 3;
     bus.post(&review).await;
@@ -456,7 +460,7 @@ async fn a_reply_spending_a_turn_is_stored_only_while_no_other_post_reached_the_
     let Some((bus, _)) = Bus::start().await else { return };
     let (ops, _posts) = bus.channel("ops", &["dev-a", "dev-b"]).await;
     let humans = Humans::default();
-    let mut review = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a @dev-b review");
+    let mut review = ChannelPost::new(ops.clone(), ants_test_support::human(), "@dev-a @dev-b review");
     review.turn_budget = 3;
     let at = bus.post(&review).await;
     let filter = subject::chan_room(&ops);
@@ -485,7 +489,7 @@ async fn a_reply_spending_a_turn_is_stored_only_while_no_other_post_reached_the_
     assert_eq!(read.later, [b.clone(), a.clone()]);
     assert_eq!(bus.stored(&subject::chan(&ops, &bus.dev)).await, 1);
     // A post on another thread of the channel moves it on too.
-    let other = ChannelPost::new(ops.clone(), UserId::human(), "unrelated");
+    let other = ChannelPost::new(ops.clone(), ants_test_support::human(), "unrelated");
     let last = bus.post(&other).await;
     let read = bus.threads.context(&review, at, Earlier::Omitted, &humans).await.unwrap();
     assert_eq!((read.later.len(), read.last_seq), (2, last));
@@ -603,7 +607,7 @@ async fn a_member_s_answers_to_an_ant_s_replies_to_its_own_post_are_not_posted()
     // Read after `green`, its answer, moved the ant's last post seen past its own.
     let tests = own.reply(dev_b.clone(), "@dev-a tests pass too", &[], &humans).unwrap();
     bus.post(&tests).await;
-    let human = tests.reply(UserId::human(), "@dev-b and the deploy?", &[], &humans).unwrap();
+    let human = tests.reply(ants_test_support::human(), "@dev-b and the deploy?", &[], &humans).unwrap();
     bus.post(&human).await;
     let deploy = human.reply(dev_b.clone(), "@dev-a can you deploy?", &[], &humans).unwrap();
     let deploy_seq = bus.post(&deploy).await;
@@ -824,7 +828,7 @@ async fn fresh_budget_of(turn_budget: u32) {
     let (launch, _log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["dev-a"]).await;
-    let (human, hook) = (UserId::human(), "github".parse::<UserId>().unwrap());
+    let (human, hook) = (ants_test_support::human(), "github".parse::<UserId>().unwrap());
     let ask = Envelope::new(human.clone(), bus.dev.clone(), "hello");
     assert_eq!(ask.turn_budget, DEFAULT_TURN_BUDGET, "stamped by the client");
     bus::publish_json(&bus.js, ask.subject(), &ask, None).await.unwrap();
@@ -892,11 +896,11 @@ async fn a_later_human_post_on_a_channel_thread_gives_it_the_configured_turn_bud
     let (launch, _log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
     let (ops, mut replies) = bus.channel("ops", &["dev-a"]).await;
-    let mut root = ChannelPost::new(ops.clone(), UserId::human(), "@dev-a deploy friday?");
+    let mut root = ChannelPost::new(ops.clone(), ants_test_support::human(), "@dev-a deploy friday?");
     root.mentions = vec![bus.dev.clone()];
     bus.post(&root).await;
     // Mentioning nobody, it wakes the channel's messenger only; dev-a reads it among the thread's later posts.
-    let more = root.reply(UserId::human(), "or monday", &[], &bus.humans.humans()).unwrap();
+    let more = root.reply(ants_test_support::human(), "or monday", &[], &bus.humans.humans()).unwrap();
     assert_eq!(more.turn_budget, DEFAULT_TURN_BUDGET, "stamped by the client");
     let seq = bus.post(&more).await;
 

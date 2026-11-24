@@ -242,12 +242,9 @@ impl Data {
         (ant && !self.is_human(user)).then(|| [self.looks.face(user), Span::raw(" ")])
     }
 
-    /// Whether `user` is a human: as the humans bucket says once read, else only the CLI's human and `human`.
+    /// Whether `user` is a human: as the humans bucket says once read, else only the CLI's human.
     pub fn is_human(&self, user: &UserId) -> bool {
-        match &self.humans {
-            Some(humans) => humans.contains(user) || user == self.me(),
-            None => user.is_human() || user == self.me(),
-        }
+        user == self.me() || self.humans.as_ref().is_some_and(|humans| humans.contains(user))
     }
 
     /// The human's notify level of `channel`.
@@ -887,6 +884,6 @@ mod tests {
         m.read(Read::Directory(Ok((channels, Humans::default()))), at(0));
         assert_eq!(m.data.channels.iter().map(|c| c.channel.as_str()).collect::<Vec<_>>(), ["ops"]);
         assert!(!m.data.is_human(&user("bob")), "the humans read replace those known");
-        assert!(m.data.is_human(&user("alice")) && m.data.is_human(&UserId::human()));
+        assert!(m.data.is_human(&user("alice")), "the model's own human");
     }
 }

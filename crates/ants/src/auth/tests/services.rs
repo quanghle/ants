@@ -16,7 +16,7 @@ async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message
         &creds,
     )
     .unwrap();
-    let (_, h_js) = server.connect(&UserId::human()).await;
+    let (_, h_js) = server.connect(&ants_test_support::human()).await;
     bus::ensure_stream(&h_js).await.unwrap();
     crate::test_support::webhook::ensure_bucket(&h_js).await.unwrap();
 
@@ -110,7 +110,7 @@ async fn an_observer_reads_approvals_dead_letters_status_and_the_colony_and_publ
         ants_daemon::secrets::creds::Finding::from_creds(&text).unwrap().kind,
         ants_daemon::secrets::creds::Kind::Observer
     );
-    let (_, h_js) = server.connect(&UserId::human()).await;
+    let (_, h_js) = server.connect(&ants_test_support::human()).await;
     bus::ensure_stream(&h_js).await.unwrap();
     bus::ensure_colony(&h_js, Duration::from_secs(60)).await.unwrap();
     let (a, a_js) = server.connect(&dev_a).await;
@@ -226,7 +226,7 @@ async fn a_hook_runs_once_per_dead_letter_from_where_its_consumer_left_off() {
         &creds,
     )
     .unwrap();
-    let (_, h_js) = server.connect(&UserId::human()).await;
+    let (_, h_js) = server.connect(&ants_test_support::human()).await;
     bus::ensure_stream(&h_js).await.unwrap();
     let (_, a_js) = server.connect(&dev_a).await;
     let connecting = bus::connect_retrying(&server.url, Some(&creds), None, &audit, "test", std::future::pending());

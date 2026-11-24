@@ -40,7 +40,7 @@ pub struct Ant {
     /// JetStream domain of the hub; the file's top-level `js_domain`, then `--js-domain`, when absent.
     pub js_domain: Option<JsDomain>,
     /// The default human, who gets what is meant for the owner of a thread that has none: escalations, dead-letter
-    /// notices. The file's top-level `human`, then `human`, when absent.
+    /// notices. The file's top-level `human` when absent; one of the two is required.
     pub human: Option<UserId>,
     /// Required, except of an ant added from a template, whose default is the template's first workdir.
     #[serde(default)]
@@ -309,6 +309,9 @@ impl Ant {
         };
         let nats_url = self.nats.unwrap_or_else(|| default_nats.to_owned());
         crate::bus::check_url(&nats_url).with_context(|| format!("ant {}", self.name))?;
+        let human = self.human.with_context(|| {
+            format!("ant {}: no default human: name one with the config's top-level `human`", self.name)
+        })?;
         Ok(Config {
             ant: self.name,
             connection: Connection { nats_url, creds: self.creds, js_domain: self.js_domain },
@@ -338,7 +341,7 @@ impl Ant {
             },
             worktrees: WorktreeSettings { per_thread: self.worktrees, base: self.worktree_base, publish: self.publish },
             policy: Policy {
-                human: self.human.unwrap_or_else(UserId::human),
+                human,
                 allow: if self.allow_tools { [self.allow, vec!["*".to_owned()]].concat() } else { self.allow },
                 approval_timeout: self.approval_timeout,
                 escalation: Chain {

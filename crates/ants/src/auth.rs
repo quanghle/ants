@@ -231,10 +231,9 @@ pub fn system_creds(dir: &Path) -> Result<String> {
     Ok(creds(&jwt, &seed(&user)?))
 }
 
-/// The role `ants auth user` issues: a human's with `--human`, and for the default human whatever the flag; else an
-/// ant's.
-pub fn role(user: &UserId, human: bool) -> Role {
-    if human { Role::Human } else { Role::by_default(user) }
+/// The role `ants auth user` issues: a human's with `--human`, else an ant's.
+pub fn role(human: bool) -> Role {
+    if human { Role::Human } else { Role::Ant }
 }
 
 /// The ants and humans served on a machine, each in its role, without repeats: a name given as both is a human.
@@ -242,26 +241,23 @@ pub fn members(ants: &[UserId], humans: &[UserId]) -> Vec<(UserId, Role)> {
     let mut members: Vec<(UserId, Role)> = humans.iter().map(|h| (h.clone(), Role::Human)).collect();
     for ant in ants {
         if !members.iter().any(|(m, _)| m == ant) {
-            members.push((ant.clone(), Role::by_default(ant)));
+            members.push((ant.clone(), Role::Ant));
         }
     }
     members
 }
 
-/// Fail unless the ant `user` may get the credentials of the assistant of `human` in the team in `dir`: `human` is the
-/// default human or one the registry knows, `user` is neither a human nor an ant a manager added from a template, and
+/// Fail unless the ant `user` may get the credentials of the assistant of `human` in the team in `dir`: `human` is one
+/// the registry knows, `user` is neither a human nor an ant a manager added from a template, and
 /// no credentials neither revoked nor expired make another ant `human`'s assistant or `user` another human's.
 pub fn check_assistant(dir: &Path, user: &UserId, human: &UserId) -> Result<()> {
     if user == human {
         bail!("{user} cannot be its own assistant");
     }
-    if user.is_human() {
-        bail!("{user} is a human; an assistant is an ant");
-    }
     let issued = issued::issued(dir)?;
     let live = live_in(dir)?;
     let named = |i: &&issued::Issued, name: &UserId| i.name == name.as_str();
-    if !human.is_human() && !issued.iter().any(|i| named(&i, human) && i.kind == issued::Kind::Human) {
+    if !issued.iter().any(|i| named(&i, human) && i.kind == issued::Kind::Human) {
         bail!("{human} is not a human of the team: issue its credentials with `ants auth user {human} --human` first");
     }
     let mine = issued.iter().filter(|i| named(i, user));

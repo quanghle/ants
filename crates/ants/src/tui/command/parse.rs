@@ -581,7 +581,6 @@ pub(super) mod tests {
         assert!(unknown.starts_with("unexpected argument '--colour' found"), "{unknown}");
         assert!(!unknown.contains('\n'), "one line: {unknown}");
         assert!(parse("/add dev-c --on m1 --help").unwrap_err().starts_with("unexpected argument '--help'"));
-        assert_eq!(parse("/add human --on m1").unwrap_err(), "human is a human's name: an ant's name is lowercase");
         assert!(parse("/clone dev-a 'dev c'").unwrap_err().starts_with("invalid value 'dev c' for '<NEW>'"));
     }
 

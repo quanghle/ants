@@ -579,7 +579,7 @@ mod tests {
         let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, bob) = (user("alice"), user("bob"));
         let creds = [server.creds_as(&alice, Role::Human), server.creds_as(&bob, Role::Human)];
-        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None, None).unwrap()).collect();
         let (client, js) = nats[0].connect("test").await.unwrap();
         let (_, bob_js) = nats[1].connect("test").await.unwrap();
         for config in [ants_daemon::hub::threads_config(), ants_daemon::hub::files_config()] {
@@ -660,7 +660,7 @@ mod tests {
 
         let Some(server) = crate::test_support::Server::start() else { return };
         let creds = server.creds_as(&user("alice"), ants_proto::Role::Human);
-        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+        let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
         let (client, js) = nats.connect("test").await.unwrap();
         js.create_stream(ants_daemon::hub::stream_config()).await.unwrap();
         let thread = ThreadId::generate();
@@ -701,7 +701,7 @@ mod tests {
     async fn an_ask_from_the_bar_stores_its_files_before_the_message() {
         let Some(server) = crate::test_support::Server::start() else { return };
         let creds = server.creds_as(&user("alice"), ants_proto::Role::Human);
-        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+        let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
         let (client, js) = nats.connect("test").await.unwrap();
         for config in [ants_daemon::hub::stream_config(), ants_daemon::hub::files_config()] {
             js.create_stream(config).await.unwrap();
@@ -757,7 +757,7 @@ mod tests {
         let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, dev_a) = (user("alice"), user("dev-a"));
         let creds = server.creds_as(&alice, ants_proto::Role::Human);
-        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+        let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
         let (client, js) = nats.connect("test").await.unwrap();
         let _ = js.create_stream(ants_daemon::hub::stream_config()).await;
         let (_, ant_js) = server.connect(&dev_a).await;
@@ -810,13 +810,16 @@ mod tests {
         let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
         let rights = ants_proto::Permissions::for_user(&alice, Role::Human);
         Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&creds).unwrap();
-        let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+        let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
         let (client, js) = nats.connect("test").await.unwrap();
         let work = server.dir().join("work");
         std::fs::create_dir_all(&work).unwrap();
         let path = server.dir().join("config.toml");
-        std::fs::write(&path, format!("harness = \"copilot\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {work:?}\n"))
-            .unwrap();
+        std::fs::write(
+            &path,
+            format!("harness = \"copilot\"\nhuman = \"human\"\n\n[[ant]]\nname = \"dev-a\"\nworkdir = {work:?}\n"),
+        )
+        .unwrap();
         let triggers = crate::reload::Triggers::new(path.clone(), None, Duration::from_secs(3600)).unwrap();
         let (ants, task) = host_of_m1(&server, &js, true, Some(ConfigFile::new(path.clone(), triggers.edits()))).await;
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
@@ -859,7 +862,7 @@ mod tests {
         let Some(server) = crate::test_support::Server::start() else { return };
         let (alice, bob) = (user("alice"), user("bob"));
         let creds = [server.creds_as(&alice, ants_proto::Role::Human), server.creds_as(&bob, ants_proto::Role::Human)];
-        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None).unwrap()).collect();
+        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None, None).unwrap()).collect();
         let (client, js) = nats[0].connect("test").await.unwrap();
         let (_, bob_js) = nats[1].connect("test").await.unwrap();
         humans::ensure(&js).await.unwrap();

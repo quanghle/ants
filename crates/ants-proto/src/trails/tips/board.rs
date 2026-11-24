@@ -74,7 +74,8 @@ impl fmt::Display for TipStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Live => f.write_str("live"),
-            Self::Retired(Retirement::ByHuman { by, .. }) => write!(f, "retired by {by}"),
+            Self::Retired(Retirement::ByHuman { by: Some(by), .. }) => write!(f, "retired by {by}"),
+            Self::Retired(Retirement::ByHuman { by: None, .. }) => f.write_str("retired by a human"),
             Self::Retired(Retirement::VotedWrong) => f.write_str("voted wrong"),
             Self::Retired(Retirement::Unused) => write!(f, "unused for {} days", TIP_UNUSED.as_secs() / 86_400),
         }
@@ -85,7 +86,7 @@ impl fmt::Display for TipStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Retirement {
     /// A human retired it ([`TrailTip::retired`]).
-    ByHuman { by: UserId, at: DateTime<Utc> },
+    ByHuman { by: Option<UserId>, at: DateTime<Utc> },
     /// More ants voted it wrong than helpful.
     VotedWrong,
     /// Neither written nor voted helpful for [`TIP_UNUSED`].
@@ -132,7 +133,7 @@ impl TipBoard {
     /// the bucket's subject prefix. An entry that does not read as a tip, a vote or a retirement under its key, or is
     /// of another trail, is skipped, as are a writer's vote on its own tip, the votes and retirements of no tip
     /// found, and the votes that judged another text than the tip's ([`TipVote::text`]). A tip is retired by a human only as its retirement's key says, whatever its record says; an entry under
-    /// that key that does not read as a retirement retires it all the same, as by the user `human` when it was written.
+    /// that key that does not read as a retirement retires it all the same, by no one named when it was written.
     pub fn new<K: AsRef<str>, V: AsRef<[u8]>>(trail: TrailName, entries: impl IntoIterator<Item = (K, V)>) -> Self {
         let mut tips = Vec::new();
         let mut votes: HashMap<String, Vec<(String, TipVote)>> = HashMap::new();
@@ -158,7 +159,7 @@ impl TipBoard {
         let tips = tips
             .into_iter()
             .map(|mut tip| {
-                let unread = || TipRetired { by: UserId::human(), at: tip.written_at };
+                let unread = || TipRetired { by: None, at: tip.written_at };
                 tip.retired = retirements.remove(&tip.key()).map(|retired| retired.unwrap_or_else(unread));
                 let mut votes: Vec<TipVote> = votes
                     .remove(&tip.key())
@@ -408,7 +409,7 @@ mod tests {
             (tip.vote_key(&vote.voter), serde_json::to_vec(&vote).unwrap())
         });
         let retired = retired.iter().map(|(tip, by, at)| {
-            (tip.retired_key(), serde_json::to_vec(&TipRetired { by: p(by), at: day(*at) }).unwrap())
+            (tip.retired_key(), serde_json::to_vec(&TipRetired { by: Some(p(by)), at: day(*at) }).unwrap())
         });
         TipBoard::new("deploy".parse().unwrap(), tips.chain(votes).chain(retired))
     }
@@ -432,7 +433,7 @@ mod tests {
         ];
         let board = board_retired(&[&by_human, &wronged, &unused, &renewed], &votes, &[(&by_human, "alice", 1)]);
         let status = |id: &str| board.tip(&id.parse().unwrap(), None, day(100), None).unwrap().status;
-        assert_eq!(status("aaaaaaaa"), TipStatus::Retired(Retirement::ByHuman { by: p("alice"), at: day(1) }));
+        assert_eq!(status("aaaaaaaa"), TipStatus::Retired(Retirement::ByHuman { by: Some(p("alice")), at: day(1) }));
         assert_eq!(status("bbbbbbbb"), TipStatus::Retired(Retirement::VotedWrong));
         assert_eq!(status("cccccccc"), TipStatus::Retired(Retirement::Unused));
         let renewed = board.tip(&"dddddddd".parse().unwrap(), None, day(100), None).unwrap();
@@ -448,11 +449,11 @@ mod tests {
         assert_eq!(left.retired_key(), "deploy._retired.dev-a.aaaaaaaa");
         assert!(left.retired_key().split('.').nth(1).unwrap().parse::<UserId>().is_err(), "no ant writes it");
         let mut claimed = tip("dev-a", "bbbbbbbb", None, "use port 8080", 0);
-        claimed.retired = Some(TipRetired { by: p("alice"), at: day(1) });
+        claimed.retired = Some(TipRetired { by: Some(p("alice")), at: day(1) });
         let board = board_retired(&[&left, &claimed], &[], &[(&left, "alice", 1)]);
         let ranked = board.tip(&left.id, None, day(2), None).unwrap();
-        assert_eq!(ranked.status, TipStatus::Retired(Retirement::ByHuman { by: p("alice"), at: day(1) }));
-        assert_eq!(ranked.tip.retired, Some(TipRetired { by: p("alice"), at: day(1) }));
+        assert_eq!(ranked.status, TipStatus::Retired(Retirement::ByHuman { by: Some(p("alice")), at: day(1) }));
+        assert_eq!(ranked.tip.retired, Some(TipRetired { by: Some(p("alice")), at: day(1) }));
         let ranked = board.tip(&claimed.id, None, day(2), None).unwrap();
         assert_eq!(
             (ranked.status, &ranked.tip.retired),
@@ -462,14 +463,14 @@ mod tests {
         let elsewhere = tip("dev-b", "cccccccc", None, "no such tip", 0);
         let entries = [
             (left.key(), serde_json::to_vec(&left).unwrap()),
-            (elsewhere.retired_key(), serde_json::to_vec(&TipRetired { by: p("alice"), at: day(1) }).unwrap()),
+            (elsewhere.retired_key(), serde_json::to_vec(&TipRetired { by: Some(p("alice")), at: day(1) }).unwrap()),
             (left.retired_key(), b"not json".to_vec()),
         ];
         let board = TipBoard::new("deploy".parse().unwrap(), entries);
         assert_eq!(board.len(), 1, "a retirement is no tip");
         assert_eq!(
             board.tip(&left.id, None, day(2), None).unwrap().status,
-            TipStatus::Retired(Retirement::ByHuman { by: UserId::human(), at: day(0) }),
+            TipStatus::Retired(Retirement::ByHuman { by: None, at: day(0) }),
             "a retirement that does not read retires it all the same"
         );
     }

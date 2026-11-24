@@ -347,7 +347,7 @@ mod tests {
         assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Credentials)), "replaced");
         std::fs::remove_file(&messenger).unwrap();
         assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Credentials)), "removed");
-        std::fs::write(&path, "harness = \"copilot\"\n").unwrap();
+        std::fs::write(&path, "harness = \"copilot\"\nhuman = \"human\"\n").unwrap();
         std::fs::remove_file(&sage).unwrap();
         assert_eq!((file.settled(), file.settled()), (None, Some(Trigger::Changed)), "with the config, a change of it");
         let _ = std::fs::remove_dir_all(&dir);

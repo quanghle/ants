@@ -21,7 +21,8 @@ fn ended_run(text: &str) -> RunId {
 
 /// An MCP client of `mcp` on a thread a human started, handling its message.
 async fn trusted(mcp: &Mcp) -> (Client, ants_daemon::mcp::Turn) {
-    let asked = Envelope::new(UserId::human(), ant("lead"), "save it").with_owner(Some(UserId::human()));
+    let asked =
+        Envelope::new(ants_test_support::human(), ant("lead"), "save it").with_owner(Some(ants_test_support::human()));
     let turn = mcp.begin(&asked);
     (mcp_client(mcp, &asked.thread_id).await, turn)
 }
@@ -143,7 +144,7 @@ async fn an_ant_replaces_and_removes_only_the_trails_it_saved_on_trusted_threads
 
     let kv = DirectKv::new(&lead.js, None, TRAILS_BUCKET).await.unwrap();
     let mut human = colony_trail(&lead.js, "deploy").await.unwrap();
-    (human.name, human.saved_by) = ("release".parse().unwrap(), Saver::Human { user: UserId::human() });
+    (human.name, human.saved_by) = ("release".parse().unwrap(), Saver::Human { user: ants_test_support::human() });
     kv.put("release", serde_json::to_vec(&human).unwrap()).await.unwrap();
     kv.put("broken", b"not a trail".to_vec()).await.unwrap();
     let (ok, text) = save(&client, json!({"name": "release", "script": first, "replace": true})).await;
@@ -177,7 +178,7 @@ async fn an_ant_replaces_and_removes_only_the_trails_it_saved_on_trusted_threads
     let start = StartRun {
         trail: TrailSource::Saved("ask-b".parse().unwrap()),
         args: Value::Null,
-        owner: Some(UserId::human()),
+        owner: Some(ants_test_support::human()),
         origin: Origin { by: Starter::Webhook { user: ant("github") }, channel: None },
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),

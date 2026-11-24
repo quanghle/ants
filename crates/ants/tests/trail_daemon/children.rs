@@ -16,7 +16,7 @@ impl Conductor {
         let start = StartRun {
             trail: TrailSource::Saved(name.parse().unwrap()),
             args: Value::Null,
-            owner: Some(UserId::human()),
+            owner: Some(ants_test_support::human()),
             origin,
             thread,
             limits,
@@ -35,7 +35,7 @@ impl Conductor {
 }
 
 pub(super) fn human_origin() -> Origin {
-    Origin { by: Starter::Human { user: UserId::human() }, channel: None }
+    Origin { by: Starter::Human { user: ants_test_support::human() }, channel: None }
 }
 
 const ECHO: &str = "await agent(args[\"say\"], ant=\"dev\")\n";
@@ -75,9 +75,9 @@ except RuntimeError as e:
     let script = header.leg().map(|leg| ants_proto::script_sha256(&leg.script));
     assert_eq!((marks.trail.as_ref(), &marks.script), (header.trail(), &script), "the step names its trail's script");
     assert!(marks.script.is_some());
-    assert_eq!((header.owner.as_ref(), &header.origin), (Some(&UserId::human()), &human_origin()));
+    assert_eq!((header.owner.as_ref(), &header.origin), (Some(&ants_test_support::human()), &human_origin()));
     assert_eq!(step.origin_thread.as_ref(), Some(&thread), "the child's steps link to the root run's thread");
-    assert_eq!(step.owner, Some(UserId::human()));
+    assert_eq!(step.owner, Some(ants_test_support::human()));
     assert!(lead.reply(&step, "A").await);
     assert_eq!(step_status(&mut status).await.1, StepStage::Answered);
 
@@ -253,7 +253,7 @@ async fn stopping_a_run_stops_its_child_and_resuming_it_resumes_the_child() {
     let step = lead.step().await;
     let child = step.trail_step.as_ref().unwrap().run.clone();
 
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let waiting = lead.trails.stop(&run, &human).await.unwrap();
     let waiting: Vec<_> = waiting.iter().map(|step| (step.to.clone(), step.message)).collect();
     assert_eq!(waiting, [(ant("dev"), step.id)], "the child's step is for the human to withdraw");
@@ -300,7 +300,7 @@ async fn resuming_a_run_failed_on_its_child_s_limit_resumes_the_child() {
     assert_eq!(lead.header(&child).await.state.failed_on(), Some(RunLimit::Steps));
 
     let raised = TrailLimits { steps: 10, ..limits };
-    lead.trails.resume(&run, &UserId::human(), Some(raised)).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), Some(raised)).await.unwrap();
     let step = lead.step().await;
     assert_eq!((step.text.as_str(), &step.trail_step.as_ref().unwrap().run), ("c", &child), "the child resumes");
     assert!(lead.reply(&step, "C").await);
@@ -325,7 +325,7 @@ async fn resuming_a_run_failed_on_its_child_s_limit_starts_the_call_anew_when_th
     let runs = DirectKv::new(&lead.js, None, TRAIL_RUNS_BUCKET).await.unwrap();
     runs.delete(trail_run_key(&ant("lead"), &child)).await.unwrap();
 
-    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits { steps: 10, ..limits })).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), Some(TrailLimits { steps: 10, ..limits })).await.unwrap();
     let again = lead.step().await;
     assert_eq!((again.text.as_str(), &again.trail_step.as_ref().unwrap().run), ("a", &child), "the child starts anew");
     assert!(lead.reply(&again, "A").await);
@@ -351,7 +351,7 @@ async fn a_daemon_restarted_after_resuming_a_child_failed_on_its_steps_finishes_
     assert_eq!(lead.ended(&run).await.failed_on(), Some(RunLimit::Steps));
     assert_eq!(lead.header(&child).await.state.failed_on(), Some(RunLimit::Steps));
 
-    lead.trails.resume(&run, &UserId::human(), Some(TrailLimits { steps: 3, ..limits })).await.unwrap();
+    lead.trails.resume(&run, &ants_test_support::human(), Some(TrailLimits { steps: 3, ..limits })).await.unwrap();
     let b = lead.step().await;
     assert_eq!((b.text.as_str(), &b.trail_step.as_ref().unwrap().run), ("b", &child), "the child resumes");
     drop(lead);

@@ -54,7 +54,7 @@ async fn the_reminders_job_lists_every_reminder_as_ants_remind_list_does() {
     let Some(server) = crate::test_support::Server::start() else { return };
     let alice = user("alice");
     let creds = server.creds_as(&alice, Role::Human);
-    let nats = Nats::new(&server.url, Some(&creds), None).unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     let (client, js) = nats.connect("test").await.unwrap();
     let meta = thread_meta::open(&nats, &js).await.unwrap();
     let ctx = Ctx {

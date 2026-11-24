@@ -13,7 +13,7 @@ ants hook run --creds audit.creds --js-domain hub --on dead-letter -- ./file-tic
 the seed in the OS credential store), as `Permissions::for_observer` in `ants-proto` sets out. They are listed by
 `ants auth issued` (kind `observer`), revoked by `ants auth revoke NAME`, and renewed like ant credentials: with
 `ants auth user NAME --observer`, or over NATS with `ants renew FILE` and `ants enroll renew NAME` (see
-[Renewing over NATS](auth.md#renewing-over-nats)). The default human's name cannot be an observer's.
+[Renewing over NATS](auth.md#renewing-over-nats)).
 
 They may:
 

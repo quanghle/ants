@@ -17,6 +17,7 @@ pub(super) struct CliSection {
     pub(super) nats: Option<String>,
     creds: Option<PathBuf>,
     js_domain: Option<JsDomain>,
+    human: Option<UserId>,
     #[serde(default, deserialize_with = "ants_proto::duration::deserialize")]
     auto_archive: Duration,
     #[serde(default)]
@@ -101,13 +102,15 @@ impl Default for SummaryConfig {
 }
 
 /// What the CLI connects with where neither a flag nor the environment sets it: the `[cli]` section of a config
-/// file, else its top-level `nats` and `js_domain`. Credentials come from `[cli]` alone, an ant's being no human's,
+/// file, else its top-level `nats`, `js_domain` and `human`. Credentials come from `[cli]` alone, an ant's being no human's,
 /// as do `auto_archive`, the summary keys, `inline_images`, `theme` and `animate`.
 #[derive(Debug, PartialEq)]
 pub struct CliDefaults {
     pub nats: Option<String>,
     pub creds: Option<PathBuf>,
     pub js_domain: Option<JsDomain>,
+    /// Whom the CLI acts as without credentials.
+    pub human: Option<UserId>,
     /// How long a thread goes without a message before `ants thread list`, `ants dash`, `ants channel` and `ants chat`
     /// take it as archived for the CLI's human; None (unset or 0) for never.
     pub auto_archive: Option<Duration>,
@@ -129,6 +132,7 @@ impl Default for CliDefaults {
             nats: None,
             creds: None,
             js_domain: None,
+            human: None,
             auto_archive: None,
             summaries: SummaryConfig::default(),
             inline_images: false,
@@ -157,6 +161,7 @@ impl CliDefaults {
         struct View {
             nats: Option<String>,
             js_domain: Option<JsDomain>,
+            human: Option<UserId>,
             #[serde(default)]
             cli: CliSection,
         }
@@ -170,11 +175,24 @@ impl CliDefaults {
         let creds = view.cli.creds.map(|c| resolve(&c, base, home));
         let auto_archive = Some(view.cli.auto_archive).filter(|d| !d.is_zero());
         let js_domain = view.cli.js_domain.or(view.js_domain);
+        let human = view.cli.human.or(view.human);
         let (inline_images, theme, animate) =
             (view.cli.inline_images, view.cli.theme, view.cli.animate.unwrap_or(true));
         let mouse = view.cli.mouse.unwrap_or(true);
         let notify = view.cli.notify;
-        Ok(Self { nats, creds, js_domain, auto_archive, summaries, inline_images, theme, animate, mouse, notify })
+        Ok(Self {
+            nats,
+            creds,
+            js_domain,
+            human,
+            auto_archive,
+            summaries,
+            inline_images,
+            theme,
+            animate,
+            mouse,
+            notify,
+        })
     }
 }
 

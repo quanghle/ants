@@ -237,13 +237,12 @@ fn an_ant_becomes_a_human_s_only_assistant_through_its_user_jwt() {
         assert!(err.contains(why), "{user} of {of}: {err}");
     };
     refused(&pa, &alice, "not a human of the team");
-    check_assistant(&team, &pa, &UserId::human()).unwrap();
+    refused(&pa, &ants_test_support::human(), "not a human of the team");
     Issue::new(&team, &alice, Kind::Human, Permissions::for_user(&alice, Role::Human))
         .into_file(&out("alice"))
         .unwrap();
     issue(&team, &p("carol"), Role::Human, None, &out("carol")).unwrap();
     refused(&alice, &alice, "its own assistant");
-    refused(&UserId::human(), &alice, "is a human");
     refused(&p("carol"), &alice, "a human's credentials");
     check_assistant(&team, &pa, &alice).unwrap();
     assert!(issue_with(&team, &pa, Kind::Assistant, Permissions::for_assistant(&pa, &alice), &out("pa")).is_err());
@@ -433,7 +432,7 @@ fn credentials_of_the_longest_names_fit_max_control_line() {
 async fn the_longest_credentials_connect() {
     let domain: JsDomain = "d".repeat(64).parse().unwrap();
     let Some(hub) = Server::start_with(&format!("domain: {domain}"), "") else { return };
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let h_js = connect_to(&hub.url, &hub.creds_in(&human, Some(&domain)), Some(&domain), &human).await;
     bus::ensure_stream(&h_js).await.unwrap();
     let ant = p(&"a".repeat(64));

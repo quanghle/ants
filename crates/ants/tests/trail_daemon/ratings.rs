@@ -65,7 +65,7 @@ async fn a_run_s_end_invites_its_conductor_to_rate_it_once_unless_a_waited_answe
     std::fs::create_dir_all(&saved).unwrap();
     std::fs::write(saved.join("deploy.py"), described("Deploy the web app")).unwrap();
     let mut lead = conductor_saving(&server, &ants_binary(), Vec::new(), Some(saved.clone())).await;
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let start = StartRun {
         trail: TrailSource::Saved("deploy".parse().unwrap()),
         args: json!({"n": 1}),
@@ -149,7 +149,7 @@ async fn rate_trail_rates_the_saved_trails_a_run_took_and_find_trails_ranks_them
     let dir = scratch_dir("trail-ratings");
     let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
     let mcp = lead_mcp(&dir, &lead.js, &lead.trails).await;
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let asked = Envelope::new(human.clone(), ant("lead"), "deploy").with_owner(Some(human.clone()));
     let (client, _turn) = handling(&mcp, &asked).await;
     let web = described("Deploy the web app to staging");
@@ -251,7 +251,9 @@ async fn rate_trail_rates_the_saved_trails_a_run_took_and_find_trails_ranks_them
 /// the trusted `client` rates, and while handling the invitation to rate one of the runs reporting there, only that
 /// one; `find_trails` reads from there all the same.
 async fn untrusted_threads_rate_only_their_run(mcp: &Mcp, lead: &mut Conductor, client: &Client, first: &RunId) {
-    let hooked = Envelope::new(ant("github"), ant("lead"), "an issue").with_owner(Some(UserId::human())).from_webhook();
+    let hooked = Envelope::new(ant("github"), ant("lead"), "an issue")
+        .with_owner(Some(ants_test_support::human()))
+        .from_webhook();
     let (untrusted, _hooked) = handling(mcp, &hooked).await;
     let (ok, text) = run_trail(&untrusted, json!({"name": "deploy-web", "args": {"n": 1}})).await;
     assert!(ok, "{text}");
@@ -299,7 +301,7 @@ async fn rate_trail_rates_no_trail_removed_since_the_run_and_those_still_saved_a
     let dir = scratch_dir("trail-ratings-removed");
     let lead = conductor(&server, &ants_binary(), Vec::new()).await;
     let mcp = lead_mcp(&dir, &lead.js, &lead.trails).await;
-    let human = UserId::human();
+    let human = ants_test_support::human();
     let asked = Envelope::new(human.clone(), ant("lead"), "deploy").with_owner(Some(human.clone()));
     let (client, _turn) = handling(&mcp, &asked).await;
     let mut runs = Vec::new();

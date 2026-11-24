@@ -48,9 +48,6 @@ pub(super) fn plan(
     if text.lines().any(|line| line.trim() == mark) {
         return Ok(None);
     }
-    if new.is_human() {
-        bail!("{new} is a human's name, not an ant's");
-    }
     if new == src {
         bail!("a clone needs another name than {src}");
     }

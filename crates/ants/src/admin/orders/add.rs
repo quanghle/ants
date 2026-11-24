@@ -29,11 +29,8 @@ pub struct Args {
 }
 
 /// The settings of an `[[ant]]` table named `name` that `options` give, as an add or clone order carries them: no
-/// name, and a workdir only when given. Refused for a human's name.
+/// name, and a workdir only when given.
 pub fn settings(name: &UserId, options: &AntOptions) -> Result<Map<String, Value>> {
-    if name.is_human() {
-        bail!("{name} is a human's name: an ant's name is lowercase");
-    }
     let ant = options.apply(Ant::new(name.clone(), PathBuf::new()));
     let entry = config::entry(&ant)?;
     let parsed: toml::Table = toml::from_str(&entry).context("the settings given")?;

@@ -231,7 +231,7 @@ fn an_escalation_reaching_a_human_stays_open_until_a_human_s_message_on_the_thre
     };
     let messages: Vec<Envelope> = vec![
         escalate("t1", &alice, EscalationReason::TurnBudget),
-        escalate("t2", &UserId::human(), EscalationReason::Approval),
+        escalate("t2", &ants_test_support::human(), EscalationReason::Approval),
         escalate("t3", &lead, EscalationReason::Cap),
         escalate("t4", &alice, EscalationReason::Asked),
         Envelope::on_thread(t("t4"), alice.clone(), dev_a.clone(), "go on"),

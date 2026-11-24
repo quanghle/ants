@@ -271,7 +271,7 @@ touch no ant of the fixture.
 
 ### B1 · `ants setup` brings an empty machine up, as the quick start does (P0, 2 prompts)
 
-Scratch node `solo`, no credentials: the bus is unauthenticated and the CLI acts as `human`. Its commands run without
+Scratch node `solo`, no credentials: the bus is unauthenticated and the CLI acts as the `human` `ants setup` writes into the new config file. Its commands run without
 the image's `ANTS_JS_DOMAIN=hub`, which is the fixture's: a machine of its own has no JetStream domain.
 
 ```sh

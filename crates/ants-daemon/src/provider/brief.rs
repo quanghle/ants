@@ -132,7 +132,6 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
-    use ants_proto::UserId;
     use ants_proto::provider::Starter;
 
     use super::fake::{Answer, connected};
@@ -144,7 +143,7 @@ mod tests {
     }
 
     fn origin() -> Origin {
-        Origin { by: Starter::Human { user: UserId::human() }, channel: None }
+        Origin { by: Starter::Human { user: ants_test_support::human() }, channel: None }
     }
 
     async fn briefing_by(answer: Answer) -> (Option<Briefing>, std::sync::Arc<fake::Fake>) {
