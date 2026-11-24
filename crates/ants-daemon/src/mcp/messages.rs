@@ -182,12 +182,18 @@ impl Hub {
     /// the thread, without waiting: the answer to all of them comes later as one message. Spends no turn.
     async fn ask_human(&self, thread: &ThreadId, args: AskHuman) -> Result<String, String> {
         let question = args.questions()?;
-        let human = {
+        let (human, step) = {
             let sessions = self.sessions.locked();
             let current = sessions.current(thread);
             current
-                .map(|current| self.humans.owner_of(current))
+                .map(|current| (self.humans.owner_of(current), current.trail_step.is_some()))
                 .ok_or("no message is being handled on this thread; questions go out only while one is".to_owned())?
+        };
+        let waits = if step {
+            " This turn sends the trail step no reply: the answer given once the answer to these questions came \
+             answers the step."
+        } else {
+            ""
         };
         let rendered = question.render();
         let mut envelope = self.outgoing(thread, human.as_str(), rendered, None)?;
@@ -196,21 +202,30 @@ impl Hub {
         if let Some(escalator) = &self.escalator {
             let first = escalator.ask_first(&envelope).await.map_err(|e| format!("not asked: {e:#}"))?;
             if let Some(assistant) = first {
+                self.asked(thread, assistant.clone());
                 return Ok(format!(
                     "Asked {assistant}, the assistant of {human}, first, on thread {}. The answer comes later as a \
                      message from {assistant}, or {assistant} passes the question on to {human}, as happens without \
                      its answer after escalate_after; {human}'s answer then names each question and the options \
-                     picked, or the answer typed.",
+                     picked, or the answer typed.{waits}",
                     envelope.thread_id
                 ));
             }
         }
         self.send(&envelope).await?;
+        self.asked(thread, human.clone());
         Ok(format!(
             "Asked {human} on thread {} as message {}. The answer comes later as one message from {human} naming \
-             each question and the options picked, or the answer typed.",
+             each question and the options picked, or the answer typed.{waits}",
             envelope.thread_id, envelope.id
         ))
+    }
+
+    /// Note that the turn of `thread` asked `whom` with ask_human ([`Mcp::take_asked`](super::Mcp::take_asked)).
+    fn asked(&self, thread: &ThreadId, whom: UserId) {
+        if let Some(turn) = self.sessions.locked().turns.get_mut(thread) {
+            turn.asked = Some(whom);
+        }
     }
 }
 
@@ -369,7 +384,8 @@ impl Tools {
         instead. One question: {\"questions\": [{\"question\": \"Ship it?\", \"options\": [\"yes\", \"no\"]}]}. The \
         answer arrives later as one new message on this thread, with a line for each question naming the options \
         picked or the answer typed. A human with an assistant that can act gets the questions through it: the \
-        assistant answers, or passes them on to the human. Spends no turn.")]
+        assistant answers, or passes them on to the human. Spends no turn. On a trail step, the turn that asks sends \
+        the step no reply: the answer given once the human answered is the step's reply.")]
     async fn ask_human(
         &self,
         Parameters(args): Parameters<AskHuman>,

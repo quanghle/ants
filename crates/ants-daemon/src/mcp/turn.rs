@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ants_proto::{Attachment, AttachmentHandle, ChannelPost, Envelope, ThreadId, ThreadTitle, Uuid};
+use ants_proto::{Attachment, AttachmentHandle, ChannelPost, Envelope, ThreadId, ThreadTitle, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -38,6 +38,12 @@ impl Mcp {
     /// Take whether the session of `thread` called `complete` during the turn: then its final answer goes to nobody.
     pub fn take_completed(&self, thread: &ThreadId) -> Option<Completed> {
         self.hub.sessions.locked().turns.get_mut(thread)?.completed.take()
+    }
+
+    /// Take whom the session of `thread` asked with `ask_human` during the turn, if it did: a trail step's turn that
+    /// asked sends the step no reply.
+    pub fn take_asked(&self, thread: &ThreadId) -> Option<UserId> {
+        self.hub.sessions.locked().turns.get_mut(thread)?.asked.take()
     }
 
     /// Whether the session of `thread` called `complete` during the turn so far, left for [`Mcp::take_completed`].
@@ -185,6 +191,10 @@ fn always_answered(hub: &Hub, current: &Envelope) -> Option<&'static str> {
         Some("the message being handled carries an escalation, which is always answered; answer it or escalate")
     } else if current.approval.is_some() {
         Some("the message being handled carries an approval request, which is always answered; answer it or escalate")
+    } else if current.trail_step.is_some() {
+        Some(
+            "the message being handled is a trail step, which is always answered: its reply answers the step; reply to it",
+        )
     } else {
         None
     }

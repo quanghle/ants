@@ -403,6 +403,7 @@ mod tests {
             sent: true,
             turn_budget: 8,
             retries: 0,
+            asked: false,
         };
         assert_eq!(holding(&grant, std::slice::from_ref(&waiting)), (1, 0), "less what was spent, never below none");
         assert_eq!(holding(&grant, &[]), (0, 0), "given back once answered with no run running");

@@ -97,7 +97,8 @@ Nothing else of the host is reachable: these names are defined before the script
   then the call raises. `label=` names the step in the run's thread and status events, kept as one line of at most 200
   characters, control characters left out. `tips=` is the step's tip key
   (one line of 1-120 characters): the step carries the best [tips](#tips) left under it on earlier runs, and a tip
-  left answering it goes under it.
+  left answering it goes under it. A step's ant may ask the run's owner with the `ask_human` MCP tool: the step then
+  waits on the human, and the ant's answer once the human answered is the reply.
 - `await human(questions)`: asks the run's owner, as the `ask_human` MCP tool does. `questions` is a list of 1-4
   dicts, each with a `question` (1-500 characters) and 2-9 `options` (labels, or dicts with a `label` and a
   `description`), and optionally a `header`, `multi_select` (default False) and `free_text` (default True). Returns the
@@ -154,16 +155,16 @@ checks = await command(f"gh pr checks {args['pr']}")
 
 ### Errors
 
-A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor
-advertises, a `tips=` key that is not one line of 1-120 characters, malformed questions, a reply still off its schema
-after two retries, the step's message withdrawn from its
-recipient's queue, an unknown trail, ancestor cycle or failed child run in `trail()`, the run's step limit reached)
-raises `RuntimeError` with the reason where the step is awaited. A step to an ant no daemon serves raises nothing: it
-waits in that ant's queue, as any message does, until the run ends or a human stops it. An exception the script does
-not catch fails the run with
-its traceback, lines numbered as in the file. Inside `parallel` or `pipeline`, an uncaught exception of one coroutine
-fails the whole gather, and the run abandons the other steps. Catch a step's error inside the per-item coroutine when
-the trail can go on without that item, and log what was lost.
+A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor advertises, a
+`tips=` key that is not one line of 1-120 characters, malformed questions, a reply still off its schema after two
+retries, the step's message withdrawn from its recipient's queue, the recipient at one of its spending caps or the
+step's thread out of turns, a human steering the recipient's answer to the step, the step dead-lettered after its
+deliveries, an unknown trail, ancestor cycle or failed child run in `trail()`, the run's step limit reached) raises
+`RuntimeError` with the reason where the step is awaited. A step to an ant no daemon serves raises nothing: it waits in
+that ant's queue, as any message does, until the run ends or a human stops it. An exception the script does not catch
+fails the run with its traceback, lines numbered as in the file. Inside `parallel` or `pipeline`, an uncaught exception
+of one coroutine fails the whole gather, and the run abandons the other steps. Catch a step's error inside the per-item
+coroutine when the trail can go on without that item, and log what was lost.
 
 ## The sandbox
 
@@ -193,7 +194,9 @@ the trail can go on without that item, and log what was lost.
 | Nested calls | 200 | `RecursionError` in the script |
 | Lists and dicts nested in one JSON value: args, a call's arguments, an answer, the result | 100 | deeper arguments raise `TypeError` at the call; a deeper result fails the run |
 
-A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers it.
+A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers it:
+a step to an ant at a cap, or out of turns, raises `RuntimeError: <ant> never answered: …` naming the cap, so catch it
+to go on with another ant.
 A run's legs share its limits and what it spent, and a goto spends nothing. A child run's steps and turns count
 against the limits of its root run, the one no `trail()` started, and its wall time ends with its parent's. A run
 started with `run_trail` while answering a step spends from the step's grant, a share of what the step's run has left:

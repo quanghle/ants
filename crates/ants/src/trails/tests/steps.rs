@@ -27,6 +27,7 @@ fn waited(call: u32, thread: &ThreadId) -> PendingCall {
         sent: true,
         turn_budget: 8,
         retries: 0,
+        asked: false,
     }
 }
 

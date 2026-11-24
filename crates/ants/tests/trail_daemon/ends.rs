@@ -342,7 +342,7 @@ await go()
     let withdrawn = step.reply(ant("dev"), "[ants] Withdrawn.", Role::Ant).unwrap().as_notice(NoticeKind::Withdrawn);
     assert!(lead.trails.take(&withdrawn).await.unwrap());
     let RunState::Done { result } = lead.ended(&run).await else { panic!("not done") };
-    assert!(result.as_str().unwrap().contains("dev never answered: the step's message was withdrawn"), "{result}");
+    assert!(result.as_str().unwrap().contains("dev never answered: Withdrawn."), "{result}");
     assert_eq!(lead.notes(&thread, 3).await[2], noted("withdrawn", "[ants] Withdrawn."));
     assert_eq!(step_status(&mut status).await.1, StepStage::Started);
     assert_eq!(step_status(&mut status).await.1, StepStage::Failed);

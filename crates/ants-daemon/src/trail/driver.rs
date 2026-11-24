@@ -605,6 +605,7 @@ fn pending_for(call: &Call, to: ants_proto::UserId, turn_budget: u32) -> Pending
         sent: false,
         turn_budget,
         retries: 0,
+        asked: false,
     }
 }
 
@@ -736,11 +737,11 @@ fn wall(header: &TrailRun) -> String {
     }
 }
 
-/// Waiting when every step the run waits on is a human's.
+/// Waiting when every step the run waits on is a human's, or one whose recipient asked a human.
 fn waiting_or_running(pending: &[PendingCall], engine: &Run) -> RunState {
     let humans_only = !pending.is_empty()
         && pending.len() == engine.outstanding().len()
-        && pending.iter().all(|call| call.function == TrailFunction::Human);
+        && pending.iter().all(super::steps::on_a_human);
     if humans_only { RunState::Waiting } else { RunState::Running }
 }
 

@@ -432,6 +432,10 @@ pub struct PendingCall {
     /// The re-asks for an answer matching the step's schema so far.
     #[serde(default)]
     pub retries: u32,
+    /// Whether the step's recipient asked a human with ask_human ([`crate::NoticeKind::Asked`]): the step waits on the
+    /// human, the recipient's answer after the human's answering it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asked: bool,
 }
 
 impl PendingCall {

@@ -314,9 +314,20 @@ A run reports on the thread it started with, as its conductor:
   characters). Notices and escalations arriving on a step's thread, and replies the run no longer waits on, are
   quoted in notes too. Notes wake nobody and spend no turn.
 - **Step threads:** each step's thread is a spin-off of the run thread, keeps the run's owner and carries a
-  `trail_step`; its recipient answers it as any message, and the first reply answers the call. The invitation to rate
-  a run started on the thread of a step to the conductor itself, which names the run in `rating_of`, answers no call:
-  it prompts the conductor to rate the run.
+  `trail_step`; its recipient answers it as any message, and the first reply answers the call. A human may write on a
+  step's thread too: a message steering the prompt answering the step takes the answer, which goes to the human, and the
+  recipient's daemon tells the conductor with a `steered` notice on the step's thread, so the call raises `RuntimeError:
+  <ant> never answered: <human> steered the prompt answering the step with message <id>, which takes the answer.` in the
+  script. A step its recipient's daemon gives up on after its deliveries is dead-lettered as any message, and the
+  conductor is told too, with a `gave_up` notice on the step's thread: the call raises `RuntimeError: <ant> never
+  answered: Gave up on the message from <conductor> after 5 deliveries: <error>…`, and the step replayed later (`ants
+  dead replay`) is answered with a reply the run no longer waits on, noted on the run thread. A step's ant may ask the
+  run's owner with `ask_human`: the turn that asked sends the step no reply, its daemon telling the conductor with an
+  `asked` notice (noted on the run thread), the step waits on the human, shown in `ants trail show` as waiting on a
+  human it asked, and the run waits on humans once all its calls do; the ant's answer once the human, or the human's
+  assistant, answered goes to the conductor as the step's reply and answers the call. The run's wall time bounds the
+  wait. The invitation to rate a run started on the thread of a step to the conductor itself, which names the run in
+  `rating_of`, answers no call: it prompts the conductor to rate the run.
 - **Status events:** a `step` event (`run`, `call`, `label`, `to`, `step_thread`, `stage`: `started`, `answered`,
   `failed` or `dropped`) on the conductor's status of the run thread tells each step, and a `leg` event (`run`, `leg`
   counted from 0, `trail` unless inline, `waypoint` when entered at one) each leg's start, the first at the run's start
@@ -401,10 +412,14 @@ limits, not those it was dumped with.
 
 Each `agent()` step reserves up to 8 of the run's turns as its message's turn budget; the turns its reply spent, and
 one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step
-also counts against the spending caps of the ant answering it. A goto spends nothing and changes no limit: the run's
-legs share its limits, spending and wall time. A child run's steps and turns count against its root run's limits too,
-and its wall time ends with what its parent has left. Keep the script's own work small: only the compute between steps
-counts against the compute limit, and every variable counts against the session's size at each suspension.
+also counts against the spending caps of the ant answering it. A step reaching an ant at one of its spending caps, or
+whose thread has no turns left, is not escalated: the ant's daemon acks it unprompted and tells the conductor with an
+`unanswered` notice on the step's thread, and the call raises `RuntimeError: <ant> never answered: <cap>; <ant> does
+not answer the step.` in the script, which may catch it and ask another ant; the run's thread notes the notice. A goto
+spends nothing and changes no limit: the run's legs share its limits, spending and wall time. A child run's steps and
+turns count against its root run's limits too, and its wall time ends with what its parent has left. Keep the
+script's own work small: only the compute between steps counts against the compute limit, and every variable counts
+against the session's size at each suspension.
 
 Each `agent()` step also carries a grant: what the runs its recipient starts with `run_trail` while answering it may
 spend together ([Starting a run](#starting-a-run)). The conductor takes it out of what the run's tree has left as

@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::schema::SessionId;
-use ants_proto::{ThreadId, UserId, daily_spend_key, escalation_deadlines_key, thread_spend_key};
+use ants_proto::{ThreadId, UserId, Uuid, daily_spend_key, escalation_deadlines_key, thread_spend_key};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
@@ -92,6 +92,21 @@ struct ThreadSpend {
     /// The tool rules the thread is narrowed to ([`ants_proto::Envelope::allow`]), until a human's message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     narrowed: Option<Vec<String>>,
+    /// The trail step whose turn asked a human, until the answer after the human's goes to the step's conductor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    asked: Option<AskedStep>,
+}
+
+/// A trail step on a thread whose turn asked a human with ask_human, so that it sent the step no reply: the ant's
+/// answer once the human answered goes to the step's conductor as the step's reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskedStep {
+    /// The ant conducting the step's run.
+    pub conductor: UserId,
+    /// The step's message, which the answer replies to.
+    pub step: Uuid,
+    /// The turns the step's thread had left as the step came.
+    pub turn_budget: u32,
 }
 
 /// What the ant spent in a UTC day, stored as [`Spent`] is, with the warnings given.
@@ -315,6 +330,34 @@ impl Ledger {
                 (true, Some(rules))
             }
             (None, None) => (false, None),
+        })
+        .await
+    }
+
+    /// Keep `step`, the trail step on the thread whose turn asked a human, until [`Ledger::step_answered`]: a human's
+    /// message leaves it ([`Ledger::reset`]).
+    pub async fn step_asked(&self, thread: &ThreadId, step: AskedStep) -> Result<()> {
+        self.update(thread, |spent| {
+            let changed = spent.asked.as_ref() != Some(&step);
+            spent.asked = Some(step);
+            (changed, ())
+        })
+        .await
+    }
+
+    /// The trail step on the thread whose turn asked a human, if one waits for the answer after the human's.
+    pub async fn asked_step(&self, thread: &ThreadId) -> Result<Option<AskedStep>> {
+        Ok(self.thread(thread).await?.asked)
+    }
+
+    /// The trail step `step` on the thread, which a turn asked a human about, is answered.
+    pub async fn step_answered(&self, thread: &ThreadId, step: Uuid) -> Result<()> {
+        self.update(thread, |spent| {
+            let answered = spent.asked.as_ref().is_some_and(|asked| asked.step == step);
+            if answered {
+                spent.asked = None;
+            }
+            (answered, ())
         })
         .await
     }

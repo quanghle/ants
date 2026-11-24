@@ -294,11 +294,22 @@ async fn complete_is_refused_for_a_message_always_answered() {
     let mut escalation = from_ant();
     let stuck = ants_proto::Escalation::new(user("dev-b"), escalation.thread_id.clone(), EscalationReason::TurnBudget);
     escalation.escalation = Some(Box::new(stuck));
+    let step = ants_proto::TrailStep {
+        run: ants_proto::RunId::generate(),
+        call: 1,
+        label: None,
+        schema: None,
+        trail: None,
+        script: None,
+        tip_key: None,
+        bounds: None,
+    };
     let cases = [
         (Envelope::new(user("alice"), user("dev-a"), "x"), "a human's"),
         (for_human, "a human's"),
         (webhook, "a webhook's"),
         (escalation, "an escalation"),
+        (from_ant().as_step(step), "a trail step, which is always answered: its reply answers the step"),
     ];
     for (current, why) in cases {
         let client = {

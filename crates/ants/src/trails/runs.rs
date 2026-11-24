@@ -370,7 +370,7 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
                 [
                     c.call.to_string(),
                     c.function.name().to_owned(),
-                    c.child().map_or_else(|| format!("to {}", c.to), |child| format!("run {child}")),
+                    waits_on(c),
                     format!("sent {}", ago(c.sent_at, now)),
                     format!("thread {}", c.thread),
                     gist(c.function, &c.args),
@@ -393,6 +393,15 @@ pub(super) fn render(detail: &Detail, now: DateTime<Utc>) -> String {
         out.push_str(&super::ratings::of_run_section(ratings, now));
     }
     out
+}
+
+/// What the pending call `call` waits on: its child run, else whom its step went to, and the human that one asked.
+fn waits_on(call: &PendingCall) -> String {
+    match call.child() {
+        Some(child) => format!("run {child}"),
+        None if call.asked => format!("to {}, waiting on a human it asked", call.to),
+        None => format!("to {}", call.to),
+    }
 }
 
 /// A row per call of the journal of `run`: its function, whom it asked, what, and its answer.

@@ -91,6 +91,9 @@ pub enum NoReplyWhy {
     Completed,
     /// A later message steered the prompt, whose answer went to that one; `reason` names it.
     Steered,
+    /// The ant asked a human with ask_human while answering a trail step: its answer once the human answered is the
+    /// step's reply.
+    Asked,
 }
 
 /// How a prompt ended ([`TimelineEntry::Ended`]).

@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use ants_proto::{
-    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, PromptEnd, Stage, State, StatusUpdate,
-    SummaryRequest, UserId,
+    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, NoticeKind, PromptEnd, Stage, State,
+    StatusUpdate, SummaryRequest, UserId,
 };
 use anyhow::Result;
 use async_nats::jetstream;
@@ -18,6 +18,7 @@ use crate::escalation::Stuck;
 use crate::files::Attached;
 use crate::harness::{Prompt, SignedOut, Spend, Steering};
 use crate::limits::breaker::StartFailed;
+use crate::limits::caps::AskedStep;
 use crate::limits::fallback::OnFallback;
 use crate::limits::files;
 use crate::limits::overflow::ContextOverflow;
@@ -251,6 +252,7 @@ impl Inbox<'_> {
         let Ran { reply, cancelled_by, cut_by_cancel, worked, mut reached, spend, fallback, mut measured, .. } = ran;
         // While the turn lasts: it ends with `_turn`.
         let completed = self.completed(incoming);
+        let asked = self.asked(incoming).await;
         let reply = match reply {
             // What a human cancelled is answered as it stands, never tried again.
             Err(e) if cancelled_by.is_some() => {
@@ -270,7 +272,7 @@ impl Inbox<'_> {
         // A human's cancel is no limit: the reply tells of it, and nothing is escalated for it.
         let cut = reply.cut.is_some() && !cut_by_cancel;
         let limit = reply.cut.filter(|_| !cut_by_cancel).or(reached);
-        let unanswered = unanswered(completed, own);
+        let unanswered = unanswered(completed, asked, own);
         self.note_end(thread, &measured, end_of(cancelled_by.as_ref(), &limit, &unanswered), reply.rebuilt).await;
         let limit_notice =
             limit.as_ref().map(|l| format!("[ants] {l}{}", if cut { "; the prompt was cancelled." } else { "." }));
@@ -326,6 +328,13 @@ impl Inbox<'_> {
         if kept {
             self.marks.answered.forget_given(envelope).await;
         }
+        // The answer to a trail step a turn asked a human about ([`Inbox::asked_step`]) replies to the step instead.
+        if let Reply::Message(message) = &reply
+            && let Some(step) = message.in_reply_to.filter(|to| *to != envelope.id)
+            && let Err(e) = self.ledger.step_answered(&envelope.thread_id, step).await
+        {
+            tracing::warn!(thread = %envelope.thread_id, error = format!("{e:#}"), "forgetting the step asked about");
+        }
         self.deliver(h, &reply).await
     }
 
@@ -341,6 +350,9 @@ impl Inbox<'_> {
         let envelope = &incoming.envelope;
         let Given { text, limit, unanswered, tokens, title, files: _ } = given.clone();
         if let Some(unanswered) = unanswered {
+            if unanswered.0 == NoReplyWhy::Asked {
+                self.step_asked(incoming, unanswered.1.as_deref()).await?;
+            }
             self.end_unanswered(h, unanswered, text, limit.as_ref()).await?;
             return Ok(None);
         }
@@ -481,11 +493,17 @@ impl Inbox<'_> {
         matches!(spent, Some(ProtoError::BudgetExhausted(_)))
     }
 
-    /// Escalates the thread instead of prompting when it has no turns (`spent`) or allowance left; true if so.
-    async fn out_of_turns(&self, Handling { incoming, msg, seq }: Handling<'_>, spent: bool) -> Result<bool> {
+    /// Escalates the thread instead of prompting when it has no turns (`spent`) or allowance left; true if so. A trail
+    /// step is not escalated but turned away, its conductor told ([`Inbox::step_unanswered`]).
+    async fn out_of_turns(&self, h @ Handling { incoming, msg, seq }: Handling<'_>, spent: bool) -> Result<bool> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
+        let step = envelope.trail_step.is_some() && incoming.post.is_none();
         if spent {
+            if step {
+                self.step_unanswered(h, "Turn budget spent: the step's thread has no turns left").await?;
+                return Ok(true);
+            }
             // Out of turns: escalate the thread instead of spending another prompt.
             self.escalate(incoming, "Turn budget spent", EscalationReason::TurnBudget, seq, None).await?;
             bus::double_ack(self.client, msg).await?;
@@ -493,6 +511,10 @@ impl Inbox<'_> {
             return Ok(true);
         }
         match self.ledger.reached(thread).await {
+            Ok(Some(cap)) if step => {
+                self.step_unanswered(h, &cap).await?;
+                Ok(true)
+            }
             Ok(Some(cap)) => {
                 // Out of allowance: the same, until a human or the escalation's leader answers, or the day ends.
                 self.escalate(incoming, &cap, EscalationReason::Cap, seq, None).await?;
@@ -508,6 +530,21 @@ impl Inbox<'_> {
         }
     }
 
+    /// Ack `incoming`, a trail step at stream sequence `seq`, unprompted, once its conductor is told that the ant does
+    /// not answer it, for `why`, in an [`NoticeKind::Unanswered`] notice ([`Envelope::step_notice`]): the step's call
+    /// raises in the script at once, which an escalation would leave waiting. The notice takes the step's reply id, so
+    /// a redelivery tells once.
+    async fn step_unanswered(&self, Handling { incoming, msg, seq }: Handling<'_>, why: &str) -> Result<()> {
+        let envelope = &incoming.envelope;
+        tracing::info!(thread = %envelope.thread_id, conductor = %envelope.from, why, "turning a trail step away");
+        let text = format!("[ants] {why}; {} does not answer the step.", self.ant);
+        let notice = envelope.step_notice(self.ant.clone(), NoticeKind::Unanswered, text);
+        bus::store(self.js, notice.subject(), &notice, &super::delivery::reply_id(self.ant, envelope)).await?;
+        bus::double_ack(self.client, msg).await?;
+        self.marks.attempts.forget(seq).await;
+        Ok(())
+    }
+
     /// Whether the session called `complete` in the turn on `incoming`, and why: never for a message always answered,
     /// which the tool refuses, so one taken anyway is ignored.
     fn completed(&self, incoming: &Incoming) -> Option<crate::mcp::Completed> {
@@ -518,6 +555,44 @@ impl Inbox<'_> {
             return None;
         }
         Some(completed)
+    }
+
+    /// Whom the session asked with ask_human in the turn on `incoming`, when that ends the turn with no reply: on a
+    /// trail step, and on a later message of the step's thread while the step waits for the answer after the human's
+    /// ([`Inbox::asked_step`]), which asked again.
+    async fn asked(&self, incoming: &Incoming) -> Option<UserId> {
+        let whom = self.mcp?.take_asked(&incoming.envelope.thread_id)?;
+        if incoming.post.is_some() {
+            return None;
+        }
+        if incoming.envelope.trail_step.is_some() {
+            return Some(whom);
+        }
+        match self.asked_step(incoming).await {
+            Ok(asked) => asked.map(|_| whom),
+            Err(e) => {
+                let thread = &incoming.envelope.thread_id;
+                tracing::warn!(%thread, error = format!("{e:#}"), "reading the trail step a turn asked about");
+                None
+            }
+        }
+    }
+
+    /// Tell the conductor of `incoming`, a trail step whose turn asked a human as `reason` says, that the step waits
+    /// on the human, kept with the thread's spend so that the answer once the human answered goes to the conductor
+    /// ([`Inbox::reply_for`]). A later message's turn asking again leaves the step waiting as it is.
+    async fn step_asked(&self, incoming: &Incoming, reason: Option<&str>) -> Result<()> {
+        let envelope = &incoming.envelope;
+        if envelope.trail_step.is_none() {
+            return Ok(());
+        }
+        let step = AskedStep { conductor: envelope.from.clone(), step: envelope.id, turn_budget: envelope.turn_budget };
+        self.ledger.step_asked(&envelope.thread_id, step).await?;
+        let asked = reason.unwrap_or("asked a human");
+        let text = format!("[ants] {} {asked} and answers the step once answered.", self.ant);
+        let notice = envelope.step_notice(self.ant.clone(), NoticeKind::Asked, text);
+        bus::store(self.js, notice.subject(), &notice, &format!("asked-{}", envelope.id)).await?;
+        Ok(())
     }
 
     /// The prompt `text` for the message handled, the daemon's ends of it, and its measures, which begin once its
@@ -674,10 +749,15 @@ impl Inbox<'_> {
 
 /// Why a turn that ended sends no reply, if it sends none: the session called `complete`, or the message was another
 /// ant's reply to the ant's `own`.
-fn unanswered(completed: Option<crate::mcp::Completed>, own: bool) -> Option<(NoReplyWhy, Option<String>)> {
-    match completed {
-        Some(completed) => Some((NoReplyWhy::Completed, completed.reason)),
-        None => own.then_some((NoReplyWhy::ReplyToOwn, None)),
+fn unanswered(
+    completed: Option<crate::mcp::Completed>,
+    asked: Option<UserId>,
+    own: bool,
+) -> Option<(NoReplyWhy, Option<String>)> {
+    match (completed, asked) {
+        (_, Some(whom)) => Some((NoReplyWhy::Asked, Some(format!("asked {whom}")))),
+        (Some(completed), None) => Some((NoReplyWhy::Completed, completed.reason)),
+        (None, None) => own.then_some((NoReplyWhy::ReplyToOwn, None)),
     }
 }
 

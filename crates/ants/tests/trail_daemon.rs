@@ -70,6 +70,8 @@ mod tip_tools;
 mod tips;
 #[path = "trail_daemon/tips_carried.rs"]
 mod tips_carried;
+#[path = "trail_daemon/unanswered.rs"]
+mod unanswered;
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": [\"one\"]}\n";
 

@@ -190,8 +190,9 @@ impl Inbox<'_> {
     }
 
     /// Settle `incoming`, the message at stream sequence `seq`, whose prompt `by`'s message `id` steered and took the
-    /// answer of. Its sender is told so, unless it is a post, another ant's reply to the ant's own message, or a
-    /// message whose answer goes elsewhere than its sender, or the thread has no turns left: those end with no reply
+    /// answer of. A trail step's conductor is told so in any case ([`Envelope::step_notice`]), its call failing. Another
+    /// message's sender is told so, unless it is a post, another ant's reply to the ant's own message, or a message
+    /// whose answer goes elsewhere than its sender, or the thread has no turns left: those end with no reply
     /// ([`NoReplyWhy::Steered`]). Either outcome is kept on the machine when it cannot be recorded or sent, so the retry
     /// settles the message the same way rather than prompting the harness with it again.
     pub(super) async fn superseded(
@@ -208,11 +209,19 @@ impl Inbox<'_> {
             && !envelope.webhook
             && envelope.from != *self.ant
             && envelope.escalation.is_none();
-        let text = format!(
-            "[ants] {by} steered the prompt answering this message with message {id}; the answer goes in reply to it."
-        );
-        let notice = tells.then(|| envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope)).ok());
-        let Some(notice) = notice.flatten() else {
+        let notice = if envelope.trail_step.is_some() && incoming.post.is_none() {
+            // A step's conductor is told whatever turns the thread has left, the step's own included: its call fails.
+            let text =
+                format!("[ants] {by} steered the prompt answering the step with message {id}, which takes the answer.");
+            Some(envelope.step_notice(self.ant.clone(), NoticeKind::Steered, text))
+        } else {
+            let text = format!(
+                "[ants] {by} steered the prompt answering this message with message {id}; the answer goes in reply to \
+                 it."
+            );
+            tells.then(|| envelope.reply(self.ant.clone(), text, self.humans.sender_role(envelope)).ok()).flatten()
+        };
+        let Some(notice) = notice else {
             let reason = format!("message {id} from {by} took the answer");
             let unanswered = Some((NoReplyWhy::Steered, Some(reason)));
             let given = Given { text: String::new(), limit: None, unanswered, tokens: 0, title: None, files: None };

@@ -301,6 +301,15 @@ impl Envelope {
         Self { trail_step: Some(Box::new(step)), ..self }
     }
 
+    /// The notice of `kind` from `from`, this trail step's recipient, to the step's conductor on the step's thread,
+    /// replying to the step with the turns it has: how the recipient's daemon tells the conductor what becomes of a
+    /// step it does not answer with a reply. Unlike [`Envelope::reply`], it is made with no turns left too.
+    #[must_use]
+    pub fn step_notice(&self, from: UserId, kind: NoticeKind, text: impl Into<String>) -> Self {
+        let notice = self.follow_up(from, self.from.clone(), text).as_notice(kind);
+        Self { in_reply_to: Some(self.id), turn_budget: self.turn_budget, ..notice }
+    }
+
     /// The envelope as asking its recipient to start `start` ([`Envelope::trail_start`]).
     #[must_use]
     pub fn starting(self, start: Option<TrailStart>) -> Self {
