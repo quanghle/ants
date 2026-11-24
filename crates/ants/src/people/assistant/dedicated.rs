@@ -385,7 +385,7 @@ fn entry(nats: &Nats<'_>, args: &EnableArgs, ant: &UserId, summary: &Summary, ou
 async fn issue(nats: &Nats<'_>, dir: &Path, ant: &UserId, out: &Path, store_key: bool) -> Result<()> {
     let (human, domain, url) = (&nats.me.id, nats.domain, nats.url);
     let permissions = Permissions::for_assistant(ant, human).with_js_domain(domain);
-    let new = auth::NewDevice { assistant_of: Some(human.clone()), ..auth::NewDevice::default() };
+    let new = auth::Registered { assistant_of: Some(human.clone()), ..auth::Registered::default() };
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
@@ -736,7 +736,7 @@ mod tests {
         }
         ants_daemon::hub::create_identities(&h_js).await.unwrap();
         let admin_creds = server.dir().join("alice-admin.creds");
-        let admin = auth::NewDevice { label: Some("laptop"), admin: true, ..auth::NewDevice::default() };
+        let admin = auth::Registered { label: Some("laptop"), admin: true, ..auth::Registered::default() };
         let rights = Permissions::for_user(&alice, Role::Human);
         auth::Issue::new(&team, &alice, issued::Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
         let nats = Nats::new(&server.url, Some(&admin_creds), None).unwrap();

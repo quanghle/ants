@@ -9,7 +9,7 @@ use super::*;
 use crate::test_support::Server;
 use ants_daemon::Harnesses;
 
-use crate::auth::{Issue, NewDevice, issue_host};
+use crate::auth::{Issue, Registered, issue_host};
 use crate::credentials::issued::Kind;
 use crate::test_support::orders::{WAIT, host_of_m1};
 
@@ -114,7 +114,7 @@ async fn an_admin_reads_the_settings_and_changes_them_expecting_what_was_read() 
     h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
     let admin_creds = server.dir().join("alice-admin.creds");
-    let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
@@ -209,7 +209,7 @@ async fn sets_at_once_on_an_ant_never_read_wait_for_the_pending_read() {
     h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::devices_config()).await.unwrap();
     let admin_creds = server.dir().join("alice-admin.creds");
-    let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
@@ -252,7 +252,7 @@ async fn a_read_held_for_consent_is_waited_for_and_told_as_waiting() {
     ants_daemon::bus::ensure_stream(&h_js).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
     let admin_creds = server.dir().join("alice-admin.creds");
-    let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();
@@ -307,7 +307,7 @@ async fn the_shared_settings_are_created_once_changed_by_orders_and_served_on_ev
     }
     ants_daemon::hub::create_identities(&h_js).await.unwrap();
     let admin_creds = server.dir().join("alice-admin.creds");
-    let device = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let device = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&server.dir().join("auth"), &alice, Kind::Human, rights).with(&device).into_file(&admin_creds).unwrap();
     let admin = Nats::new(&server.url, Some(&admin_creds), None).unwrap();

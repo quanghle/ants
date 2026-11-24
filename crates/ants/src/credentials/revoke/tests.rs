@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use super::*;
-use crate::credentials::issued::{device_keys, devices, rename, standing_approval};
+use crate::credentials::devices::{device_keys, devices, rename};
+use crate::credentials::issued::standing_approval;
 use crate::credentials::listing::listing;
 use crate::credentials::push::{connect_system, push};
 use crate::test_support::Server;
@@ -260,11 +261,11 @@ fn revoking_a_name_withdraws_its_approval_grants_but_revoking_a_device_does_not(
     auth::init(&team).unwrap();
     let carol: ants_proto::UserId = "carol".parse().unwrap();
     let sign = |label| {
-        let new = auth::NewDevice {
+        let new = auth::Registered {
             label: Some(label),
             github: Some(GithubAccount { id: 7, login: "mallory".into() }),
             grant: Some(Grant::Approval("alice".into())),
-            ..auth::NewDevice::default()
+            ..auth::Registered::default()
         };
         let key = nkeys::KeyPair::new_user().public_key();
         let permissions = ants_proto::Permissions::for_user(&carol, ants_proto::Role::Human);

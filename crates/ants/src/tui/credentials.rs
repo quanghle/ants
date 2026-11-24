@@ -181,7 +181,7 @@ impl Heard {
                 self.read = Some(Err(e));
                 None
             }
-            Event::Recorded(recorded) => {
+            Event::Registered(recorded) => {
                 self.recorded = recorded;
                 None
             }
@@ -305,7 +305,7 @@ impl Page {
 pub enum Event {
     Heard(Result<Vec<Asked>, String>),
     /// Where `ants signer` recorded the account key to be, read where it is not on this machine.
-    Recorded(Option<AccountHolder>),
+    Registered(Option<AccountHolder>),
     /// What carrying the order out did, or why it failed.
     Done(Order, Result<String, String>),
 }
@@ -401,7 +401,7 @@ impl Io {
                     let holder = machines::holder(&js)
                         .await
                         .inspect_err(|e| tracing::debug!("reading the account key's holder: {e:#}"));
-                    Event::Recorded(holder.ok().flatten())
+                    Event::Registered(holder.ok().flatten())
                 }
                 .boxed_local(),
             );
@@ -591,7 +591,7 @@ mod tests {
             version: String::new(),
             updated_at: at(1),
         };
-        m.credentials_event(Event::Recorded(Some(recorded)), at(1));
+        m.credentials_event(Event::Registered(Some(recorded)), at(1));
         let shown = screen(&m, 140, 30, at(1) + chrono::Duration::minutes(3));
         assert!(
             shown.contains("approve them on machine keybox (host keybox.lan), as `ants signer` there recorded 3m ago"),
@@ -613,7 +613,7 @@ mod tests {
         let (_, js) = server.connect_as(&user("alice"), ants_proto::Role::Human).await;
         let (mut elsewhere, holder) = Io::new(js.clone(), &server.url, None, Ok(server.dir().to_owned()), listen);
         assert!(matches!(holder, Holder::Elsewhere(why) if why.starts_with("not in")));
-        assert!(matches!(elsewhere.next().await, Event::Recorded(None)), "no signer recorded the account key");
+        assert!(matches!(elsewhere.next().await, Event::Registered(None)), "no signer recorded the account key");
         let team = server.dir().join("auth");
         let (mut io, holder) = Io::new(js, &server.url, None, Ok(team.clone()), listen);
         assert_eq!(holder, Holder::Here(team.clone()));
@@ -637,7 +637,7 @@ mod tests {
                     }
                     Event::Heard(Ok(_)) => io.refresh(),
                     Event::Heard(Err(e)) => panic!("{e}"),
-                    Event::Done(..) | Event::Recorded(_) => unreachable!(),
+                    Event::Done(..) | Event::Registered(_) => unreachable!(),
                 }
             }
             assert!(io.order(Order::Approve(dev_c.clone(), key.public_key())));

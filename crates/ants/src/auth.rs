@@ -38,8 +38,8 @@ pub use self::files::{creds_jwt, read_creds, read_seed, replace_creds, write_cre
 pub(crate) use self::files::{replace_secret, seed, write_secret, xseed};
 pub(crate) use self::issuing::device_key;
 pub use self::issuing::{
-    Issue, NewDevice, issue_builtin, issue_channel_manager, issue_host, sign_added, sign_builtin, sign_channel_manager,
-    sign_host, sign_ordered, sign_user, sign_with,
+    Issue, Registered, issue_builtin, issue_channel_manager, issue_host, sign_added, sign_builtin,
+    sign_channel_manager, sign_host, sign_ordered, sign_user, sign_with,
 };
 pub use self::relocate::move_stores;
 pub use self::renewal::{Renewed, renew, renew_registered};

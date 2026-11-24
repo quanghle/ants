@@ -18,6 +18,7 @@ use super::claims::{check_user_key, user_jwt, verified_body};
 use super::files::{creds, creds_jwt, creds_with, load, seed, write_secret};
 use super::uplink::allowed;
 use super::{ACCOUNT_SEED, check_not_reserved};
+use crate::credentials::devices;
 use crate::credentials::issued::{self, Issued, Kind};
 
 /// Credentials to issue, signed with the account key in the team directory `dir`: those of `user`, of `kind`, with
@@ -28,23 +29,23 @@ pub struct Issue<'a> {
     pub user: &'a UserId,
     pub kind: Kind,
     pub permissions: Permissions,
-    pub new: NewDevice<'a>,
+    pub new: Registered<'a>,
 }
 
 impl<'a> Issue<'a> {
     /// Credentials recording nothing more than their key.
     pub fn new(dir: &'a Path, user: &'a UserId, kind: Kind, permissions: Permissions) -> Self {
-        Self { dir, user, kind, permissions, new: NewDevice::default() }
+        Self { dir, user, kind, permissions, new: Registered::default() }
     }
 
     /// A human's, for a new device labelled `label`.
     #[cfg(test)]
     pub fn labelled(self, label: Option<&'a str>) -> Self {
-        Self { new: NewDevice { label, ..self.new }, ..self }
+        Self { new: Registered { label, ..self.new }, ..self }
     }
 
     /// Recording `new` with the device.
-    pub fn with(self, new: &NewDevice<'a>) -> Self {
+    pub fn with(self, new: &Registered<'a>) -> Self {
         Self { new: new.clone(), ..self }
     }
 
@@ -85,7 +86,7 @@ impl<'a> Issue<'a> {
 /// What the registry records of new credentials besides their key, a human's new device above all, and when they
 /// expire.
 #[derive(Debug, Clone, Default)]
-pub struct NewDevice<'a> {
+pub struct Registered<'a> {
     pub label: Option<&'a str>,
     /// The GitHub user the human's name is bound to ([`crate::signing::binding`]).
     pub github: Option<GithubAccount>,
@@ -108,7 +109,7 @@ pub struct NewDevice<'a> {
     pub order: Option<ants_proto::Uuid>,
 }
 
-impl NewDevice<'_> {
+impl Registered<'_> {
     fn record(&self, issued: Issued, device: Option<DeviceId>, xkey: Option<DeviceKey>) -> Issued {
         let issued = with_device(issued, device, self.label, xkey);
         Issued {
@@ -134,7 +135,7 @@ pub(crate) fn device_key(xkey: &XKey) -> Result<DeviceKey> {
 /// marked [`REGISTERED_TAG`] when a registration grants it (`new.grant`), [`ADMIN_TAG`] for an admin (`new.admin`)
 /// and [`WEB_TAG`] for a web device (`new.web`), which is never an admin's and binds no encryption key; an
 /// assistant's carry its human's [`AssistantOf::tag`] instead.
-fn device_claims(kind: Kind, new: &NewDevice<'_>, xkey: Option<&DeviceKey>) -> Result<(Option<DeviceId>, Value)> {
+fn device_claims(kind: Kind, new: &Registered<'_>, xkey: Option<&DeviceKey>) -> Result<(Option<DeviceId>, Value)> {
     if new.admin && kind != Kind::Human {
         bail!("only a human's credentials carry the admin role");
     }
@@ -164,7 +165,7 @@ fn device_claims(kind: Kind, new: &NewDevice<'_>, xkey: Option<&DeviceKey>) -> R
         let tags: Vec<String> = new.assistant_of.iter().map(AssistantOf::tag).collect();
         return Ok((None, if tags.is_empty() { json!({}) } else { json!({ "tags": tags }) }));
     }
-    new.label.map(issued::check_label).transpose()?;
+    new.label.map(devices::check_label).transpose()?;
     let device = DeviceId::generate();
     let tags = human_tags(Some(&device), xkey, new.grant.is_some(), new.admin, new.web);
     Ok((Some(device), json!({ "tags": tags })))
@@ -312,7 +313,7 @@ pub fn sign_added(
     manager: &UserId,
 ) -> Result<String> {
     let permissions = Permissions::for_user(ant, Role::Ant).with_js_domain(js_domain);
-    let new = NewDevice { template: Some(template), added_by: Some(manager.clone()), ..NewDevice::default() };
+    let new = Registered { template: Some(template), added_by: Some(manager.clone()), ..Registered::default() };
     Issue { dir, user: ant, kind: Kind::Ant, permissions, new }.for_key(public_key, None).map(|(jwt, _)| jwt)
 }
 
@@ -332,7 +333,7 @@ pub fn sign_ordered(
         None => (Permissions::for_user(ant, Role::Ant), Kind::Ant),
     };
     let permissions = permissions.with_js_domain(js_domain);
-    let new = NewDevice { order: Some(order), assistant_of: assistant_of.cloned(), ..NewDevice::default() };
+    let new = Registered { order: Some(order), assistant_of: assistant_of.cloned(), ..Registered::default() };
     Issue { dir, user: ant, kind, permissions, new }.for_key(public_key, None).map(|(jwt, _)| jwt)
 }
 

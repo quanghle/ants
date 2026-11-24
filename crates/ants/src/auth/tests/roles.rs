@@ -315,7 +315,7 @@ async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
     let Some(server) = Server::start() else { return };
     let (alice, pa) = (p("alice"), p("pa"));
     let creds = server.dir().join("pa-assistant.creds");
-    let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+    let new = Registered { assistant_of: Some(alice.clone()), ..Registered::default() };
     let rights = Permissions::for_assistant(&pa, &alice);
     Issue::new(&server.dir().join("auth"), &pa, Kind::Assistant, rights).with(&new).into_file(&creds).unwrap();
     let (client, mut errors) = server.watched_with(&pa, &creds).await;
@@ -353,7 +353,7 @@ async fn an_assistant_reads_its_human_s_marker_but_writes_only_its_own() {
     let (_a_client, a_js) = server.connect_as(&alice, Role::Human).await;
     let (_, b_js) = server.connect_as(&bob, Role::Human).await;
     let creds = server.dir().join("pa-assistant.creds");
-    let new = NewDevice { assistant_of: Some(alice.clone()), ..NewDevice::default() };
+    let new = Registered { assistant_of: Some(alice.clone()), ..Registered::default() };
     let rights = Permissions::for_assistant(&pa, &alice);
     Issue::new(&server.dir().join("auth"), &pa, Kind::Assistant, rights).with(&new).into_file(&creds).unwrap();
     let (pa_client, mut pa_js) = bus::connect(&server.url, Some(&creds), None, &pa, "test").await.unwrap();

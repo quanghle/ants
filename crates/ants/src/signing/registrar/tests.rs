@@ -19,7 +19,7 @@ use tokio::time::timeout;
 
 use super::offboard::{Offboarded, Offboarder};
 use super::*;
-use crate::credentials::{issued, renew, revoke};
+use crate::credentials::{devices, issued, renew, revoke};
 use crate::signing::signer;
 use crate::test_support::Server;
 use crate::test_support::github::fake;
@@ -445,7 +445,7 @@ async fn a_web_device_registers_with_web_credentials_and_keeps_them_through_rene
         assert!(ttl > WEB_TTL - 60 && ttl <= WEB_TTL, "{ttl}");
         let record = issued::issued(&team).unwrap().pop().unwrap();
         assert_eq!((record.web, record.renewed_from), (true, Some(alice.key.public_key())));
-        let devices = issued::devices(&team, "alice").unwrap();
+        let devices = devices::devices(&team, "alice").unwrap();
         assert_eq!(devices.iter().map(|d| (d.web, d.key.clone())).collect::<Vec<_>>(), [(true, key.public_key())]);
 
         let laptop = Device::new("alice");

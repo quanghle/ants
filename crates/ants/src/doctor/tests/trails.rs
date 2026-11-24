@@ -319,7 +319,13 @@ async fn the_worker_check_starts_the_worker_as_a_daemon_does() {
     // The ants binary cargo builds beside the test's, for the integration tests.
     let exe = std::env::current_exe().unwrap();
     let ants = exe.ancestors().skip(1).map(|dir| dir.join("ants")).find(|ants| ants.is_file());
-    let ants = ants.expect("the ants binary is built beside the test binary, as `cargo test` builds it");
+    // Cargo builds it for the integration tests alone: `cargo test --bins` has none to start.
+    let Some(ants) = ants else {
+        let required = std::env::var(ants_test_support::REQUIRE_TOOLS).as_deref() == Ok("1");
+        assert!(!required, "no ants binary beside the test binary, which `cargo test` builds, and tools are required");
+        eprintln!("no ants binary beside the test binary (`cargo test` builds it); skipping");
+        return;
+    };
     // A daemon allows GRACE; a debug build started on a loaded machine may take longer.
     let deadline = Duration::from_mins(1);
     let check = check_worker(&ants, deadline).await;
