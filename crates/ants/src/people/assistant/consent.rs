@@ -26,8 +26,8 @@ use crate::people::humans;
 use crate::tools::HeldAct;
 use crate::{auth, tools};
 
-/// `ants assistant confirm [ACT] [--deny]`.
-pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<()> {
+/// `ants assistant confirm [ACT] [--deny] [--json]`.
+pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool, json: bool) -> Result<()> {
     let creds = signing_creds(nats)?;
     let human = &nats.me.id;
     let (_, js) = nats.connect("ants-assistant").await?;
@@ -43,6 +43,10 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool) -> Result<(
         .collect();
     let orders = orders_held_for(&js, human).await?;
     let Some(act) = act else {
+        if json {
+            waiting_json(&orders, &held).iter().for_each(|shown| println!("{shown}"));
+            return Ok(());
+        }
         if held.is_empty() && orders.is_empty() {
             println!("no decision or order of an assistant waits for {human} to confirm it");
         }
@@ -199,8 +203,30 @@ fn select_order(orders: Vec<AdminOrder>, act: &str) -> Result<AdminOrder> {
     }
 }
 
-/// `ants assistant allow [RULE...] [--remove] [--clear]`.
-pub async fn allow(nats: &Nats<'_>, rules: Vec<String>, remove: bool, clear: bool) -> Result<()> {
+/// What `ants assistant confirm --json` prints of the orders and decisions waiting: one object each.
+fn waiting_json(orders: &[AdminOrder], held: &[(ApprovalRequest, Vec<HeldAct>)]) -> Vec<serde_json::Value> {
+    let orders = orders.iter().map(|order| {
+        let act = Act::Order { machine: order.machine.clone(), ant: order.ant.clone(), id: order.id };
+        serde_json::json!({
+            "act": act.qualified(), "kind": "order", "assistant": order.admin, "ant": order.ant,
+            "op": order.op.describe(), "expires_at": order.sent_at + ORDER_HOLD,
+        })
+    });
+    let decisions = held.iter().flat_map(|(request, acts)| {
+        acts.iter().map(move |a| {
+            serde_json::json!({
+                "act": tools::qualified(request), "kind": "decision", "assistant": a.assistant,
+                "verdict": a.verdict, "tool_kind": request.tool.kind,
+                "title": request.tool.title.lines().next().unwrap_or_default(),
+                "expires_at": request.expires_at,
+            })
+        })
+    });
+    orders.chain(decisions).collect()
+}
+
+/// `ants assistant allow [RULE...] [--remove] [--clear] [--json]`.
+pub async fn allow(nats: &Nats<'_>, rules: Vec<String>, remove: bool, clear: bool, json: bool) -> Result<()> {
     let human = &nats.me.id;
     let rules: Vec<String> = rules.iter().map(|r| r.trim().to_owned()).collect();
     for rule in &rules {
@@ -218,6 +244,16 @@ pub async fn allow(nats: &Nats<'_>, rules: Vec<String>, remove: bool, clear: boo
             None => None,
         };
         let stored = stored.filter(|p| account.is_some_and(|a| p.verify(&record_key, a, Utc::now()).is_ok()));
+        if json {
+            let stored = stored.filter(|p| !p.rules.is_empty());
+            let stand = stored.as_ref().is_some_and(|p| Some(&p.assistant) == assistant.as_ref());
+            let (assistant, rules) = stored.map_or((None, Vec::new()), |p| (Some(p.assistant), p.rules));
+            println!(
+                "{}",
+                serde_json::json!({ "human": human, "assistant": assistant, "stand": stand, "rules": rules })
+            );
+            return Ok(());
+        }
         match stored.filter(|p| !p.rules.is_empty()) {
             Some(p) if Some(&p.assistant) == assistant.as_ref() => {
                 println!("decisions of {} for {human} take effect unconfirmed on:", p.assistant);

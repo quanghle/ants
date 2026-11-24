@@ -87,9 +87,20 @@ impl Approver {
         Ok(heard)
     }
 
-    /// Print the renewal requests heard.
-    pub async fn list_renewals(&self) -> Result<()> {
+    /// Print the renewal requests heard, with `json` one JSON object a line.
+    pub async fn list_renewals(&self, json: bool) -> Result<()> {
         let heard = self.renewals(None).await?;
+        if json {
+            for r in &heard {
+                let holder = Finding::from_jwt(&r.current).map_or_else(|_| r.name.clone(), |f| f.holder());
+                let shown = serde_json::json!({
+                    "name": r.name, "holder": holder, "public_key": r.public_key, "host": r.host,
+                    "sent_at": r.sent_at,
+                });
+                println!("{shown}");
+            }
+            return Ok(());
+        }
         if heard.is_empty() {
             println!("no renewal requests heard in {}s", self.listen.as_secs());
         }

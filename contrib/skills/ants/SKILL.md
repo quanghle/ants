@@ -83,7 +83,7 @@ as read, on every device of the human, including replies and notices from other 
 ```sh
 ants watch dev-a <thread>   # live state, streamed thoughts and reply, tool calls and plan of dev-a on <thread>
 ants watch                  # all live traffic; escalations show level, reason, stuck ant/thread, leader and visited
-ants notes <thread>         # passive shared board for <thread>; posts there wake nobody
+ants notes <thread>         # passive shared board for <thread>; posts there wake nobody; --json one post per line
 ants thread show <thread>   # the thread's whole stored history, with how each prompt ended; reads without consuming anything
 ants thread list --grep foo # threads of the last 24h with a message mentioning foo
 ```
@@ -134,6 +134,7 @@ posted.
 
 ```sh
 ants channel list                                   # channels, members, messenger, owner; a human's unread `N (@M)`
+ants channel list --json                            # one channel entry per line, with `unread` where counted
 ants post '#ops' "@dev-b @alice the deploy failed"  # wakes dev-b, notifies alice's inbox, prints thread and message <id>
 ants post '#ops' --thread <thread> "any news?"      # follow up on the thread
 ants post '#ops' --reply-to <message> "@dev-b why?" # reply on its thread, quoting that post
@@ -141,7 +142,11 @@ ants post --wait '#ops' "who owns billing?"         # print the first post by an
 ants post --follow --timeout 10m '#ops' "status?"   # print each later post on the thread for 10m
 ants channel read ops --thread <thread>             # read one thread (or --limit <n> for the last n threads)
 ants channel read ops --peek                        # read without marking the posts read (human credentials)
+ants channel read ops --peek --json                 # one post per line (id, thread_id, from, by, text, mentions, ...)
 ```
+
+Scripts read `--json` rather than the text, which changes: `ants channel list|read|notify`, `ants notes`,
+`ants dead list|watch`, `ants enroll list|renewals` and `ants assistant show|confirm|allow` all take it.
 
 Quote `'#channel'` or omit `#` (`ops`): an unquoted `#` starts a shell comment. Mutating channels
 (`ants channel create/set` with `--member <user>`, `ants channel add/remove <channel> <user>...`,

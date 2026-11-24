@@ -93,7 +93,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Post(args) => send::post(&nats()?, args).await,
         Command::Channel(command) => channel::run(&conn, command).await,
         Command::Team(command) => team::run(&nats()?, command).await,
-        Command::Notes { thread, attach, text } => send::notes(&nats()?, thread, attach, text).await,
+        Command::Notes { thread, attach, text, json } => send::notes(&nats()?, thread, attach, text, json).await,
         Command::React { message, reaction, remove } => send::react(&nats()?, message, reaction, remove).await,
         Command::Answer { message, answer } => send::answer(&nats()?, message, answer).await,
         Command::Thread(command) => thread::run(&nats()?, command).await,

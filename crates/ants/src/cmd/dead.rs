@@ -19,7 +19,11 @@ use crate::text::excerpt;
 #[derive(Subcommand, Debug)]
 pub(crate) enum DeadCommand {
     /// List dead letters, oldest first.
-    List,
+    List {
+        /// One JSON object per dead letter, the `DeadLetter` with its own sequence as `seq`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Send a dead letter's message to its inbox again, as it was, and remove the dead letter.
     Replay {
         #[arg(add = ArgValueCandidates::new(completions::dead_letters))]
@@ -37,27 +41,33 @@ pub(crate) enum DeadCommand {
         /// (default: off).
         #[arg(long, value_name = "ADDR")]
         metrics: Option<SocketAddr>,
+        /// One JSON object per dead letter stored, as `ants dead list --json` prints it.
+        #[arg(long)]
+        json: bool,
     },
 }
 
 pub(crate) async fn run(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
     let (client, js) = nats.connect("ants-cli").await?;
     match command {
-        DeadCommand::List => {
+        DeadCommand::List { json } => {
             let letters = dead::list(&stream(&js).await?).await?;
-            if letters.is_empty() {
+            if letters.is_empty() && !json {
                 println!("no dead letters");
             }
             for (seq, letter) in &letters {
-                println!("{}", dead_row(*seq, letter));
+                println!("{}", if json { dead_json(*seq, letter) } else { dead_row(*seq, letter) });
             }
         }
         DeadCommand::Replay { seq } => println!("{}", replayed(&js, seq).await?),
         DeadCommand::Drop { seq } => println!("{}", dropped(&js, seq).await?),
-        DeadCommand::Watch { metrics } => {
+        DeadCommand::Watch { metrics, json } => {
             let backstop = Arc::new(metrics::Backstop::new(nats.me.id.clone(), client.clone()));
             let _metrics = serve_metrics(metrics, backstop).await?;
-            let watch = dead::watch(&client, &js, &nats.me.id, |seq, letter| println!("{}", dead_row(seq, letter)));
+            let print = |seq, letter: &DeadLetter| {
+                println!("{}", if json { dead_json(seq, letter) } else { dead_row(seq, letter) });
+            };
+            let watch = dead::watch(&client, &js, &nats.me.id, print);
             tokio::select! {
                 watched = watch => watched?,
                 _ = tokio::signal::ctrl_c() => {}
@@ -65,6 +75,16 @@ pub(crate) async fn run(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// One line of `ants dead list --json`: the dead letter, with its own sequence in the stream, which `ants dead replay`
+/// and `drop` take, as `seq`.
+fn dead_json(seq: u64, letter: &DeadLetter) -> String {
+    let mut json = serde_json::to_value(letter).unwrap_or_default();
+    if let serde_json::Value::Object(fields) = &mut json {
+        fields.insert("seq".to_owned(), seq.into());
+    }
+    json.to_string()
 }
 
 /// One line of `ants dead list`: sequence, ant, thread, sender, deliveries, time, error and the start of the text, or
@@ -104,6 +124,10 @@ mod tests {
 
         let letter = DeadLetter::of_payload("dev-a".parse().unwrap(), 4, 1, "not an envelope", b"{oops");
         assert!(dead_row(13, &letter).ends_with("\tnot an envelope\t{oops"));
+
+        let json: serde_json::Value = serde_json::from_str(&dead_json(12, &letter)).unwrap();
+        assert_eq!((json["seq"].as_u64(), json["error"].as_str()), (Some(12), Some("not an envelope")));
+        assert_eq!(json["payload"], "{oops");
 
         let junk = crate::test_support::hostile::HOSTILE;
         let letter = DeadLetter::of_payload("dev-a".parse().unwrap(), 4, 1, junk, junk.as_bytes());

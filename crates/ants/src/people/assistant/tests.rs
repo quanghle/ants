@@ -611,11 +611,11 @@ async fn a_human_confirms_denies_or_pre_allows_its_assistant_s_decisions() {
     assert!(held.iter().all(|(_, acts)| acts.len() == 1 && acts[0].assistant == pa && acts[0].human == alice));
 
     let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
-    Box::pin(consent::confirm(&nats, Some(&tools::qualified(&push)), false)).await.unwrap();
-    Box::pin(consent::confirm(&nats, Some(&tools::qualified(&rm)), true)).await.unwrap();
-    let err = consent::allow(&nats, vec!["execute:cargo test*".into()], false, false).await.unwrap_err();
+    Box::pin(consent::confirm(&nats, Some(&tools::qualified(&push)), false, false)).await.unwrap();
+    Box::pin(consent::confirm(&nats, Some(&tools::qualified(&rm)), true, false)).await.unwrap();
+    let err = consent::allow(&nats, vec!["execute:cargo test*".into()], false, false, false).await.unwrap_err();
     assert!(err.to_string().contains("ANT/RULE"), "{err}");
-    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], false, false).await.unwrap();
+    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], false, false, false).await.unwrap();
 
     let state_of = async |r: &ApprovalRequest| {
         let (seq, _) = tools::find(&stream, &tools::qualified(r)).await.unwrap();
@@ -643,7 +643,7 @@ async fn a_human_confirms_denies_or_pre_allows_its_assistant_s_decisions() {
     assert_eq!(reader.answer(&alice, &pa, &act(&rm)), Some(ActAnswer::Deny));
     assert_eq!(reader.pre_allow(&alice, &pa).unwrap().rules, ["dev-a/execute:cargo test*"]);
 
-    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], true, false).await.unwrap();
+    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], true, false, false).await.unwrap();
     assert_eq!(state_of(&test).await, State::Pending, "the rule removed");
 }
 
@@ -711,18 +711,18 @@ async fn an_assistant_s_admin_orders_wait_for_its_human_to_consent() {
     let held = comes_to(&pause, OrderState::Held).await;
     assert_eq!(held.on_behalf_of.as_ref(), Some(&alice));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "held, not applied");
-    Box::pin(consent::confirm(&nats, Some(&act(&pause)), false)).await.unwrap();
+    Box::pin(consent::confirm(&nats, Some(&act(&pause)), false, false)).await.unwrap();
     comes_to(&pause, OrderState::Applied).await;
     assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{text}paused = true\n"));
 
     let resume = send(AdminOp::Resume).await;
     comes_to(&resume, OrderState::Held).await;
-    Box::pin(consent::confirm(&nats, Some(&act(&resume)), true)).await.unwrap();
+    Box::pin(consent::confirm(&nats, Some(&act(&resume)), true, false)).await.unwrap();
     let denied = comes_to(&resume, OrderState::Refused).await;
     assert!(denied.reason.as_deref().unwrap_or_default().contains("denied by alice"), "{denied:?}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{text}paused = true\n"));
 
-    consent::allow(&nats, vec!["dev-a/order:resume".into()], false, false).await.unwrap();
+    consent::allow(&nats, vec!["dev-a/order:resume".into()], false, false, false).await.unwrap();
     let resume = send(AdminOp::Resume).await;
     comes_to(&resume, OrderState::Applied).await;
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
