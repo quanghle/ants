@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::config::NatsServer;
-use ants_test_support::{free_port, have, scratch_dir};
+use ants_test_support::{eventually_within, free_port, have, scratch_dir};
 use anyhow::{Result, bail};
 
 use super::managed::{Managed, address, alive, lock_path, probe, recorded, signal};
@@ -85,19 +85,11 @@ async fn lock_free(conf: &Path) -> bool {
     .is_ok()
 }
 
+/// How long a server has to start again or to answer.
+const WAIT: Duration = Duration::from_secs(10);
+
 fn recorded_server(conf: &Path) -> Option<u32> {
     recorded(&std::fs::read_to_string(lock_path(conf)).unwrap()).1
-}
-
-/// Wait, up to 10s, for `done`.
-async fn until(mut done: impl AsyncFnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !done().await {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("in time");
 }
 
 #[test]
@@ -266,7 +258,10 @@ async fn an_unexpected_exit_restarts_the_server() {
     let (mut managed, first) = started(&settings("nats-server", &conf), port).await;
     signal(first, libc::SIGKILL).unwrap();
     let again = async {
-        until(async || recorded_server(&conf).is_some_and(|pid| pid != first) && probe("127.0.0.1", port).await).await;
+        eventually_within(WAIT, "another server answers", async || {
+            recorded_server(&conf).is_some_and(|pid| pid != first) && probe("127.0.0.1", port).await
+        })
+        .await;
     };
     tokio::select! {
         e = managed.supervise() => panic!("gave up: {e:#}"),
@@ -352,7 +347,10 @@ async fn leaf_reloads_reach_the_managed_server() {
     let done = format!("kill -TERM {first} (the nats-server ants daemon runs, which starts it again)");
     assert_eq!(apply(&conf, Action::Restart), Outcome::Done(done));
     let again = async {
-        until(async || recorded_server(&conf).is_some_and(|pid| pid != first) && probe("127.0.0.1", port).await).await;
+        eventually_within(WAIT, "another server answers", async || {
+            recorded_server(&conf).is_some_and(|pid| pid != first) && probe("127.0.0.1", port).await
+        })
+        .await;
     };
     tokio::select! {
         e = managed.supervise() => panic!("gave up: {e:#}"),
@@ -387,7 +385,7 @@ async fn a_server_left_running_is_stopped_first() {
     let left = orphan.id();
     // Reaped as soon as it exits, as its parent, init, would.
     let reaper = std::thread::spawn(move || orphan.wait().unwrap());
-    until(async || probe("127.0.0.1", port).await).await;
+    eventually_within(WAIT, "the server left behind answers", async || probe("127.0.0.1", port).await).await;
     std::fs::write(lock_path(&conf), format!("daemon=1\nserver={left}\n")).unwrap();
     let (managed, pid) = started(&settings, port).await;
     assert_ne!(pid, left);

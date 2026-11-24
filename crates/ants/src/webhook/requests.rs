@@ -148,12 +148,12 @@ pub(super) fn recent(headers: &HeaderMap, tolerance: Duration, now: SystemTime) 
     timestamp.abs_diff(now) <= tolerance.as_secs()
 }
 
-pub(super) fn header_text(headers: &HeaderMap, name: &HeaderName) -> String {
+fn header_text(headers: &HeaderMap, name: &HeaderName) -> String {
     headers.get(name).map_or_default(|v| String::from_utf8_lossy(v.as_bytes()).trim().to_owned())
 }
 
 /// A JSON value as text: a string as itself, null as nothing, anything else as JSON.
-pub(super) fn json_text(value: &Value) -> String {
+fn json_text(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),

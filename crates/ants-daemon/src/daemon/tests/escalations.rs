@@ -105,7 +105,7 @@ async fn escalations_go_to_the_owner_and_a_registered_human_renews_the_allowance
         assert_eq!(escalation.text, format!("{cap}; needs a decision. Last message from dev-b:\ncost 2 stall"));
         let reply = next_envelope(&mut to_alice).await;
         assert!(reply.text.ends_with(": go on"), "a fresh allowance: {}", reply.text);
-        assert_eq!(reply.turn_budget, 0, "a reply to a human spends no turn, even with none left");
+        assert_eq!(reply.turn_budget, DEFAULT_TURN_BUDGET, "a human's message stamped 0 gets the fresh budget");
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
@@ -118,7 +118,8 @@ async fn escalations_go_to_the_owner_and_a_registered_human_renews_the_allowance
 async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_level() {
     let Some((mut bus, mut to_human)) = Bus::start().await else { return };
     let [lead, dev_b, boss, carol] = ants(["lead", "dev-b", "boss", "carol"]);
-    bus.chain = Chain { escalate_to: vec![lead.clone(), dev_b.clone()], after: None, ..Chain::default() };
+    let turn_budget = 3;
+    bus.chain = Chain { escalate_to: vec![lead.clone(), dev_b.clone()], after: None, turn_budget, ..Chain::default() };
     bus.put_colony(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_lead, mut to_dev_b, mut to_boss] = inboxes(&bus, &[lead.clone(), dev_b.clone(), boss.clone()]).await;
     let (launch, log, _) = fake::launch();
@@ -143,6 +144,7 @@ async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_leve
         bus.send_spent(&lead, &t1, "and on", Some(&one)).await;
         let reply = next_envelope(&mut to_lead).await;
         assert!(reply.text.ends_with(": go on"), "{}", reply.text);
+        assert_eq!(reply.turn_budget, turn_budget - 1, "the configured fresh budget, below the stamped 8");
         assert_eq!(reply.escalation, None, "the stuck ant's answer does not carry its escalation");
 
         // The next spend goes one level higher, to the leader's chain in the colony.
@@ -152,7 +154,8 @@ async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_leve
         assert!(up.text.contains("level 2: dev-a is stuck (turn budget spent). Sent to boss; boss leads."));
         assert!(up.text.ends_with("Last message from lead:\nand on"), "{}", up.text);
         bus.send_spent(&boss, &t1, "from boss", Some(&two)).await;
-        assert!(next_envelope(&mut to_boss).await.text.ends_with(": from boss"));
+        let reply = next_envelope(&mut to_boss).await;
+        assert_eq!((reply.text.ends_with(": from boss"), reply.turn_budget), (true, turn_budget - 1));
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
@@ -166,9 +169,15 @@ async fn a_spent_budget_goes_up_the_chain_and_its_leader_renews_it_once_per_leve
 
 #[tokio::test]
 async fn the_leader_s_answer_to_a_channel_thread_out_of_turns_is_posted_back_with_fresh_turns() {
+    for turn_budget in [DEFAULT_TURN_BUDGET, 3, 20] {
+        Box::pin(a_leader_s_answer_resumes_a_channel_thread_with(turn_budget)).await;
+    }
+}
+
+async fn a_leader_s_answer_resumes_a_channel_thread_with(turn_budget: u32) {
     let Some((mut bus, _)) = Bus::start().await else { return };
     let [lead, dev_b] = ants(["lead", "dev-b"]);
-    bus.chain = Chain { escalate_to: vec![lead.clone()], after: None, ..Chain::default() };
+    bus.chain = Chain { escalate_to: vec![lead.clone()], after: None, turn_budget, ..Chain::default() };
     let [mut to_lead] = inboxes(&bus, std::slice::from_ref(&lead).try_into().unwrap()).await;
     let (launch, log, _) = fake::launch();
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -192,7 +201,7 @@ async fn the_leader_s_answer_to_a_channel_thread_out_of_turns_is_posted_back_wit
         // Posted back to the thread with the leader's fresh budget, not sent to the leader.
         let resumed = next_post(&mut posts).await;
         assert_eq!((&resumed.channel, &resumed.thread_id), (&ops, &root.thread_id));
-        assert_eq!((resumed.turn_budget, resumed.owner.as_ref()), (DEFAULT_TURN_BUDGET - 1, Some(&root.from)));
+        assert_eq!((resumed.turn_budget, resumed.owner.as_ref()), (turn_budget - 1, Some(&root.from)));
 
         // Later posts on the thread go by the fresh budget: no escalation again. dev-b's post answers its own, as one
         // answering dev-a's would get no reply.
@@ -200,7 +209,7 @@ async fn the_leader_s_answer_to_a_channel_thread_out_of_turns_is_posted_back_wit
         more.in_reply_to = Some(spent.id);
         bus.post(&more).await;
         let reply = next_post(&mut posts).await;
-        assert_eq!((reply.in_reply_to, reply.turn_budget), (Some(more.id), DEFAULT_TURN_BUDGET - 3));
+        assert_eq!((reply.in_reply_to, reply.turn_budget), (Some(more.id), turn_budget - 3));
         ctrl_c.add_permits(1);
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
@@ -208,7 +217,7 @@ async fn the_leader_s_answer_to_a_channel_thread_out_of_turns_is_posted_back_wit
     assert!(timeout(Duration::from_millis(200), to_lead.next()).await.is_err(), "the leader gets no reply");
     let answered = log.locked().answered.clone();
     assert_eq!(answered.len(), 2, "{answered:?}");
-    let note = format!("on that thread and spends one of its turns ({} left after it)", DEFAULT_TURN_BUDGET - 1);
+    let note = format!("on that thread and spends one of its turns ({} left after it)", turn_budget - 1);
     assert!(answered[0].starts_with("go on\n\n[ants] The escalation's leader answered"), "{}", answered[0]);
     assert!(answered[0].contains(&note), "{}", answered[0]);
     let pending = bus.ledger.pending(&root.thread_id).await.unwrap().expect("the escalation is kept");
@@ -256,7 +265,8 @@ async fn past_the_hop_limit_the_owner_gets_it_and_a_human_starts_the_chain_over(
 async fn an_unanswered_escalation_goes_one_level_higher_after_escalate_after() {
     let Some((mut bus, _to_human)) = Bus::start().await else { return };
     let [lead, boss, carol] = ants(["lead", "boss", "carol"]);
-    bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(Duration::from_millis(300)), ..Chain::default() };
+    // Long enough that a slow machine hears of the escalation well before its deadline.
+    bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(Duration::from_secs(2)), ..Chain::default() };
     bus.put_colony(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_lead, mut to_boss] = inboxes(&bus, &[lead.clone(), boss.clone()]).await;
     let (launch, _, _) = fake::launch();
@@ -271,7 +281,7 @@ async fn an_unanswered_escalation_goes_one_level_higher_after_escalate_after() {
         let up = next_envelope(&mut to_boss).await;
         assert_eq!(up.escalation.as_deref().map(|e| (e.level, &e.leader)), Some((2, &boss)));
         let late =
-            format!("[ants] No answer from lead on thread {t1} within 300 ms; the escalation goes one level higher.");
+            format!("[ants] No answer from lead on thread {t1} within 2 s; the escalation goes one level higher.");
         assert!(up.text.contains(&late), "{}", up.text);
         assert!(up.text.ends_with("Last message from carol:\nstuck"), "{}", up.text);
         assert!(timeout(Duration::from_millis(500), to_boss.next()).await.is_err(), "no deadline without one set");

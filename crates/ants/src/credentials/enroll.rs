@@ -21,7 +21,7 @@
 
 use ants_daemon::bus::relayed;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use ants_daemon::{bus, colony};
 use ants_proto::{EnrollHost, EnrollLeaf, EnrollReply, EnrollRequest, Machine, UserId, host_user, subject};
@@ -130,7 +130,7 @@ pub async fn request(
         () = expiry => Err(expired()),
         refusal = refused => {
             // The server ends the connection at the expiry, up to a second before the local timer does.
-            if refusal.contains("expired") || enrollment.exp.is_some_and(|exp| exp <= now().unwrap_or(u64::MAX)) {
+            if refusal.contains("expired") || enrollment.exp.is_some_and(|exp| exp <= auth::now().unwrap_or(u64::MAX)) {
                 return Err(expired());
             }
             bail!(
@@ -152,7 +152,7 @@ fn check_enrollment(jwt: &str, creds: &Path, ant: &UserId) -> Result<(auth::Clai
         bail!("{} are the credentials of {}, not {name} (`ants auth enroll {ant}`)", creds.display(), enrollment.name);
     }
     let Some(exp) = enrollment.exp else { return Ok((enrollment, None)) };
-    let left = exp.checked_sub(now()?).filter(|left| *left > 0).with_context(|| {
+    let left = exp.checked_sub(auth::now()?).filter(|left| *left > 0).with_context(|| {
         format!("the enrollment credentials {} have expired; issue new ones with `ants auth enroll`", creds.display())
     })?;
     Ok((enrollment, Some(Duration::from_secs(left))))
@@ -336,10 +336,6 @@ fn check_host_approval(host_jwt: Option<&str>, enrollment: &auth::Claims, host: 
         );
     }
     Ok(())
-}
-
-fn now() -> Result<u64> {
-    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
 #[cfg(test)]

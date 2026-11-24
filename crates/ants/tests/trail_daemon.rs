@@ -25,6 +25,7 @@ use ants_proto::{
     TrailRunIndex, TrailSession, TrailSource, TrailStart, TrailStepThread, UserId, WaitingStep, subject, trail_run_key,
     trail_runs_index_key, trail_session_key, trail_thread_step_key,
 };
+use ants_test_support::user as ant;
 use ants_test_support::{NatsServer, eventually, eventually_within, scratch_dir};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
@@ -71,10 +72,6 @@ mod tips;
 mod tips_carried;
 
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": [\"one\"]}\n";
-
-fn ant(name: &str) -> UserId {
-    name.parse().unwrap()
-}
 
 /// A conductor serving its runs, what it sends on `sent`: its steps, and the other messages it sends, which
 /// [`Conductor::step`] puts aside in `told`, and in `invited` those inviting itself to rate a run that ended.

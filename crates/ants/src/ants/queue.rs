@@ -83,7 +83,7 @@ async fn list_live(
     json: bool,
 ) -> Result<()> {
     let now = Utc::now();
-    let mut ants: Vec<UserId> = crate::colony::list(js)
+    let mut ants: Vec<UserId> = crate::ants::colony::list(js)
         .await?
         .into_iter()
         .filter(|entry| ants_daemon::colony::is_live(entry, now))

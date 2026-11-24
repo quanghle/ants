@@ -5,7 +5,7 @@ use ants_proto::{ColonyEntry, PERMISSIONS_VERSION};
 use async_nats::jetstream;
 
 use super::{Check, Identity, NETWORK_TIMEOUT};
-use crate::avatars::{Depth, Faces};
+use crate::ants::avatars::{Depth, Faces};
 use crate::release::versions;
 
 /// The versions of ants every daemon, webhook, schedule and channel manager runs ([`versions::running`]), and whether
@@ -79,8 +79,8 @@ pub(super) async fn check_avatars(js: &jetstream::Context, identity: &Identity) 
         return [Check::skip(check, why), Check::skip(moved_check, why)];
     }
     let read = async {
-        let entries = crate::colony::list(js).await?;
-        anyhow::Ok((entries, crate::avatars::read(js).await?))
+        let entries = crate::ants::colony::list(js).await?;
+        anyhow::Ok((entries, crate::ants::avatars::read(js).await?))
     };
     match tokio::time::timeout(NETWORK_TIMEOUT * 2, read).await {
         Ok(Ok((entries, identities))) => {
@@ -104,7 +104,7 @@ pub(super) async fn check_drift(js: &jetstream::Context, identity: &Identity) ->
     if !identity.me.role.is_human() {
         return Check::skip(check, "checked with a human's credentials, which list the machines");
     }
-    match tokio::time::timeout(NETWORK_TIMEOUT * 2, crate::machines::list(js)).await {
+    match tokio::time::timeout(NETWORK_TIMEOUT * 2, crate::ants::machines::list(js)).await {
         Ok(Ok(records)) => drift(&records),
         Ok(Err(e)) => Check::skip(check, format!("no machine records read: {e:#}")),
         Err(_) => Check::skip(check, "no machine records read within 10s"),
@@ -132,11 +132,11 @@ pub(super) fn drift(records: &[ants_proto::MachineRecord]) -> Check {
 }
 
 /// The ants `ants ant export --move` marked moved to another bus, which no daemon here serves.
-pub(super) fn moved(identities: &crate::avatars::Identities, now: chrono::DateTime<chrono::Utc>) -> Check {
+pub(super) fn moved(identities: &crate::ants::avatars::Identities, now: chrono::DateTime<chrono::Utc>) -> Check {
     let check = "moved ants";
     let lines: Vec<String> = identities
         .values()
-        .filter_map(|i| i.moved.as_ref().map(|mark| crate::export::moved_line(&i.ant, mark, now)))
+        .filter_map(|i| i.moved.as_ref().map(|mark| crate::ants::export::moved_line(&i.ant, mark, now)))
         .collect();
     if lines.is_empty() {
         return Check::ok(check, "no ant is marked moved to another bus");

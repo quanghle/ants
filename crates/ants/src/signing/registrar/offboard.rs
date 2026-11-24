@@ -203,7 +203,7 @@ pub(super) fn swept(dir: &Path) -> Result<BTreeMap<String, GithubAccount>> {
 }
 
 /// Append `line` to [`OFFBOARDED`] in `dir`.
-pub(super) fn record_offboarded(dir: &Path, line: &Offboarded) -> Result<()> {
+fn record_offboarded(dir: &Path, line: &Offboarded) -> Result<()> {
     let path = dir.join(OFFBOARDED);
     let mut text = serde_json::to_string(line)?;
     text.push('\n');
@@ -216,6 +216,6 @@ pub(super) fn record_offboarded(dir: &Path, line: &Offboarded) -> Result<()> {
 }
 
 /// Print what the membership sweep did.
-pub(super) fn print_sweep(what: &str) {
+fn print_sweep(what: &str) {
     println!("membership sweep: {what}");
 }

@@ -3,14 +3,11 @@
 
 use ants_daemon::profile::identity::Identity;
 use ants_proto::SenseId;
+use ants_test_support::user as p;
 use chrono::{TimeZone as _, Utc};
 
 use super::*;
 use crate::test_support::Server;
-
-fn p(name: &str) -> UserId {
-    name.parse().unwrap()
-}
 
 #[test]
 fn a_record_s_avatar_is_described_with_its_growth() {

@@ -375,7 +375,7 @@ impl<'a> Shown<'a> {
 
 /// An ant's state as `ants team show` gives it, from its colony entry, as `ants ant show` says it.
 pub fn state_of(entries: &[ants_proto::ColonyEntry], ant: &UserId, now: DateTime<Utc>) -> String {
-    crate::ant::state(entries.iter().find(|e| e.ant == *ant), None, now)
+    crate::ants::ant::state(entries.iter().find(|e| e.ant == *ant), None, now)
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@
 pub(crate) mod age;
 pub(crate) mod approver;
 pub(crate) mod backup;
+pub(crate) mod devices;
 pub(crate) mod enroll;
 pub(crate) mod issued;
 pub(crate) mod keys;

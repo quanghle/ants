@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_proto::{
-    AdminOp, AdminOrder, EnrollHost, EnrollLeaf, EnrollReply, EnrollRequest, Machine, Permissions, Role, UserId,
-    subject,
+    AdminOp, AdminOrder, EnrollHost, EnrollLeaf, EnrollReply, EnrollRequest, Machine, Permissions, Role, subject,
 };
+use ants_test_support::user as p;
 use futures::StreamExt as _;
 use nkeys::KeyPair;
 use serde_json::json;
 
-use crate::auth::{self, Issue, NewDevice, issue_host};
+use crate::auth::{self, Issue, Registered, issue_host};
 use crate::credentials::issued::Kind;
 use crate::node::members::{self, EnrollApprover};
 use crate::signing::signer::{Options, serve};
@@ -21,10 +21,6 @@ use crate::test_support::Server;
 const WAIT: Duration = Duration::from_secs(10);
 /// How long a request the signer ignores goes unanswered before the test stops waiting.
 const IGNORED: Duration = Duration::from_millis(1500);
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 /// `op` about `ant` on `machine`, signed with the credentials `creds` of `admin`.
 fn order(admin: &str, creds: &Path, machine: &str, ant: &str, op: AdminOp) -> AdminOrder {
@@ -147,7 +143,7 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
     let team = server.dir().join("auth");
     let (alice, bob) = (p("alice"), p("bob"));
     let admin_creds = server.dir().join("alice-admin.creds");
-    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let bob_creds = server.creds_as(&bob, Role::Human);
@@ -233,7 +229,7 @@ async fn on_a_leaf_node_s_machine_the_signer_renews_the_uplink_to_carry_the_ant_
     let team = server.dir().join("auth");
     let alice = p("alice");
     let admin_creds = server.dir().join("alice-admin.creds");
-    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     let rights = Permissions::for_user(&alice, Role::Human);
     Issue::new(&team, &alice, Kind::Human, rights).with(&admin).into_file(&admin_creds).unwrap();
     let host_creds: PathBuf = server.dir().join("host-m1.creds");

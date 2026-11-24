@@ -25,7 +25,7 @@ use crate::threads::thread::{self, Parser};
 type Time = DateTime<Utc>;
 
 /// How far before `--until` (or now) a search reads without `--since`.
-pub const DEFAULT_SINCE: Duration = Duration::from_hours(24);
+const DEFAULT_SINCE: Duration = Duration::from_hours(24);
 /// How long the line of text shown for a match may be.
 const LINE: usize = 100;
 
@@ -265,12 +265,9 @@ mod tests {
         ApprovalRequest, ChannelPost, DeadLetter, Envelope, Escalation, EscalationReason, NotesPost, Role, ToolCall,
         Verdict,
     };
+    use ants_test_support::user as p;
 
     use super::*;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn json<T: serde::Serialize>(value: &T) -> Vec<u8> {
         serde_json::to_vec(value).unwrap()

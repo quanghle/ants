@@ -13,7 +13,7 @@ use super::search::{self, Searches};
 use super::{
     ant, cards, catchup, credentials, faces, held, images, mcp, memories, people, settings, steps, thread, tree,
 };
-use crate::avatars::Identities;
+use crate::ants::avatars::Identities;
 use crate::text::excerpt;
 
 pub struct Watched {
@@ -32,7 +32,7 @@ pub struct Watched {
     pub mcp: mcp::Io,
     /// The reads of the shown ant's settings and orders, and the orders sent.
     pub settings: settings::Io,
-    /// The credentials asked for, where the team's account key is.
+    /// The credentials asked for, where the bus's account key is.
     pub credentials: credentials::Io,
     /// The admin orders of the human's assistant held for its consent.
     pub held: held::Io,

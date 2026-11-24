@@ -10,6 +10,7 @@ use ants_daemon::bus;
 use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
 use ants_daemon::secrets::keystore;
 use ants_proto::{AntRequest, DeviceKey, LoginReply, Role, UserId, Verdict, subject};
+use ants_test_support::user as p;
 use async_nats::jetstream::stream::Stream;
 use data_encoding::BASE64URL_NOPAD;
 use futures::StreamExt as _;
@@ -18,7 +19,7 @@ use tokio::time::timeout;
 
 use super::offboard::{Offboarded, Offboarder};
 use super::*;
-use crate::credentials::{issued, renew, revoke};
+use crate::credentials::{devices, issued, renew, revoke};
 use crate::signing::signer;
 use crate::test_support::Server;
 use crate::test_support::github::fake;
@@ -26,10 +27,6 @@ use crate::{auth, tools};
 
 const WAIT: Duration = Duration::from_secs(20);
 const REPEAT: Duration = Duration::from_millis(200);
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 type Users = &'static [(u64, &'static str, &'static str, bool)];
 
@@ -215,7 +212,7 @@ async fn decide(js: &async_nats::jetstream::Context, stream: &Stream, login: &st
     };
     assert_eq!(asked.ant, UserId::signer());
     assert!(asked.tool.title.contains(&format!("GitHub user {login} ")), "{}", asked.tool.title);
-    tools::answer(js, stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
+    crate::test_support::answer(js, stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
 }
 
 /// Whether `answers` tell the device to wait for a human.
@@ -448,7 +445,7 @@ async fn a_web_device_registers_with_web_credentials_and_keeps_them_through_rene
         assert!(ttl > WEB_TTL - 60 && ttl <= WEB_TTL, "{ttl}");
         let record = issued::issued(&team).unwrap().pop().unwrap();
         assert_eq!((record.web, record.renewed_from), (true, Some(alice.key.public_key())));
-        let devices = issued::devices(&team, "alice").unwrap();
+        let devices = devices::devices(&team, "alice").unwrap();
         assert_eq!(devices.iter().map(|d| (d.web, d.key.clone())).collect::<Vec<_>>(), [(true, key.public_key())]);
 
         let laptop = Device::new("alice");

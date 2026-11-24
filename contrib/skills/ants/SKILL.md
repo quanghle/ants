@@ -128,7 +128,9 @@ member); non-members get neither. A human or webhook post mentioning nobody goes
 The CLI's human owns threads started from the CLI (`--thread` keeps an existing thread's owner); a thread an ant starts
 (`post_channel` MCP tool, or `ants post` with ant credentials) has that ant as creator and no owner until a human posts
 on it. Channel replies stay on the channel thread rather than the inbox; only human `@mention` notices and terminal
-escalations reach the inbox.
+escalations reach the inbox. An ant handling a post on a thread posts on that thread with `post_channel`'s `on_thread`,
+spending one of the thread's turns, such as to go on after another ant answered its own post, whose answer is not
+posted.
 
 ```sh
 ants channel list                                   # channels, members, messenger, owner; a human's unread `N (@M)`

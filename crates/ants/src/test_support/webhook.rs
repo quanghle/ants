@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use ants_daemon::bus;
 use ants_proto::{ChannelEntry, Destination, Permissions, STREAM, UserId};
+use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 use futures::TryStreamExt as _;
 
-use crate::auth::issue_with;
 use crate::test_support::Server;
-use crate::webhook::ensure_bucket;
+use crate::test_support::issue_with;
 
 /// The hub with its stream and buckets, as `ants init` leaves it, with #ops of dev-a and dev-b, and a private
 /// secret file.
@@ -68,4 +68,12 @@ pub(crate) async fn stored<T: serde::de::DeserializeOwned>(js: &jetstream::Conte
         seq += 1;
     }
     found
+}
+
+/// The bucket of delivered events ([`ants_proto::WEBHOOKS_BUCKET`]), created when missing and the credentials allow
+/// it (a human's), as `ants init` does.
+pub(crate) async fn ensure_bucket(js: &jetstream::Context) -> Result<jetstream::kv::Store> {
+    Box::pin(ants_daemon::hub::ensure_bucket(js, ants_daemon::hub::Object::Webhooks))
+        .await
+        .context("opening the webhooks bucket (with credentials, `ants init` as a human creates it)")
 }

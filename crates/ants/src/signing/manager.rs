@@ -17,7 +17,7 @@ use chrono::Utc;
 use nkeys::KeyPair;
 
 use crate::signing::{retire, signer};
-use crate::{add, auth};
+use crate::{ants::add, auth};
 
 /// Where and how a manager ant's daemon adds ants.
 #[derive(Debug, Clone)]
@@ -255,6 +255,7 @@ mod tests {
 
     use ants_daemon::{bus, hub};
     use ants_proto::{Role, ThreadId, Verdict};
+    use ants_test_support::user as p;
     use tokio::time::timeout;
 
     use super::*;
@@ -264,10 +265,6 @@ mod tests {
     use crate::{serve, tools};
 
     const WAIT: Duration = Duration::from_secs(30);
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn ask(name: &str, template: &str, request: Request) -> AntAsk {
         let (manager, thread, name) = (p("lead"), ThreadId::generate(), p(name));
@@ -377,9 +374,15 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 };
                 assert!(asked.tool.title.contains("lead is not among the managers of template helper"));
-                tools::answer(&js, &stream, &asked.id.to_string(), Verdict::AllowOnce, chrono::Utc::now())
-                    .await
-                    .unwrap();
+                crate::test_support::answer(
+                    &js,
+                    &stream,
+                    &asked.id.to_string(),
+                    Verdict::AllowOnce,
+                    chrono::Utc::now(),
+                )
+                .await
+                .unwrap();
             };
             let (added, ()) = tokio::join!(manager.add(ask("lead-h", "helper", Request::default())), approving);
             assert!(added.unwrap().starts_with("Added lead-h from template helper"));

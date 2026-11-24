@@ -321,10 +321,12 @@ impl Inbox<'_> {
             }
             return None;
         }
+        // A delivery again of a message settled already, its ack lost, only waits its turn to be acked.
+        let settled = t.busy && self.steers(&incoming) && self.settled(&incoming.envelope).await;
         if t.retry.as_ref().is_some_and(|r| Some(r.seq) == stream_seq(&msg)) {
             t.retry = None;
             t.waiting.push_front((incoming, msg));
-        } else if let Some(steered) = self.steer(&incoming, &thread, t) {
+        } else if !settled && let Some(steered) = self.steer(&incoming, &thread, t) {
             let at = t.steered_at(None);
             let joins = steered == Steered::Joining;
             tracing::info!(%thread, by = %incoming.envelope.from, ahead = at, joins, "a message steers the thread");
@@ -345,6 +347,12 @@ impl Inbox<'_> {
             }
         }
         Some(thread)
+    }
+
+    /// Whether an earlier delivery of `envelope` left its reply stored, or its dead letter kept on the machine: the
+    /// delivery in hand is acked or buried without a prompt (`Inbox::settled_before`).
+    async fn settled(&self, envelope: &ants_proto::Envelope) -> bool {
+        self.marks.answered.has(envelope).await || self.marks.buried.get(envelope).await.is_some()
     }
 
     /// A message that steers ([`Inbox::steers`]) joins the prompt on its thread when the harness takes it into its

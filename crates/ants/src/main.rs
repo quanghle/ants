@@ -15,24 +15,16 @@ mod cmd;
 mod completions;
 mod connection;
 mod defaults;
+mod files;
 mod http;
 mod text;
 
-// Ants, channels and the colony.
-mod add;
-mod ant;
+// Channels, teams and tool requests.
 mod channel;
-mod colony;
-mod export;
-mod machines;
-mod queue;
-mod sense_id;
-mod spend;
 mod teams;
 mod tools;
 
 // The full-screen views.
-mod avatars;
 mod live;
 mod tty;
 mod tui;
@@ -50,6 +42,7 @@ mod auth;
 mod doctor;
 
 mod admin;
+mod ants;
 mod credentials;
 mod messages;
 mod node;

@@ -27,7 +27,7 @@ use serde_json::Value;
 
 use crate::connection::Nats;
 use crate::text::ago;
-use crate::{auth, machines};
+use crate::{ants::machines, auth};
 
 /// How often [`Admin::send`] looks for the outcome of the order it sent.
 pub(crate) const POLL: Duration = Duration::from_millis(250);

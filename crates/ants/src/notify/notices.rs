@@ -252,7 +252,7 @@ pub(super) fn label(verdict: Verdict) -> &'static str {
 
 /// Redacts what notices carry, whatever the ant's `redact` setting: ntfy topics, chats and hooks are seen by more than
 /// the bus is.
-pub(super) fn redactor() -> &'static Redactor {
+fn redactor() -> &'static Redactor {
     static REDACTOR: OnceLock<Redactor> = OnceLock::new();
     REDACTOR.get_or_init(|| Redactor::default().with_process_env())
 }
@@ -369,7 +369,7 @@ pub(super) fn escalation_notice(envelope: &Envelope) -> Option<Notice> {
 }
 
 /// What a notice shows of the text of `envelope`, cut at `max`: of a sealed message, only that it arrived.
-pub(super) fn notice_text(envelope: &Envelope, max: usize) -> String {
+fn notice_text(envelope: &Envelope, max: usize) -> String {
     match envelope.sealed {
         Some(_) => "a sealed message arrived".to_owned(),
         None => cut(&redactor().redact(&envelope.text), max),

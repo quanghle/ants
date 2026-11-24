@@ -219,13 +219,13 @@ impl Registrar<'_> {
         let name = &request.name;
         binding::check_in(self.dir, name, account, Binder::Signer)?;
         let expires_at = auth::now()? + registration.lifetime(request.web).as_secs();
-        let new = auth::NewDevice {
+        let new = auth::Registered {
             label: request.label.as_deref(),
             github: Some(account.clone()),
             grant: Some(grant),
             expires_at: Some(expires_at),
             web: request.web,
-            ..auth::NewDevice::default()
+            ..auth::Registered::default()
         };
         let permissions = Permissions::for_human_device(name, request.web).with_js_domain(self.js_domain);
         let (jwt, _) = auth::Issue::new(self.dir, name, Kind::Human, permissions)

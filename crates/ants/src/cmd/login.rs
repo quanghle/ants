@@ -24,6 +24,8 @@ use data_encoding::BASE64URL_NOPAD;
 use futures::StreamExt as _;
 use nkeys::{KeyPair, XKey};
 
+use crate::credentials::devices;
+#[cfg(test)]
 use crate::credentials::issued;
 use crate::credentials::keys::{self, Proven};
 use crate::{auth, defaults};
@@ -107,7 +109,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
 pub async fn register(login: &Login<'_>, store: &dyn Store, stop: impl Future<Output = ()>) -> Result<()> {
     auth::check_not_reserved(login.name)?;
     if let Some(label) = login.label {
-        issued::check_label(label)?;
+        devices::check_label(label)?;
     }
     bus::check_url(login.hub)?;
     let account = bootstrap_account(login.bootstrap)?;

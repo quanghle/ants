@@ -4,7 +4,8 @@
 use std::future::pending;
 
 use ants_daemon::secrets::keystore;
-use ants_proto::{Role, UserId};
+use ants_proto::Role;
+use ants_test_support::user as p;
 use tokio::time::timeout;
 
 use super::*;
@@ -18,10 +19,6 @@ use crate::test_support::Server;
 const WAIT: Duration = Duration::from_secs(5);
 const REPEAT: Duration = Duration::from_millis(100);
 const LISTEN: Duration = Duration::from_millis(400);
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 #[tokio::test]
 async fn an_approved_renewal_gives_working_credentials_of_the_same_kind() {
@@ -196,7 +193,7 @@ async fn requests_must_prove_valid_unrevoked_credentials_of_their_name() {
     let dev_a = server.creds_as(&p("dev-a"), Role::Ant);
     let (dev_a_jwt, _) = auth::read_creds(&dev_a).unwrap();
     let revoked = server.dir().join("dev-b.creds");
-    auth::issue(&team, &p("dev-b"), Role::Ant, None, &revoked).unwrap();
+    crate::test_support::issue(&team, &p("dev-b"), Role::Ant, None, &revoked).unwrap();
     let (revoked_jwt, revoked_key) = auth::read_creds(&revoked).unwrap();
     revoke::revoke(&team, Some("dev-b"), &[]).unwrap();
     let approver = Approver::connect(&server.url, &team, None, LISTEN).await.unwrap();
@@ -298,7 +295,7 @@ fn expired_and_enrollment_credentials_name_their_renewal_on_the_team_key_machine
     let err = renewable(&enrollment, &jwt).unwrap_err().to_string();
     assert!(err.contains("are not renewed over NATS") && err.contains("`ants auth enroll dev-a`"), "{err}");
     let ant = dir.join("dev-a.creds");
-    auth::issue(&team, &p("dev-a"), Role::Ant, None, &ant).unwrap();
+    crate::test_support::issue(&team, &p("dev-a"), Role::Ant, None, &ant).unwrap();
     let (jwt, _) = auth::read_creds(&ant).unwrap();
     assert!(renewable(&ant, &jwt).is_ok());
     std::fs::remove_dir_all(dir).unwrap();

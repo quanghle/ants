@@ -29,7 +29,7 @@ mod work;
 /// sense keeping the items of its one ant in `log`.
 async fn sense_on(log: impl EventLog + Send + Sync + 'static, sense: SenseId) -> (Sense, Arc<dyn Items>) {
     let items: Arc<dyn Items> = Arc::new(store(log, sense, "dev-a".parse().unwrap()).await);
-    (Sense::with_stores(Arc::new(One(items.clone()))), items)
+    (Sense::with_stores(Arc::new(One::new(items.clone()))), items)
 }
 
 const THREAD: &str = "019a7d2c-0000-7000-8000-000000000001";

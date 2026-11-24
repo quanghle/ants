@@ -21,9 +21,9 @@ use crate::credentials::issued::ISSUED;
 use crate::credentials::revoke::REVOKED;
 
 /// The record of the last backup, in the auth directory.
-pub const RECORD: &str = "backup.json";
+const RECORD: &str = "backup.json";
 /// The environment variable a passphrase may come from, for scripts.
-pub const PASSPHRASE_ENV: &str = "ANTS_BACKUP_PASSPHRASE";
+const PASSPHRASE_ENV: &str = "ANTS_BACKUP_PASSPHRASE";
 const FORMAT: u32 = 1;
 /// The seeds of the team, by file, with the first letter of their public keys.
 const SEEDS: [(&str, char); 4] = [(OPERATOR_SEED, 'O'), (ACCOUNT_SEED, 'A'), (STORE_SEED, 'A'), (SYSTEM_SEED, 'A')];

@@ -139,7 +139,7 @@ impl HumanStore for JetStreamStore {
     fn approvals(&self, since: SystemTime) -> BoxFuture<'_, Result<(Vec<ApprovalRequest>, HashSet<Uuid>)>> {
         Box::pin(async move {
             let (mut requests, mut decided) = (Vec::new(), HashSet::new());
-            self.read("ants.approvals.>", since, |_, subject, payload| {
+            self.read(subject::ALL_APPROVALS, since, |_, subject, payload| {
                 if let Ok(request) = serde_json::from_slice::<ApprovalRequest>(payload)
                     && request.check_subject(subject).is_ok()
                 {

@@ -16,8 +16,8 @@ use super::command::Conversation;
 use super::model::{Data, Ui};
 use super::style;
 use super::work::ThreadState;
+use crate::ants::colony;
 use crate::channel::reads::Unread;
-use crate::colony;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {

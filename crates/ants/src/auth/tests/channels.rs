@@ -87,7 +87,6 @@ async fn ants_post_to_channels_as_themselves_and_read_but_never_write_the_channe
 }
 
 #[tokio::test]
-#[expect(clippy::too_many_lines, reason = "one scenario against one server, each step building on the ones before")]
 async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them() {
     use ants_daemon::chanadm;
     use ants_proto::{ChannelAdminOutcome, ChannelAdminRequest, ChannelOp, Refusal};
@@ -103,38 +102,7 @@ async fn the_channel_manager_applies_the_owner_s_changes_only_and_announces_them
     entry.owner = Some(dev_a.clone());
     h_kv_put(&channels, &entry).await;
     let (_b, b_js) = server.connect(&dev_b).await;
-    let now = chrono::Utc::now();
-    let listed = ColonyEntry {
-        ant: dev_b.clone(),
-        machine: "m1".to_owned(),
-        instance: "run-1".to_owned(),
-        harness: "copilot".to_owned(),
-        agent: None,
-        capabilities: Vec::new(),
-        whoami: None,
-        profile: None,
-        sense_unkept: None,
-        workdir: None,
-        started_at: now,
-        heartbeat_at: now,
-        activity: ants_proto::Activity::Idle,
-        handling: 0,
-        harnesses: 0,
-        escalate_to: Vec::new(),
-        sage: None,
-        version: ants_proto::ANTS_VERSION.to_owned(),
-        perms: ants_proto::PERMISSIONS_VERSION,
-        signed_out: None,
-        limited: None,
-        failing: None,
-        unserved: None,
-        fallback: None,
-        memory_low: None,
-        model: None,
-        paused: None,
-        drift: Vec::new(),
-        mcp: false,
-    };
+    let listed = ants_test_support::colony_entry("dev-b", "m1");
     let b_colony = bus::ensure_colony(&b_js, ants_proto::COLONY_TTL).await.unwrap();
     b_colony.put("dev-b", serde_json::to_vec(&listed).unwrap().into()).await.unwrap();
     assert!(colony.get("dev-b").await.unwrap().is_some());

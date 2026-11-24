@@ -14,8 +14,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use super::model::Data;
-use crate::avatars::{Depth, Identities};
-use crate::colony;
+use crate::ants::avatars::{Depth, Identities};
+use crate::ants::colony;
 use crate::live::maybe;
 use crate::messages::progress::Stand;
 
@@ -59,7 +59,7 @@ impl Looks {
             std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
             std::env::var("COLORTERM").ok().as_deref(),
         );
-        let theme = if depth == Depth::Plain { Theme::Dark } else { crate::avatars::theme() };
+        let theme = if depth == Depth::Plain { Theme::Dark } else { crate::ants::avatars::theme() };
         let animate = crate::defaults::cli().map_or(true, |cli| cli.animate);
         Self::new(depth, theme, animate)
     }
@@ -255,17 +255,15 @@ impl Io {
     /// Read them again now.
     pub fn refresh(&mut self) {
         let js = self.js.clone();
-        self.read = Some(async move { crate::avatars::read_or_none(&js).await }.boxed_local());
+        self.read = Some(async move { crate::ants::avatars::read_or_none(&js).await }.boxed_local());
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use ants_test_support::user;
 
-    fn user(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    use super::*;
 
     #[test]
     fn colour_follows_no_color_and_colorterm() {

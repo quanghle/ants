@@ -4,16 +4,13 @@
 use ants_daemon::people::devices::verify;
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{DeviceKey, Permissions, Role};
+use ants_test_support::user as p;
 use data_encoding::BASE64URL_NOPAD;
 use nkeys::KeyPair;
 use serde_json::Value;
 
 use super::*;
 use crate::test_support::Server;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 /// Issue credentials of `user` in `role` from the team in `team`, as `ants auth user` does, returning their file's
 /// text.
@@ -100,7 +97,7 @@ fn revocations_of_humans_assistants_ants_and_unknown_keys_are_recorded_and_no_ot
     auth::issue_host(&team, &"m1".parse().unwrap(), None, &host).unwrap();
     let host_key = auth::read_creds(&host).unwrap().1.public_key();
     let out = dir.join("pa.creds");
-    let new = auth::NewDevice { assistant_of: Some(p("alice")), ..auth::NewDevice::default() };
+    let new = auth::Registered { assistant_of: Some(p("alice")), ..auth::Registered::default() };
     let rights = Permissions::for_assistant(&p("pa"), &p("alice"));
     auth::Issue::new(&team, &p("pa"), issued::Kind::Assistant, rights).with(&new).into_file(&out).unwrap();
     let assistant_key = auth::read_creds(&out).unwrap().1.public_key();

@@ -69,7 +69,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: DeadCommand) -> Result<()> {
 
 /// One line of `ants dead list`: sequence, ant, thread, sender, deliveries, time, error and the start of the text, or
 /// the size of a sealed message's ciphertext.
-pub(crate) fn dead_row(seq: u64, letter: &DeadLetter) -> String {
+fn dead_row(seq: u64, letter: &DeadLetter) -> String {
     let time = letter.died_at.format("%Y-%m-%d %H:%M:%S");
     let (thread, from, text) = match &letter.envelope {
         Some(e) => {

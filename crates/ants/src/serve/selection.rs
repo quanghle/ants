@@ -222,7 +222,7 @@ impl AntOptions {
     }
 }
 
-pub(super) fn env_pair(text: &str) -> Result<(String, String), String> {
+fn env_pair(text: &str) -> Result<(String, String), String> {
     let (name, value) = text.split_once('=').ok_or("expected NAME=VALUE")?;
     if name.is_empty() || name.contains('\0') || value.contains('\0') {
         return Err("invalid environment variable".to_owned());

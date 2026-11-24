@@ -4,13 +4,10 @@
 use std::collections::BTreeMap;
 
 use ants_proto::Role;
+use ants_test_support::user as p;
 
 use super::*;
 use crate::test_support::Server;
-
-fn p(name: &str) -> UserId {
-    name.parse().unwrap()
-}
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();

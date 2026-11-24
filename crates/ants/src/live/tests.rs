@@ -231,7 +231,7 @@ async fn the_feed_opens_a_sealed_message_from_a_device_added_since_its_keyring_w
 
     // A device of alice's registered after bob's keyring was loaded.
     let alice_creds = server.dir().join("alice-laptop.creds");
-    crate::auth::issue(&server.dir().join("auth"), &alice, Role::Human, None, &alice_creds).unwrap();
+    crate::test_support::issue(&server.dir().join("auth"), &alice, Role::Human, None, &alice_creds).unwrap();
     let alice_nats = crate::connection::Nats::new(&server.url, Some(&alice_creds), None).unwrap();
     alice_nats.connect("test").await.unwrap();
     let words = vec!["@bob".to_owned(), "lunch at noon?".to_owned()];

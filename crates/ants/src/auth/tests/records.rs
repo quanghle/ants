@@ -15,38 +15,7 @@ async fn ants_write_their_own_colony_entry_and_everyone_reads_the_colony() {
     let h_kv = bus::ensure_colony(&h_js, ttl).await.unwrap();
 
     let a_kv = bus::ensure_colony(&a_js, ttl).await.unwrap();
-    let now = chrono::Utc::now();
-    let entry = ColonyEntry {
-        ant: dev_a.clone(),
-        machine: "m1".to_owned(),
-        instance: "run-1".to_owned(),
-        harness: "copilot".to_owned(),
-        agent: None,
-        capabilities: vec!["rust".to_owned()],
-        whoami: None,
-        profile: None,
-        sense_unkept: None,
-        workdir: None,
-        started_at: now,
-        heartbeat_at: now,
-        activity: ants_proto::Activity::Idle,
-        handling: 0,
-        harnesses: 0,
-        escalate_to: Vec::new(),
-        sage: None,
-        version: ants_proto::ANTS_VERSION.to_owned(),
-        perms: ants_proto::PERMISSIONS_VERSION,
-        signed_out: None,
-        limited: None,
-        failing: None,
-        unserved: None,
-        fallback: None,
-        memory_low: None,
-        model: None,
-        paused: None,
-        drift: Vec::new(),
-        mcp: false,
-    };
+    let entry = ColonyEntry { capabilities: vec!["rust".to_owned()], ..ants_test_support::colony_entry("dev-a", "m1") };
     let registration = Registration::start(a_kv.clone(), entry.clone(), ants_proto::COLONY_HEARTBEAT).await.unwrap();
     assert!(a_kv.put("dev-b", "spoof".into()).await.is_err(), "dev-a cannot list dev-b");
     // Ants read the colony, to route requests by capability.

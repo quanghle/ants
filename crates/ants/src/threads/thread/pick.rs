@@ -153,7 +153,7 @@ pub(super) async fn recent(
 
 /// The latest message of each thread with an id starting with `prefix` stored in the last [`RECENT`], whoever took
 /// part in it, most recent first.
-pub(super) async fn any_recent(js: &jetstream::Context, prefix: &str) -> Result<Vec<Entry>> {
+async fn any_recent(js: &jetstream::Context, prefix: &str) -> Result<Vec<Entry>> {
     let mut threads: HashMap<ThreadId, Entry> = HashMap::new();
     scan_made(js, prefix, |entry| {
         if entry.thread_id.as_str().starts_with(prefix) {

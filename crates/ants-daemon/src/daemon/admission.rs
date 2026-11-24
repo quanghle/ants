@@ -153,6 +153,12 @@ impl Claims<'_> {
 }
 
 impl Inbox<'_> {
+    /// Give the posts of `humans` among the `later` ones of a channel thread the ant's fresh budget, as admitting them
+    /// would ([`ChannelPost::turns_left`] resets to it), whatever their client stamped.
+    pub(super) fn fresh_budgets(&self, later: &mut [ChannelPost], humans: &Humans) {
+        fresh_budgets(later, humans, self.escalator.turn_budget());
+    }
+
     /// The inbox message `msg` to answer, if it is one: a malformed or forged one is buried, a reply to an `ask_ant`
     /// call is handed over, and so is an approval decision, which is acked and never prompted with
     /// ([`NatsApprover::offer`](crate::approvals::NatsApprover::offer)). An owner that is no human is dropped
@@ -188,6 +194,9 @@ impl Inbox<'_> {
         }
         envelope.owner = self.humans.human_owner(envelope.owner.as_ref());
         envelope.creator = self.humans.ant_creator(envelope.creator.as_ref());
+        if envelope.webhook || self.humans.is_human(&envelope.from) {
+            envelope.turn_budget = self.escalator.turn_budget();
+        }
         let late = match self.claim(&envelope, msg).await {
             Some(late) => late,
             None => return None,
@@ -277,6 +286,9 @@ impl Inbox<'_> {
         let description = channels.get(&post.channel).and_then(|e| e.description.clone());
         let origin = if post.starts_thread() { ThreadOrigin::of_root(&post, &humans) } else { ThreadOrigin::default() };
         origin.apply(&mut post);
+        if post.webhook || post.by_human(&humans) {
+            post.turn_budget = self.escalator.turn_budget();
+        }
         let envelope = channel::as_envelope(&post, self.ant);
         let posted = Some(Box::new(Posted { post, triage, owned, description }));
         Some(Incoming { envelope, post: posted, resume: None, steered: Steered::No, late: false })
@@ -387,5 +399,13 @@ impl Inbox<'_> {
                 None
             }
         }
+    }
+}
+
+/// Give the posts of `humans` among the `later` ones of a channel thread `budget`, the ant's fresh one
+/// ([`Inbox::fresh_budgets`]).
+pub(super) fn fresh_budgets(later: &mut [ChannelPost], humans: &Humans, budget: u32) {
+    for post in later.iter_mut().filter(|post| post.by_human(humans)) {
+        post.turn_budget = budget;
     }
 }

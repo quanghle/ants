@@ -182,7 +182,8 @@ fn instructions(ant: &UserId, hub: &Hub, assisting: Option<&UserId>, provider: O
          the thread's notes, one board per thread, with the other ants on it: a post there wakes nobody, so post a \
          proposal, ask them with send_message or ask_ant to read it with read_notes and answer, and settle it \
          before the work starts. \
-         post_channel starts a channel thread this ant creates, whose escalations go up this ant's chain. \
+         post_channel starts a channel thread this ant creates, whose escalations go up this ant's chain; with \
+         on_thread it posts on the thread of the channel post being handled, spending one of its turns. \
          escalate sends the thread up its origin chain when stuck on it. manage_channel lists the \
          channels a human made this ant the owner of, and changes their members and messenger. \
          list_teams shows the teams, groups of ants each with a lead: send_message and ask_ant to a team reach its \

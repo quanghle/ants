@@ -66,9 +66,9 @@ impl Sink {
 }
 
 /// The header of an http sink's `POST` with its Unix time in seconds, part of what is signed.
-pub(super) const TIMESTAMP_HEADER: &str = "x-ants-timestamp";
+const TIMESTAMP_HEADER: &str = "x-ants-timestamp";
 /// The header of an http sink's `POST` with its signature, `sha256=` and the hex HMAC-SHA256 of [`signature`].
-pub(super) const SIGNATURE_HEADER: &str = "x-ants-signature";
+const SIGNATURE_HEADER: &str = "x-ants-signature";
 
 /// The signature an http sink's `POST` of `body` at `timestamp` carries: `sha256=` and the lowercase hex HMAC-SHA256,
 /// keyed with `secret`, of the timestamp's decimal digits, a `.` and the body.
@@ -143,7 +143,7 @@ pub(super) async fn fetch(
 }
 
 /// `POST` `body`, JSON, to `url`. Errors never name the URL, which may hold a secret.
-pub(super) async fn post_json(url: &str, headers: &[(&str, String)], body: Vec<u8>) -> Result<()> {
+async fn post_json(url: &str, headers: &[(&str, String)], body: Vec<u8>) -> Result<()> {
     let (status, answer) = fetch(Method::POST, url, headers, Some(body)).await?;
     if status.is_success() {
         return Ok(());
@@ -153,7 +153,7 @@ pub(super) async fn post_json(url: &str, headers: &[(&str, String)], body: Vec<u
 
 /// Run `command` with `input` on its standard input, its output dropped and its errors on those of the process: an
 /// error unless it exits with status 0 within `wait`. Past `wait` it is killed and reaped.
-pub(super) async fn run_command(command: &[String], input: Vec<u8>, wait: Duration) -> Result<()> {
+async fn run_command(command: &[String], input: Vec<u8>, wait: Duration) -> Result<()> {
     let (program, args) = command.split_first().context("no program")?;
     let mut child = tokio::process::Command::new(program)
         .args(args)

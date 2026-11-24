@@ -2,7 +2,8 @@
 //! --follow` or `ants dash` runs, the CLI keeps its device's [`Presence`] in [`PRESENCE_BUCKET`], so `ants webhook
 //! serve` pushes nothing to that device's push targets that it shows already ([`Present`]), and `ants chat` shows which
 //! humans have a device following ([`online`]). Only a human's credentials name a device, so only those keep a
-//! presence.
+//! presence. The bucket is held in memory: after a restart of nats-server, a following CLI creates it again at its
+//! next heartbeat, and `ants signer` on the hub at its next beat, for web pages, whose credentials create no bucket.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -30,9 +31,24 @@ pub async fn ensure_bucket(js: &jetstream::Context) -> Result<()> {
 }
 
 /// Run `work` with `device` of `human` present as following `what`: its presence is put first, renewed every
-/// [`PRESENCE_HEARTBEAT`] while `work` runs and deleted once it ends. Without a device (an ant's credentials, or
-/// none), or when the presence cannot be written, `work` runs without one.
+/// [`PRESENCE_HEARTBEAT`] while `work` runs and deleted once it ends. A renewal that fails creates the buckets held in
+/// memory again ([`ants_daemon::hub::ensure_in_memory`]), which a restart of nats-server drops, and puts the presence
+/// again. Without a device (an ant's credentials, or none), or when the presence cannot be written, `work` runs without
+/// one.
 pub async fn while_following<T>(
+    js: &jetstream::Context,
+    js_domain: Option<&JsDomain>,
+    human: &UserId,
+    device: Option<DeviceId>,
+    what: Following,
+    work: impl Future<Output = T>,
+) -> T {
+    following_every(PRESENCE_HEARTBEAT, js, js_domain, human, device, what, work).await
+}
+
+/// [`while_following`], renewing the presence every `heartbeat`.
+async fn following_every<T>(
+    heartbeat: Duration,
     js: &jetstream::Context,
     js_domain: Option<&JsDomain>,
     human: &UserId,
@@ -56,9 +72,14 @@ pub async fn while_following<T>(
     let presence = Presence::new(human.clone(), device, what);
     let (key, value) = (presence.key(), serde_json::to_vec(&presence).expect("a presence serializes"));
     let heartbeat = async {
-        let mut tick = tokio::time::interval(PRESENCE_HEARTBEAT);
+        let mut tick = tokio::time::interval(heartbeat);
         loop {
             tick.tick().await;
+            let Err(e) = kv.put(&key, value.clone()).await else { continue };
+            tracing::debug!(error = format!("{e:#}"), "renewing the presence; creating the buckets held in memory");
+            if let Err(e) = Box::pin(ants_daemon::hub::ensure_in_memory(js)).await {
+                tracing::debug!(error = format!("{e:#}"), "creating the buckets held in memory");
+            }
             if let Err(e) = kv.put(&key, value.clone()).await {
                 tracing::debug!(error = format!("{e:#}"), "renewing the presence");
             }
@@ -166,14 +187,11 @@ mod tests {
     use std::time::Duration;
 
     use ants_proto::Role;
+    use ants_test_support::user as p;
 
     use super::*;
     use crate::test_support::Server;
     use crate::test_support::presence::device;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     /// Runs as two devices of alice and one of bob, with their own credentials, so it also checks their permissions.
     #[tokio::test]
@@ -285,5 +303,32 @@ mod tests {
         let subject = format!("$KV.{PRESENCE_BUCKET}.{}", presence_key(&alice, &laptop_id, Following::Inbox));
         let rollup = laptop.publish_with_headers(subject, headers, "".into()).await.unwrap().await;
         assert!(rollup.is_err(), "the bucket denies rollups");
+    }
+
+    /// A restart of nats-server drops the bucket, held in memory: the following CLI creates it again and its presence
+    /// is back within a heartbeat of reconnecting, the colony bucket with it.
+    #[tokio::test]
+    async fn a_following_device_is_present_again_after_the_server_restarts() {
+        let Some(mut server) = Server::start_restartable() else { return };
+        let alice = p("alice");
+        let (laptop, laptop_id) = device(&server, &alice, "laptop").await;
+        let (phone, _) = device(&server, &alice, "phone").await;
+        let present = Present::new(&phone, None).await.unwrap();
+        let following = async || present.following(&alice, [laptop_id], Following::Inbox).await.contains(&laptop_id);
+
+        let heartbeat = Duration::from_millis(200);
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let follow = following_every(heartbeat, &laptop, None, &alice, Some(laptop_id), Following::Inbox, stop_rx);
+        let check = async {
+            crate::test_support::eventually("the laptop following", following).await;
+            server.stop();
+            server.start_again();
+            let within = Duration::from_secs(20);
+            ants_test_support::eventually_within(within, "the laptop following after the restart", following).await;
+            let colony = phone.get_key_value(ants_proto::COLONY_BUCKET).await;
+            assert!(colony.is_ok(), "the colony bucket is back: {:?}", colony.err());
+            stop_tx.send(()).unwrap();
+        };
+        let (_, ()) = tokio::join!(follow, check);
     }
 }

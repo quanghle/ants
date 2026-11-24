@@ -305,15 +305,12 @@ fn beside(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use ants_daemon::secrets::keystore::Memory;
-    use ants_proto::{Machine, Role, UserId};
+    use ants_proto::{Machine, Role};
+    use ants_test_support::user as p;
 
     use super::*;
     use crate::node::members::EnrollApprover;
     use crate::test_support::Server;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     #[tokio::test]
     async fn a_stored_seed_signs_the_challenge_and_moves_back_into_its_file() {

@@ -270,7 +270,10 @@ mod tests {
                 service::Ran { ok: true, stdout: stdout.to_owned(), stderr: String::new() }
             })
         };
-        let free_listen = format!("127.0.0.1:{}", ants_test_support::free_port());
+        // Bound and not listening: connections are refused, and no server of another test can take the port.
+        let free = tokio::net::TcpSocket::new_v4().unwrap();
+        free.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let free_listen = free.local_addr().unwrap().to_string();
         let busy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let busy_listen = busy.local_addr().unwrap().to_string();
         let args = managed_args(Some("/bin/sh"));
@@ -306,7 +309,7 @@ mod tests {
         );
         drop(owner);
         assert_eq!(steps.report.failed, 3, "the busy address, the file without the table, the ants-nats service");
-        drop(busy);
+        drop((busy, free));
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

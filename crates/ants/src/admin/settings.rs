@@ -150,7 +150,7 @@ pub async fn shared_of(nats: &Nats<'_>, js: &jetstream::Context, ant: &UserId) -
 }
 
 /// One `KEY = VALUE` line per field of `shared`.
-pub fn shared_lines(shared: &SharedSettings) -> Vec<String> {
+fn shared_lines(shared: &SharedSettings) -> Vec<String> {
     shared.fields.iter().map(|(key, value)| format!("{key} = {}", edit::toml_text(value))).collect()
 }
 

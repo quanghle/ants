@@ -123,7 +123,7 @@ pub fn render(ant: &UserId, report: &McpReport) -> String {
 }
 
 /// What a sign-in did, as text: where to open a browser, and how to hand back the address it comes back to.
-pub fn render_sign_in(ant: &UserId, signing: &McpSignIn) -> String {
+fn render_sign_in(ant: &UserId, signing: &McpSignIn) -> String {
     let server = &signing.server;
     let Some(url) = &signing.authorization_url else {
         let mut out = format!("MCP server {} of {ant}: {}\n", server.name, server.status.name());

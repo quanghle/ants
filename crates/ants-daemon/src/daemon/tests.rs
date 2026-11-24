@@ -11,7 +11,7 @@ use ants_proto::{
     Humans, JsDomain, LimitKind, Pick, PromptEnd, QueueRequest, QueuedMessage, Role, State, StatusEvent, StatusUpdate,
     ThreadId, Uuid, WEBHOOK_ALLOW,
 };
-use ants_test_support::{NatsServer as Server, free_port};
+use ants_test_support::{NatsServer as Server, eventually_every, free_port};
 use async_nats::jetstream::consumer::PullConsumer;
 use futures::stream::StreamExt as _;
 use rmcp::model::CallToolResult;
@@ -351,19 +351,14 @@ impl Bus {
     }
 
     async fn until_acked_by(&self, name: &str, seq: u64) {
-        timeout(WAIT, async {
-            loop {
-                // The consumer may not be there yet.
-                if let Ok(mut consumer) = self.stream.get_consumer::<jetstream::consumer::pull::Config>(name).await
-                    && consumer.info().await.unwrap().ack_floor.stream_sequence >= seq
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+        eventually_every(Duration::from_millis(20), WAIT, "no ack", async || {
+            // The consumer may not be there yet.
+            match self.stream.get_consumer::<jetstream::consumer::pull::Config>(name).await {
+                Ok(mut consumer) => consumer.info().await.unwrap().ack_floor.stream_sequence >= seq,
+                Err(_) => false,
             }
         })
-        .await
-        .expect("no ack");
+        .await;
     }
 
     async fn unacked(&self) -> usize {
@@ -429,13 +424,7 @@ async fn next_envelope(subscriber: &mut async_nats::Subscriber) -> Envelope {
 }
 
 async fn until(what: &str, done: impl Fn() -> bool) {
-    timeout(WAIT, async {
-        while !done() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    eventually_every(Duration::from_millis(10), WAIT, &format!("waiting for {what}"), async || done()).await;
 }
 
 /// Ask the daemon to cancel the prompt on `thread` until it answers, as the daemon may not listen yet.
@@ -534,23 +523,20 @@ async fn timeline_on(
     whole: impl Fn(&[ants_proto::Timeline]) -> bool,
 ) -> Vec<ants_proto::Timeline> {
     let subject = subject::timeline(thread, &bus.dev);
-    timeout(WAIT, async {
-        loop {
-            let (mut records, mut next) = (Vec::new(), None);
-            while let Ok(msg) = bus.stream.direct_get_next_for_subject(subject.clone(), next).await {
-                let record: ants_proto::Timeline = serde_json::from_slice(&msg.payload).unwrap();
-                assert_eq!(record.check_subject(&msg.subject), Ok(()));
-                records.push(record);
-                next = Some(msg.sequence + 1);
-            }
-            if whole(&records) {
-                break records;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut records = Vec::new();
+    eventually_every(Duration::from_millis(20), WAIT, "not the timeline records awaited", async || {
+        records.clear();
+        let mut next = None;
+        while let Ok(msg) = bus.stream.direct_get_next_for_subject(subject.clone(), next).await {
+            let record: ants_proto::Timeline = serde_json::from_slice(&msg.payload).unwrap();
+            assert_eq!(record.check_subject(&msg.subject), Ok(()));
+            records.push(record);
+            next = Some(msg.sequence + 1);
         }
+        whole(&records)
     })
-    .await
-    .expect("not the timeline records awaited")
+    .await;
+    records
 }
 
 /// How the prompts on `thread` ended, as the first `n` ends noted in its timeline tell, with their messages.

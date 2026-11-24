@@ -62,7 +62,7 @@ pub fn renew_registered(
     renew_as(dir, current, public_key, xkey, Some((github, grant)))
 }
 
-pub(super) fn renew_as(
+fn renew_as(
     dir: &Path,
     current: &str,
     public_key: &str,
@@ -147,7 +147,7 @@ pub(super) fn renew_as(
 /// The rights and the rest of the claims (`nats` beyond them) of the renewal of credentials found as `finding`, whose
 /// claims are `body`, named `name`, binding `xkey`, and `registered` by a registration; a leaf node's member among
 /// `assistants` gets its human's assistant's rights.
-pub(super) fn renewed_rights(
+fn renewed_rights(
     finding: &Finding,
     body: &Value,
     name: &str,
@@ -206,11 +206,7 @@ pub(super) fn renewed_rights(
 /// `record` of renewed credentials, with what the registry recorded of the `previous` ones beyond their key: the
 /// template and manager of an added ant, and the GitHub binding and grant of a registered device, unless `registered`
 /// gives them anew.
-pub(super) fn inherited(
-    record: Issued,
-    previous: Option<&Issued>,
-    registered: Option<(GithubAccount, Grant)>,
-) -> Issued {
+fn inherited(record: Issued, previous: Option<&Issued>, registered: Option<(GithubAccount, Grant)>) -> Issued {
     let Some(p) = previous else { return record };
     let (template, added_by) = (p.template.clone(), p.added_by.clone());
     let (github, grant) = match registered {
@@ -221,7 +217,7 @@ pub(super) fn inherited(
 }
 
 /// The registry's kind of credentials of `kind`, if they may be renewed ([`renew`]).
-pub(super) fn registry_kind(kind: &CredsKind) -> Option<Kind> {
+fn registry_kind(kind: &CredsKind) -> Option<Kind> {
     match kind {
         CredsKind::Ant => Some(Kind::Ant),
         CredsKind::Human => Some(Kind::Human),

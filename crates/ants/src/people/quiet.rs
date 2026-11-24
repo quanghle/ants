@@ -19,7 +19,7 @@ use crate::threads::thread;
 /// How long a mute lasts unless given: as long as the stream keeps a thread's messages.
 pub const MUTE_FOR: Duration = ants_daemon::bus::RETENTION;
 /// The longest snooze or mute.
-pub const MAX_HOLD: Duration = Duration::from_hours(365 * 24);
+const MAX_HOLD: Duration = Duration::from_hours(365 * 24);
 /// How many times a change is tried again when another device changed the holds meanwhile.
 const CONFLICTS: usize = 10;
 
@@ -88,9 +88,7 @@ fn local(at: DateTime<Utc>) -> String {
 
 /// Connect as the CLI's human, which alone holds back its notifications.
 async fn connect(nats: &Nats<'_>, what: &str) -> Result<jetstream::Context> {
-    if !nats.me.role.is_human() {
-        bail!("{what} needs a human's credentials; those of {} are an ant's", nats.me.id);
-    }
+    nats.me.must_be_human(what)?;
     Ok(nats.connect("ants-cli").await?.1)
 }
 

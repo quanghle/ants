@@ -65,12 +65,14 @@ pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String
 
 /// [`approver_creds`] for `ants signer`, which also answers ants' reactions requests
 /// ([`Permissions::for_reactions_responder`]), trail saves ([`Permissions::for_trail_keeper`]) and team changes
-/// ([`Permissions::for_team_keeper`]), and humans'
-/// registration requests ([`Permissions::for_registrar`]).
+/// ([`Permissions::for_team_keeper`]), and humans' registration requests ([`Permissions::for_registrar`]), and keeps
+/// the buckets held in memory ([`Permissions::for_bucket_keeper`]).
 pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
     let mut permissions = signer_permissions();
-    // Registration happens on the hub only: a leaf uplink with signer_permissions never carries it.
+    // Registration and keeping the buckets happen on the hub only: a leaf uplink with signer_permissions never carries
+    // them.
     merge(&mut permissions, Permissions::for_registrar());
+    merge(&mut permissions, Permissions::for_bucket_keeper());
     short_lived_creds(dir, js_domain, permissions)
 }
 
@@ -103,7 +105,7 @@ pub(crate) fn retired_consumer_creds(dir: &Path, js_domain: Option<&JsDomain>, a
     short_lived_creds(dir, js_domain, Permissions::for_retired_consumers(ant))
 }
 
-pub(super) fn short_lived_creds(dir: &Path, js_domain: Option<&JsDomain>, permissions: Permissions) -> Result<String> {
+fn short_lived_creds(dir: &Path, js_domain: Option<&JsDomain>, permissions: Permissions) -> Result<String> {
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let user = KeyPair::new_user();
     let exp = now()? + APPROVER_TTL.as_secs();

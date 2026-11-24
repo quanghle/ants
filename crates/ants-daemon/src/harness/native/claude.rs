@@ -4,8 +4,9 @@
 //!
 //! The translator chooses a new session's id (`--session-id`), resumes one with `--resume` and forks one with
 //! `--resume <parent> --fork-session --session-id <new>`. A fork's totals start at its parent's, so its ACP id carries
-//! that base ([`based_id`]). A session's process gets its MCP servers on stdin
-//! (`mcp_set_servers`, with `--strict-mcp-config`) and their tools allowed (`--allowedTools=mcp__<server>`), the
+//! that base ([`based_id`]). A session's process gets its MCP servers on stdin (`mcp_set_servers`, with
+//! `--strict-mcp-config`): the servers of the definition's `--mcp-config` and the ants ones, only the ants ones with
+//! their tools allowed (`--allowedTools=mcp__<server>`). It gets the
 //! definition's `mode` as `--permission-mode`, and `--permission-prompts none`, so whatever Claude Code would ask a
 //! human about is denied rather than waited on; when the ant asks ants about its tools, `--permission-prompts host
 //! --permission-prompt-tool stdio` instead, so it comes as a `can_use_tool` control request, sent to ants
@@ -26,7 +27,7 @@ use agent_client_protocol::Error;
 use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse};
 use ants_proto::McpServerState;
 use anyhow::bail;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
 
 use self::control::{Shared, control_request, read};
@@ -87,6 +88,60 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 pub(crate) struct Claude {
     cli: Cli,
     version: String,
+    /// The servers of the definition's `--mcp-config`, which `mcp_set_servers` would otherwise drop.
+    mcp: Map<String, Value>,
+}
+
+/// Take `--mcp-config` out of `args` (repeatable, each taking one or more values, `--mcp-config VALUE...` or
+/// `=VALUE`, a value inline JSON or a file of it) and read its servers, a later value's over an earlier one's.
+fn take_mcp_config(args: &mut Vec<String>) -> Result<Map<String, Value>, String> {
+    let mut servers = Map::new();
+    let mut rest = Vec::new();
+    let mut taken = std::mem::take(args).into_iter().peekable();
+    while let Some(arg) = taken.next() {
+        let values = if let Some(value) = arg.strip_prefix("--mcp-config=") {
+            if value.is_empty() {
+                return Err("--mcp-config takes JSON or a file of it".to_owned());
+            }
+            vec![value.to_owned()]
+        } else if arg == "--mcp-config" {
+            let mut values = Vec::new();
+            while let Some(next) = taken.next_if(|next| !next.starts_with('-')) {
+                values.push(next);
+            }
+            if values.is_empty() {
+                return Err("--mcp-config takes JSON or a file of it".to_owned());
+            }
+            values
+        } else {
+            rest.push(arg);
+            continue;
+        };
+        for value in values {
+            let read = if value.trim_start().starts_with('{') {
+                mcp_config(&value)?
+            } else {
+                std::fs::read_to_string(&value)
+                    .map_err(|e| format!("--mcp-config: reading {value}: {e}"))
+                    .and_then(|text| mcp_config(&text).map_err(|e| format!("{e} in {value}")))?
+            };
+            servers.extend(read);
+        }
+    }
+    *args = rest;
+    Ok(servers)
+}
+
+/// The servers of an MCP configuration, as `--mcp-config` takes it: `{"mcpServers": {NAME: SERVER}}`.
+fn mcp_config(text: &str) -> Result<Map<String, Value>, String> {
+    let config: Value = serde_json::from_str(text).map_err(|e| format!("--mcp-config: {e}"))?;
+    let Some(Value::Object(servers)) = config.get("mcpServers") else {
+        return Err("--mcp-config takes an object of servers in mcpServers".to_owned());
+    };
+    if let Some((name, _)) = servers.iter().find(|(_, server)| !server.is_object()) {
+        return Err(format!("--mcp-config: server {name} is no object"));
+    }
+    Ok(servers.clone())
 }
 
 /// How a session's process opens it.
@@ -120,9 +175,10 @@ impl Native for Claude {
         Ok(())
     }
 
-    async fn start(cli: Cli) -> Result<Self, Error> {
+    async fn start(mut cli: Cli) -> Result<Self, Error> {
+        let mcp = take_mcp_config(&mut cli.args).map_err(|e| failed(format!("{}: {e}", cli.name())))?;
         let version = version(&cli).await?;
-        Ok(Self { cli, version })
+        Ok(Self { cli, version, mcp })
     }
 
     fn info(&self) -> Info {
@@ -245,7 +301,10 @@ impl Claude {
                 "Claude Code has neither a login nor an API key (Not logged in · Please run /login)",
             ));
         }
-        if let Some(servers) = servers.as_object().filter(|servers| !servers.is_empty()) {
+        let mut all = self.mcp.clone();
+        all.extend(servers.as_object().cloned().unwrap_or_default());
+        if !all.is_empty() {
+            let servers = all;
             let set = session.shared.control(json!({ "subtype": "mcp_set_servers", "servers": servers })).await?;
             if let Some(errors) = set["errors"].as_object().filter(|errors| !errors.is_empty()) {
                 let errors: Vec<String> = errors.iter().map(|(name, error)| format!("{name}: {error}")).collect();

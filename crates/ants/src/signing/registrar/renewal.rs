@@ -156,6 +156,6 @@ impl Registrar<'_> {
 }
 
 /// Print what the signer did with the renewal `request`.
-pub(super) fn print_renewal(request: &RenewRequest, what: &str) {
+fn print_renewal(request: &RenewRequest, what: &str) {
     println!("renewal of {} (new key {}, host {}): {what}", request.name, request.public_key, request.host);
 }

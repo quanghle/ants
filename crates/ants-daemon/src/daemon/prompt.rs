@@ -110,9 +110,10 @@ impl Unnarrowed {
 }
 
 /// The turn of `incoming`, the message its thread handles now, on the ant's MCP server ([`crate::mcp::Mcp::begin`]).
-fn begin_turn(mcp: &crate::mcp::Mcp, incoming: &Incoming, msg: &jetstream::Message) -> crate::mcp::Turn {
+fn begin_turn(mcp: &crate::mcp::Mcp, incoming: &Incoming, msg: &jetstream::Message, seq: u64) -> crate::mcp::Turn {
     let carried = incoming.attached().into_iter().map(|(handle, _)| handle).collect();
-    mcp.begin(&incoming.envelope).carrying(carried, crate::files::stored(msg))
+    let post = incoming.post.as_ref().map(|posted| (posted.post.clone(), seq));
+    mcp.begin(&incoming.envelope).carrying(carried, crate::files::stored(msg)).answering(post)
 }
 
 impl Inbox<'_> {
@@ -194,7 +195,7 @@ impl Inbox<'_> {
         // A post's thread has the turns its posts since left, which other members' replies may have spent.
         let humans = self.humans.humans();
         let read = match &incoming.post {
-            Some(posted) => Some(self.threads.context(&posted.post, seq, Earlier::Unseen, &humans).await?),
+            Some(posted) => Some(self.read_thread(&posted.post, seq, &humans).await?),
             None => None,
         };
         // The harness answered an earlier attempt, whose reply a later step failed to make or record.
@@ -224,7 +225,7 @@ impl Inbox<'_> {
         let joining = incoming.steered == Steered::Joining;
         self.warn_unnarrowed(incoming);
         let _narrowed = self.narrow_turn(envelope, joining);
-        let _turn = self.mcp.filter(|_| !joining).map(|mcp| begin_turn(mcp, incoming, msg));
+        let _turn = self.mcp.filter(|_| !joining).map(|mcp| begin_turn(mcp, incoming, msg, seq));
         let _asking = self.approvals.filter(|_| !joining).map(|approvals| approvals.begin(envelope));
         let text = self.prompt_for(incoming, read.as_ref(), &humans, cut_off, own.then_some(spent)).await;
         let (text, _checkouts) = self.review_checkouts(incoming, msg, joining, text).await;
@@ -459,6 +460,13 @@ impl Inbox<'_> {
             return Ok(());
         }
         Err(e)
+    }
+
+    /// The thread of `post`, its later human posts with the ant's fresh budget ([`Inbox::fresh_budgets`]).
+    async fn read_thread(&self, post: &ants_proto::ChannelPost, seq: u64, humans: &Humans) -> Result<Context> {
+        let mut read = self.threads.context(post, seq, Earlier::Unseen, humans).await?;
+        self.fresh_budgets(&mut read.later, humans);
+        Ok(read)
     }
 
     /// Whether the thread of `incoming` has no turns left for its answer, given what was read of a post's thread.

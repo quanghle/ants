@@ -11,14 +11,14 @@ use ants_proto::{
 use anyhow::{Result, bail};
 use futures::StreamExt as _;
 
-use crate::avatars::Faces;
+use crate::ants::avatars::Faces;
 use crate::connection::Nats;
 use crate::messages::reacted::reaction_line;
 use crate::threads::thread;
 
 /// What `ants watch <subject> [thread]` subscribes to: a subject filter as given, or, for an ant (one token), its
 /// status subjects.
-pub(crate) fn watch_filter(target: &str, thread: Option<&ThreadId>) -> Result<String> {
+fn watch_filter(target: &str, thread: Option<&ThreadId>) -> Result<String> {
     match watched_ant(target, thread.is_some())? {
         Some(ant) => Ok(thread.map_or_else(|| subject::status_of(&ant), |t| subject::status(&ant, t))),
         None => Ok(target.to_owned()),
@@ -26,7 +26,7 @@ pub(crate) fn watch_filter(target: &str, thread: Option<&ThreadId>) -> Result<St
 }
 
 /// The ant `target` names for `ants watch`, None for a subject filter, which follows no `thread`.
-pub(crate) fn watched_ant(target: &str, thread: bool) -> Result<Option<UserId>> {
+fn watched_ant(target: &str, thread: bool) -> Result<Option<UserId>> {
     match target.parse::<UserId>().ok() {
         None if thread => bail!("a thread can only follow an ant, not the subject filter {target:?}"),
         ant => Ok(ant),
@@ -41,7 +41,7 @@ pub(crate) async fn run(nats: &Nats<'_>, target: String, thread: Option<thread::
     let (client, js) = nats.connect("ants-watch").await?;
     let filter = watch_filter(target, thread::resolve(thread, nats, &js).await?.as_ref())?;
     let mut sub = relayed::subscribe(&client, filter).await?;
-    let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(&js).await);
+    let faces = crate::ants::avatars::Faces::stdout(crate::ants::avatars::read_or_none(&js).await);
     let mut printer = Printer { faces: Some(faces), ..Printer::default() };
     let behalf = std::sync::Arc::new(crate::people::behalf::Checker::new(nats, &js));
     let _following = behalf.follow();
@@ -119,7 +119,7 @@ pub(crate) async fn run(nats: &Nats<'_>, target: String, thread: Option<thread::
 
 /// The reactions `ants watch` follows besides `target`: all of them for a human taking every message (`ants.>` or
 /// `>`), else none, as when the bucket cannot be read. `behalf` checks an assistant's for its human.
-pub(crate) async fn watched_reactions(
+async fn watched_reactions(
     js: &async_nats::jetstream::Context,
     target: &str,
     human: bool,
@@ -141,7 +141,7 @@ pub(crate) async fn watched_reactions(
 /// An envelope as `ants watch` prints it: an escalation it carries with its level, reason, stuck ant and thread,
 /// leader and the ants visited; an ant's approval decision in place of its text; the size of a sealed message's
 /// ciphertext in place of its text. An assistant's message for its human names both ([`Acting::label`]).
-pub(crate) fn envelope_line(e: &Envelope, acting: &Acting, forged: &str, faces: Option<&Faces>) -> String {
+fn envelope_line(e: &Envelope, acting: &Acting, forged: &str, faces: Option<&Faces>) -> String {
     let from = faces.and_then(|f| f.known(&e.from)).unwrap_or_else(|| e.from.to_string());
     let head = format!("[{}] {} -> {}{forged}", e.thread_id, acting.label(&from), e.to);
     if let Some(d) = &e.approval {
@@ -157,14 +157,14 @@ pub(crate) fn envelope_line(e: &Envelope, acting: &Acting, forged: &str, faces: 
 }
 
 /// A tool request as `ants watch` prints it.
-pub(crate) fn request_line(r: &ApprovalRequest, forged: &str) -> String {
+fn request_line(r: &ApprovalRequest, forged: &str) -> String {
     let options = r.options.iter().map(|v| spelling(*v)).collect::<Vec<_>>().join("|");
     let (thread, ant, id) = (&r.thread_id, &r.ant, r.id);
     format!("[{thread}] {ant}{forged} asks approval {ant}/{id} ({options}): {}: {}", r.tool.kind, r.tool.title)
 }
 
 /// A channel post as `ants watch` prints it, an assistant's for its human naming both ([`Acting::label`]).
-pub(crate) fn channel_line(post: &ChannelPost, acting: &Acting, forged: &str) -> String {
+fn channel_line(post: &ChannelPost, acting: &Acting, forged: &str) -> String {
     let (thread, from, channel, left) =
         (&post.thread_id, acting.label(post.from.as_str()), &post.channel, post.turn_budget);
     let created = post.creator.as_ref().map_or_default(|c| format!(", created by {c}"));
@@ -173,7 +173,7 @@ pub(crate) fn channel_line(post: &ChannelPost, acting: &Acting, forged: &str) ->
 
 /// Renders watched traffic, continuing an ant's streamed text on one line until something else arrives.
 #[derive(Default)]
-pub(crate) struct Printer {
+struct Printer {
     /// Whose text the output ends with, unterminated.
     streaming: Option<(UserId, ThreadId, &'static str)>,
     /// The ants' faces, put before their names.

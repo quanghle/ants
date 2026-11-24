@@ -8,7 +8,8 @@ use ants_proto::{DeviceKey, PERMISSIONS_VERSION};
 use anyhow::{Context as _, Result};
 use serde::Serialize;
 
-use super::issued::{Issued, Kind, admins, assistants, devices, latest_lines, marks};
+use super::devices::{admins, assistants, devices, marks};
+use super::issued::{Issued, Kind, latest_lines};
 use super::revoke::revoked;
 use crate::auth;
 
@@ -249,7 +250,7 @@ mod tests {
         let team = dir.join("auth");
         auth::init(&team).unwrap();
         let ant = |name: &str, out: &Path| {
-            auth::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, out).unwrap();
+            crate::test_support::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, out).unwrap();
         };
         ant("dev-a", &dir.join("dev-a-old.creds"));
         ant("dev-a", &team.join("dev-a.creds"));

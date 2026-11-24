@@ -8,7 +8,8 @@
 //! `decide_approval` answers another ant's tool request that came up its chain (see `crate::approvals`).
 //!
 //! `post_channel` starts a channel thread the ant creates: its escalations go up the ant's chain, whichever ant
-//! gets stuck on it (see [`ants_proto::Escalation::new_from`]).
+//! gets stuck on it (see [`ants_proto::Escalation::new_from`]); with `on_thread` it posts on the thread of the
+//! channel post being handled instead, as the ant's reply there does, spending one of the thread's turns.
 //! `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
 //! `list_teams` shows the teams, and `manage_team` changes a team the ant manages through `ants signer` (see
 //! [`crate::teams::keeper`]); `send_message` and `ask_ant` to a team reach its lead, and `list_ants` and `route` keep
@@ -44,7 +45,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use agent_client_protocol::v1::schema::{EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerStdio};
 use ants_proto::provider::{Connected, Origin};
-use ants_proto::{AttachmentHandle, Envelope, ThreadId, UserId, Uuid};
+use ants_proto::{AttachmentHandle, ChannelPost, Envelope, ThreadId, UserId, Uuid};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
@@ -91,7 +92,7 @@ pub use crate::ipc::address as socket_address;
 pub use asks::Claim;
 pub use assist::{HumanMessage, HumanSealing, HumanStore, jetstream_store};
 pub use attach::{FileAccess, jetstream_files};
-pub use channels::{ChannelAccess, jetstream_channels};
+pub use channels::{ChannelAccess, ThreadPoster, jetstream_channels};
 pub use managers::{AntAsk, AntRequester, ManagerAsk, Requester, RetireAsk};
 pub(crate) use messages::asked_questions;
 pub(crate) use provider::Directories;
@@ -175,6 +176,7 @@ impl Mcp {
             escalator,
             channels: OnceLock::new(),
             teams: OnceLock::new(),
+            thread_posts: OnceLock::new(),
             lookup: OnceLock::new(),
             admin: OnceLock::new(),
             requester: OnceLock::new(),
@@ -220,6 +222,12 @@ impl Mcp {
     /// refused.
     pub fn with_teams(&self, teams: TeamAccess) {
         let _ = self.hub.teams.set(teams);
+    }
+
+    /// Serve `post_channel`'s `on_thread` through `poster`, which stores a post on the channel thread a turn handles;
+    /// without it such a post is refused.
+    pub fn with_thread_posts(&self, poster: ThreadPoster) {
+        let _ = self.hub.thread_posts.set(poster);
     }
 
     /// Look recipients up through `lookup` before `send_message` and `ask_ant` reach them; without it no
@@ -394,12 +402,14 @@ struct TurnState {
     reply_files: Option<Vec<String>>,
     /// The handles of the files attached to the message being handled, and when the hub stored it.
     carried: Option<(Vec<AttachmentHandle>, DateTime<Utc>)>,
+    /// The channel post the message being handled was made of, with its stream sequence in the ant's inbox stream.
+    post: Option<(ChannelPost, u64)>,
 }
 
 impl TurnState {
     /// The turn that handles `current`.
     fn of(current: Envelope) -> Self {
-        Self { current, title: None, completed: None, reply_files: None, carried: None }
+        Self { current, title: None, completed: None, reply_files: None, carried: None, post: None }
     }
 }
 
@@ -463,6 +473,8 @@ struct Hub {
     escalator: Option<Arc<Escalator>>,
     channels: OnceLock<ChannelAccess>,
     teams: OnceLock<TeamAccess>,
+    /// What stores the posts `post_channel` makes on the channel thread a turn handles ([`Mcp::with_thread_posts`]).
+    thread_posts: OnceLock<ThreadPoster>,
     lookup: OnceLock<ColonyLookup>,
     admin: OnceLock<Arc<dyn Admin>>,
     requester: OnceLock<AntRequester>,

@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 pub use self::screen::{HeldLogs, Screen, bracket_pastes, keyboard, warning};
 pub use self::state::{History, Link, State};
-use crate::colony;
+use crate::ants::colony;
 use crate::threads::thread::{self, Parser};
 use crate::threads::thread_meta;
 use crate::tools::{self, Update};
@@ -95,7 +95,7 @@ pub enum Event {
 /// What a timeline record holding an end with no reply has in its JSON.
 const NO_REPLY: &[u8] = br#""no_reply""#;
 
-pub(crate) type Tail = LocalBoxFuture<'static, (Parser, Result<(Vec<Entry>, u64)>)>;
+type Tail = LocalBoxFuture<'static, (Parser, Result<(Vec<Entry>, u64)>)>;
 
 /// Read the messages stored after sequence `after`, or else those of the window `since`, with `parser`, which keeps
 /// the threads of the tool requests read for their decisions and opens sealed messages. Returns them and the sequence read up to. With

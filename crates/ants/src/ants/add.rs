@@ -188,7 +188,7 @@ pub(crate) async fn credentials(args: &AddArgs, listing: &Listing, nats: &str, s
 /// List among the earlier names of `ant`, new to the config file, the name its home's sense data was last of, when
 /// another, so the ant keeps that data ([`ants_daemon::sense::take_over`]).
 fn take_over_home(ant: &Ant) -> Result<()> {
-    let home = crate::export::home_of(ant)?;
+    let home = crate::ants::export::home_of(ant)?;
     let earlier = ants_daemon::sense::take_over(&home, &ant.name)?;
     if let Some(earlier) = earlier {
         println!(

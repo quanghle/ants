@@ -9,10 +9,11 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
+use crate::ants::colony;
+use crate::completions;
 use crate::connection::Nats;
 use crate::people::humans;
 use crate::teams::{self, parse_name};
-use crate::{colony, completions};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum TeamCommand {
@@ -155,7 +156,7 @@ async fn show(
         println!("{}", serde_json::to_string(&shown)?);
         return Ok(());
     }
-    let faces = crate::avatars::Faces::stdout(crate::avatars::read_or_none(js).await);
+    let faces = crate::ants::avatars::Faces::stdout(crate::ants::avatars::read_or_none(js).await);
     let above: Vec<String> = directory.ancestors(id).iter().map(|t| format!(", within team {}", t.team)).collect();
     println!("team {id}{}", above.concat());
     if let Some(description) = &team.description {

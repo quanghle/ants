@@ -11,7 +11,7 @@ use crate::reload::FileId;
 
 /// Exit status once the executable was replaced (`EX_TEMPFAIL`). The systemd units restart on it
 /// (`RestartForceExitStatus`); launchd's `KeepAlive` restarts on any unsuccessful exit.
-pub const EXIT_CODE: i32 = 75;
+const EXIT_CODE: i32 = 75;
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct UpgradeArgs {

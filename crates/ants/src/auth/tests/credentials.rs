@@ -94,7 +94,7 @@ fn renewed_credentials_keep_what_they_are_for_a_new_key() {
         .into_file(&out("alice"))
         .unwrap();
     assert_eq!(renewed("alice").finding.device, device);
-    let devices = issued::devices(&team, "alice").unwrap();
+    let devices = devices::devices(&team, "alice").unwrap();
     assert_eq!(devices.len(), 1, "one device, renewed: {devices:?}");
     assert_eq!(devices[0].label.as_deref(), Some("laptop"));
     let destinations = [Destination::Ant(p("dev-a")), Destination::Channel("ops".parse().unwrap())];
@@ -161,7 +161,7 @@ fn a_human_device_binds_its_encryption_key_and_renewal_keeps_it_or_adds_one() {
     assert_eq!(bound(&unbound), None, "signed for a key generated elsewhere, without --xkey");
     let added = renew(&team, &unbound, &new(), Some(&other)).unwrap();
     assert_eq!((bound(&added.jwt), registered()), (Some(other.clone()), Some(other.clone())));
-    let devices = issued::devices(&team, "alice").unwrap();
+    let devices = devices::devices(&team, "alice").unwrap();
     assert_eq!(devices.iter().map(|d| d.xkey.clone()).collect::<Vec<_>>(), [Some(laptop), Some(other.clone())]);
 
     issue(&team, &p("dev-a"), Role::Ant, None, &out("dev-a")).unwrap();
@@ -183,7 +183,7 @@ fn an_admin_s_device_carries_the_role_through_renewal_until_revoked() {
     init(&team).unwrap();
     let out = |name: &str| dir.join(format!("{name}.creds"));
     let human = || Permissions::for_user(&p("alice"), Role::Human);
-    let admin = NewDevice { label: Some("laptop"), admin: true, ..NewDevice::default() };
+    let admin = Registered { label: Some("laptop"), admin: true, ..Registered::default() };
     Issue::new(&team, &p("alice"), Kind::Human, human()).with(&admin).into_file(&out("admin")).unwrap();
     Issue::new(&team, &p("alice"), Kind::Human, human()).labelled(Some("phone")).into_file(&out("phone")).unwrap();
     let ant = Permissions::for_user(&p("dev-a"), Role::Ant);
@@ -209,7 +209,7 @@ fn an_admin_s_device_carries_the_role_through_renewal_until_revoked() {
     let new = KeyPair::new_user().public_key();
     let renewed = renew(&team, &jwt, &new, None).unwrap();
     assert!(renewed.finding.admin, "the renewal keeps the role");
-    let admins = |now| issued::admins(&team, now).unwrap().into_iter().map(|a| a.key).collect::<Vec<_>>();
+    let admins = |now| devices::admins(&team, now).unwrap().into_iter().map(|a| a.key).collect::<Vec<_>>();
     assert_eq!(admins(now().unwrap()), [key.public_key(), new.clone()], "the phone's are no admin's");
     revoke::revoke(&team, None, std::slice::from_ref(&new)).unwrap();
     assert_eq!(admins(now().unwrap()), [key.public_key()]);
@@ -228,7 +228,7 @@ fn an_ant_becomes_a_human_s_only_assistant_through_its_user_jwt() {
     let out = |name: &str| dir.join(format!("{name}.creds"));
     let (alice, pa, pb) = (p("alice"), p("pa"), p("pb"));
     let assistant = |user: &UserId, of: &UserId| {
-        let new = NewDevice { assistant_of: Some(of.clone()), ..NewDevice::default() };
+        let new = Registered { assistant_of: Some(of.clone()), ..Registered::default() };
         let rights = Permissions::for_assistant(user, of);
         Issue::new(&team, user, Kind::Assistant, rights).with(&new).into_file(&out(user.as_str()))
     };
@@ -267,10 +267,10 @@ fn an_ant_becomes_a_human_s_only_assistant_through_its_user_jwt() {
     let line = issued::issued(&team).unwrap().pop().unwrap();
     assert_eq!((line.kind, line.assistant_of), (Kind::Assistant, Some(alice.clone())));
     let listed: Vec<(String, bool)> =
-        issued::assistants(&team, "alice").unwrap().into_iter().map(|(i, revoked)| (i.key, revoked)).collect();
+        devices::assistants(&team, "alice").unwrap().into_iter().map(|(i, revoked)| (i.key, revoked)).collect();
     assert_eq!(listed, [(key.public_key(), false), (verified_key(&renewed.jwt), false)]);
     revoke::revoke(&team, Some("pa"), &[]).unwrap();
-    assert!(issued::assistants(&team, "alice").unwrap().iter().all(|(_, revoked)| *revoked));
+    assert!(devices::assistants(&team, "alice").unwrap().iter().all(|(_, revoked)| *revoked));
     check_assistant(&team, &pb, &alice).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -290,14 +290,14 @@ fn only_credentials_a_registration_granted_are_marked_registered() {
     let github = || GithubAccount { id: 1, login: "octocat".into() };
     let grant = || Grant::Org("acme".into());
 
-    let device = NewDevice { github: Some(github()), grant: Some(grant()), ..NewDevice::default() };
+    let device = Registered { github: Some(github()), grant: Some(grant()), ..Registered::default() };
     let (jwt, _) = Issue::new(&team, &p("alice"), Kind::Human, human()).with(&device).for_key(&new(), None).unwrap();
     assert!(registered(&jwt));
     let renewed = renew_registered(&team, &jwt, &new(), None, github(), grant()).unwrap();
     assert!(registered(&renewed.jwt) && renewed.finding.registered, "ants signer keeps the mark");
     assert!(!registered(&renew(&team, &renewed.jwt, &new(), None).unwrap().jwt), "ants enroll renew drops it");
 
-    let bound = NewDevice { github: Some(github()), ..NewDevice::default() };
+    let bound = Registered { github: Some(github()), ..Registered::default() };
     let (issued, _) = Issue::new(&team, &p("alice"), Kind::Human, human()).with(&bound).for_key(&new(), None).unwrap();
     assert!(!registered(&issued), "bound with `ants auth user --github`, without a grant");
     std::fs::remove_dir_all(dir).unwrap();
@@ -416,7 +416,7 @@ fn credentials_of_the_longest_names_fit_max_control_line() {
             issue(&team, user, role, domain, &out).unwrap();
             sizes.push((format!("{role:?}"), read_creds(&out).unwrap().0.len()));
         }
-        let new = NewDevice { assistant_of: Some(human.clone()), ..NewDevice::default() };
+        let new = Registered { assistant_of: Some(human.clone()), ..Registered::default() };
         let rights = Permissions::for_assistant(&assistant, &human).with_js_domain(domain);
         Issue::new(&team, &assistant, Kind::Assistant, rights).with(&new).into_file(&out).unwrap();
         sizes.push(("Assistant".to_owned(), read_creds(&out).unwrap().0.len()));

@@ -111,7 +111,7 @@ pub(super) fn issue(ant: &Ant) -> String {
 }
 
 /// An ant's credentials: an ant's, or an assistant's, of its name, issued for the JetStream domain it uses.
-pub(super) fn check_ant_creds(ant: &Ant, now: u64) -> Check {
+fn check_ant_creds(ant: &Ant, now: u64) -> Check {
     let check = format!("ant {} credentials", ant.name);
     let name = &ant.name;
     let issue = issue(ant);
@@ -411,7 +411,7 @@ pub(super) async fn check_reactions(ants: &[Ant], setup: &Setup, wait: Duration)
     futures::future::join_all(ants.iter().map(|ant| check_ant_reactions(ant, setup, wait))).await
 }
 
-pub(super) async fn check_ant_reactions(ant: &Ant, setup: &Setup, wait: Duration) -> Check {
+async fn check_ant_reactions(ant: &Ant, setup: &Setup, wait: Duration) -> Check {
     let check = format!("ant {} reactions", ant.name);
     let Some(creds) = &ant.creds else {
         return Check::ok(

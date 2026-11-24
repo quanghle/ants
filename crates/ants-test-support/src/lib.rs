@@ -100,11 +100,16 @@ pub async fn eventually(what: &str, check: impl AsyncFnMut() -> bool) {
 }
 
 /// Wait until `check` holds, polling every 100 ms for up to `limit`; panics naming `what` otherwise.
-pub async fn eventually_within(limit: Duration, what: &str, mut check: impl AsyncFnMut() -> bool) {
+pub async fn eventually_within(limit: Duration, what: &str, check: impl AsyncFnMut() -> bool) {
+    eventually_every(Duration::from_millis(100), limit, what, check).await;
+}
+
+/// [`eventually_within`], polling `every` so often: for a wait whose end a test times, or that many tests make.
+pub async fn eventually_every(every: Duration, limit: Duration, what: &str, mut check: impl AsyncFnMut() -> bool) {
     let start = tokio::time::Instant::now();
     while !check().await {
         assert!(start.elapsed() < limit, "{what}: timed out after {limit:?}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(every).await;
     }
 }
 
@@ -195,6 +200,12 @@ impl NatsServer {
     pub fn spawn_with(conf: impl FnOnce(&Path) -> String) -> Option<Self> {
         // The server picks its own port and reports it in the ports file, so parallel tests cannot collide.
         Self::spawn("127.0.0.1:-1", conf)
+    }
+
+    /// Like [`spawn_with`](Self::spawn_with), listening on `port` of 127.0.0.1 (see [`free_port`]), so that a client
+    /// connected to it reconnects after [`stop`](Self::stop) and [`start_again`](Self::start_again).
+    pub fn spawn_on(port: u16, conf: impl FnOnce(&Path) -> String) -> Option<Self> {
+        Self::spawn(&format!("127.0.0.1:{port}"), conf)
     }
 
     fn spawn(listen: &str, conf: impl FnOnce(&Path) -> String) -> Option<Self> {

@@ -4,14 +4,11 @@
 use std::time::Duration;
 
 use ants_proto::{Role, ThreadMarks};
+use ants_test_support::user as p;
 
 use super::*;
 use crate::test_support::Server;
 use crate::threads::thread::{Parser, Select, Threads};
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 #[test]
 fn a_request_carries_the_newest_entries_within_16_kib_each_cut_to_1_kib() {

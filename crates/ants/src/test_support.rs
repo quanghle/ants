@@ -15,14 +15,18 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_daemon::bus;
-use ants_proto::{JsDomain, Machine, Role, UserId, inbox_prefix};
+use ants_proto::{ApprovalDecision, JsDomain, Machine, Permissions, Role, UserId, Verdict, inbox_prefix};
 use ants_test_support::NatsServer;
 pub(crate) use ants_test_support::eventually;
+use anyhow::Result;
 use async_nats::{Client, Event, jetstream};
+use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
-use crate::auth::{SERVER_CONF, init, issue, issue_leaf, members, role};
+use crate::auth::{Issue, SERVER_CONF, init, issue_leaf, members, role};
+use crate::credentials::issued::Kind;
 use crate::node::members::EnrollApprover;
+use crate::tools;
 
 /// A nats-server trusting a fresh team, whose keys are in its directory.
 pub(crate) struct Server(NatsServer);
@@ -49,12 +53,13 @@ impl Server {
     /// A server trusting a fresh team, with `jetstream` added to its JetStream block and `extra` to its
     /// configuration.
     pub(crate) fn start_with(jetstream: &str, extra: &str) -> Option<Self> {
-        NatsServer::spawn_with(|dir| {
-            init(&dir.join("auth")).unwrap();
-            let store = dir.join("js");
-            format!("jetstream {{ store_dir: {store:?}\n{jetstream} }}\ninclude \"auth/{SERVER_CONF}\"\n{extra}")
-        })
-        .map(Self)
+        NatsServer::spawn_with(|dir| team_conf(dir, jetstream, extra)).map(Self)
+    }
+
+    /// A server trusting a fresh team on a port of its own, which a client connected to it reconnects to after a
+    /// [`NatsServer::stop`] and [`NatsServer::start_again`].
+    pub(crate) fn start_restartable() -> Option<Self> {
+        NatsServer::spawn_on(ants_test_support::free_port(), |dir| team_conf(dir, "", "")).map(Self)
     }
 
     /// A server trusting a fresh team on the layout from before the store account: the bus's account holds
@@ -129,6 +134,14 @@ impl Server {
 
 /// A hub with the JetStream domain `hub` trusting a fresh team, taking leaf nodes on `leaf_port` (see
 /// [`ants_test_support::free_port`]), with `extra` added to its configuration.
+/// The configuration of a server trusting a fresh team set up in `dir`, with `jetstream` added to its JetStream block
+/// and `extra` to it.
+fn team_conf(dir: &Path, jetstream: &str, extra: &str) -> String {
+    init(&dir.join("auth")).unwrap();
+    let store = dir.join("js");
+    format!("jetstream {{ store_dir: {store:?}\n{jetstream} }}\ninclude \"auth/{SERVER_CONF}\"\n{extra}")
+}
+
 pub(crate) fn spawn_hub(leaf_port: u16, extra: &str) -> Option<NatsServer> {
     NatsServer::spawn_with(|dir| {
         init(&dir.join("auth")).unwrap();
@@ -157,4 +170,30 @@ pub(crate) fn uplink_for_most_ants(
             return (ants, e.to_string());
         }
     }
+}
+
+/// Issue a new NATS user for `user`, an ant or a human, in `role`, for the hub's JetStream domain if it has one, and
+/// write its `.creds` file to `out`. Earlier credentials stay valid.
+pub(crate) fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
+    issue_with(dir, user, role.into(), Permissions::for_user(user, role).with_js_domain(js_domain), out)
+}
+
+/// Issue a new NATS user for `user`, of `kind`, with `permissions`, write its `.creds` file to `out` and record its
+/// key ([`crate::credentials::issued::record`]). A human's are for a new device ([`Issue`]).
+pub(crate) fn issue_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, out: &Path) -> Result<()> {
+    Issue::new(dir, user, kind, permissions).into_file(out).map(drop)
+}
+
+/// Answer the pending tool request `id` picks (see [`tools::find`]) as the human, and wait until JetStream has stored
+/// the decision ([`tools::answer_request`]).
+pub(crate) async fn answer(
+    js: &jetstream::Context,
+    stream: &jetstream::stream::Stream,
+    id: &str,
+    verdict: Verdict,
+    now: DateTime<Utc>,
+) -> Result<ApprovalDecision> {
+    let (seq, request) = tools::find(stream, id).await?;
+    let answer = tools::Answer { seq, request: &request, verdict, by: &UserId::human(), now };
+    tools::answer_request(js, stream, &answer).await
 }

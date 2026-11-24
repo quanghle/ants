@@ -44,6 +44,10 @@ impl Model {
             self.closed_by_q = Some(now);
         }
         if self.compact {
+            // A prompt a key of the pane opened, drawn on its second line, takes what is typed first.
+            if let Some(taken) = self.prompt_key(key, now) {
+                return taken;
+            }
             return self.compact_key(key, now);
         }
         if let Some(taken) = self.overlay_key(key, now) {

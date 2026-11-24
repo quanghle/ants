@@ -50,8 +50,6 @@ use crate::serve::Ended;
 
 pub use self::config::{Config, SecretSource, Webhook, outline};
 pub(crate) use self::config::{Listing, check_creds, read_secret, signing_key};
-#[cfg(test)]
-pub use self::delivery::ensure_bucket;
 pub(crate) use self::delivery::{Bus, Delivered, Delivery};
 
 mod config;

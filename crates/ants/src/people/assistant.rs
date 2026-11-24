@@ -26,7 +26,7 @@ use crate::cas;
 use crate::connection::Nats;
 use crate::credentials::issued;
 use crate::people::{devices, humans};
-use crate::{auth, colony};
+use crate::{ants::colony, auth};
 
 pub(crate) mod consent;
 pub(crate) mod dedicated;

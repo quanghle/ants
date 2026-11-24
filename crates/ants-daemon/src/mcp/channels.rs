@@ -1,5 +1,6 @@
 //! The channel tools: `post_channel` starts a channel thread the ant creates, whose escalations go up the ant's
-//! chain, and `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
+//! chain, or with `on_thread` posts on the channel thread the turn handles, and `manage_channel` asks the channel
+//! manager to change a channel the ant owns (see [`crate::chanadm`]).
 
 use crate::bus::relayed::GuardedKv as _;
 use std::sync::Arc;
@@ -33,6 +34,12 @@ pub struct ChannelAccess {
 
 /// Store a channel post, with the originating inbox thread as private review evidence when given.
 pub type ChannelWriter = Arc<dyn Fn(ChannelPost, Option<ThreadId>) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+
+/// Store the ant's post, the second, on the thread of the channel post answered, the first, at the stream sequence
+/// given, spending one of the turns the thread has left as the ant's replies do: what was stored, with the turns it
+/// left, or None when the thread had none left.
+pub type ThreadPoster =
+    Arc<dyn Fn(ChannelPost, u64, ChannelPost) -> BoxFuture<'static, Result<Option<ChannelPost>>> + Send + Sync>;
 
 /// Reads the channels bucket and posts through JetStream.
 pub fn jetstream_channels(js: async_nats::jetstream::Context, domain: Option<JsDomain>) -> ChannelAccess {
@@ -75,6 +82,10 @@ struct PostChannel {
     /// redacted.
     #[serde(default)]
     attach: Vec<String>,
+    /// Post on the thread of the channel post being handled instead of starting a thread, as a reply on it that
+    /// spends one of its turns; only while the message being handled is a post on a thread of `channel`.
+    #[serde(default)]
+    on_thread: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -99,48 +110,75 @@ struct ManageChannel {
 impl Hub {
     /// Post `text` to `channel` as the ant, a member or the channel's messenger: a top-level post starting a thread
     /// the ant creates, with no owner and the turns the message `thread` is handling leaves, as `send_message` spends
-    /// them. Returns the new thread and whom the post wakes or notifies (its daemon sends the notices).
-    async fn post_channel(
-        &self,
-        thread: &ThreadId,
-        channel: &str,
-        text: String,
-        attach: &[String],
-    ) -> Result<String, String> {
-        let (current, source) = {
+    /// them; or `on_thread`, a reply on the thread of the channel post being handled ([`ChannelPost::reply`]), spending
+    /// one of the turns the thread has left. Returns the thread and whom the post wakes or notifies (its daemon sends
+    /// the notices).
+    async fn post_channel(&self, thread: &ThreadId, args: PostChannel) -> Result<String, String> {
+        let PostChannel { channel, text, attach, on_thread } = args;
+        let (current, answering, source) = {
             let sessions = self.sessions.locked();
-            let current = sessions.current(thread).cloned();
+            let turn = sessions.turns.get(thread);
+            let answering = turn.and_then(|turn| turn.post.clone()).filter(|_| on_thread);
             let channel = sessions.origins.get(thread).is_some_and(|origin| origin.channel.is_some());
-            (current, (!channel).then(|| thread.clone()))
+            (turn.map(|turn| turn.current.clone()), answering, (!channel).then(|| thread.clone()))
         };
         let current = current.ok_or("no message is being handled on this thread; posts go out only while one is")?;
         let channel: ChannelId = channel.trim().trim_start_matches('#').parse().map_err(|e| format!("{e}"))?;
+        let answering = answering.filter(|(answered, _)| answered.channel == channel);
+        if on_thread && answering.is_none() {
+            return Err(format!(
+                "on_thread posts only while the message being handled is a post on a thread of #{channel}; without \
+                 on_thread, post_channel starts a new thread"
+            ));
+        }
         let access = self.channels.get().ok_or("channels are not served here; post_channel is unavailable")?;
+        let poster = match answering {
+            Some(answering) => {
+                Some((answering, self.thread_posts.get().ok_or("posts on a thread are not served here")?))
+            }
+            None => None,
+        };
         let entry = (access.entry)(channel.clone())
             .await
             .map_err(|e| format!("cannot read #{channel}: {e:#}"))?
             .ok_or_else(|| format!("there is no channel #{channel}"))?;
         if !entry.is_member(&self.ant) && entry.messenger() != self.ant {
             return Err(format!(
-                "{} is neither a member nor the messenger of #{channel}; only members and the messenger start \
-                 threads there",
+                "{} is neither a member nor the messenger of #{channel}; only members and the messenger post there",
                 self.ant
             ));
         }
-        let left = current
-            .reply(self.ant.clone(), "", self.humans.sender_role(&current))
-            .map_err(|_| no_turns(thread, &current.from))?
-            .turn_budget;
-        let loaded = self.load(thread, attach).await?;
-        let mut post = ChannelPost::new(channel.clone(), self.ant.clone(), text)
-            .with_creator(Some(self.ant.clone()))
-            .with_allow(current.allow.clone());
-        post.turn_budget = left;
+        let mut post = match &poster {
+            Some(((answered, _), _)) => answered
+                .reply(self.ant.clone(), text, &[], &self.humans.humans())
+                .map_err(|_| thread_spent(&answered.thread_id))?,
+            None => {
+                let left = current
+                    .reply(self.ant.clone(), "", self.humans.sender_role(&current))
+                    .map_err(|_| no_turns(thread, &current.from))?
+                    .turn_budget;
+                let mut post = ChannelPost::new(channel.clone(), self.ant.clone(), text)
+                    .with_creator(Some(self.ant.clone()))
+                    .with_allow(current.allow.clone());
+                post.turn_budget = left;
+                post
+            }
+        };
+        let loaded = self.load(thread, &attach).await?;
         post.attachments = loaded.iter().map(|l| l.attachment.clone()).collect();
         self.check_fits(&post)?;
         let attachments = self.store(loaded, |id| post.attachment_handle(id)).await?;
         post.attachments = attachments;
-        (access.post)(post.clone(), source).await.map_err(|e| format!("not posted: {e:#}"))?;
+        let post = match poster {
+            Some(((answered, seq), poster)) => {
+                let stored = poster(answered.clone(), seq, post).await.map_err(|e| format!("not posted: {e:#}"))?;
+                stored.ok_or_else(|| thread_spent(&answered.thread_id))?
+            }
+            None => {
+                (access.post)(post.clone(), source).await.map_err(|e| format!("not posted: {e:#}"))?;
+                post
+            }
+        };
         let humans = self.humans.humans();
         let names = |users: Vec<UserId>| users.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ");
         let (woken, notified) = (entry.woken(&post, &humans), entry.notified(&post, &humans));
@@ -150,9 +188,13 @@ impl Hub {
             (true, false) => format!("it notifies {}", names(notified)),
             (false, false) => format!("it wakes {} and notifies {}", names(woken), names(notified)),
         };
+        let (left, posted) = (post.turn_budget, &post.thread_id);
+        if on_thread {
+            return Ok(format!("Posted to #{channel} on thread {posted} ({left} turns left); {wakes}."));
+        }
         Ok(format!(
-            "Posted to #{channel}, starting thread {} that {} created ({left} turns left); {wakes}.",
-            post.thread_id, self.ant
+            "Posted to #{channel}, starting thread {posted} that {} created ({left} turns left); {wakes}.",
+            self.ant
         ))
     }
 
@@ -219,15 +261,17 @@ impl Tools {
         members of the channel wake and answer on the thread, and an escalation on the thread goes up this ant's \
         escalation chain, whichever ant gets stuck. Only a member or the messenger of the channel may post. The \
         thread has no owner and gets the turns the current message leaves, one fewer unless it is a human's; with \
-        none left it is refused. `attach` lists files in the working directory to attach, as for send_message. \
-        Returns the thread id.")]
+        none left it is refused. With `on_thread`, while the message being handled is a post on a thread of \
+        `channel`, post on that thread instead, as a reply that spends one of the thread's turns and keeps its owner, \
+        creator and tool rules; with none left it is refused and escalate hands the thread on. `attach` lists files \
+        in the working directory to attach, as for send_message. Returns the thread id.")]
     async fn post_channel(
         &self,
         Parameters(args): Parameters<PostChannel>,
         cx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
-        Ok(text(self.hub.post_channel(&thread, &args.channel, args.text, &args.attach).await))
+        Ok(text(self.hub.post_channel(&thread, args).await))
     }
 
     #[tool(description = "Manage a channel this ant owns (a human makes an ant a channel's owner): `add` and \
@@ -244,6 +288,14 @@ impl Tools {
         let thread = self.thread(&cx)?;
         Ok(text(self.hub.manage_channel(&thread, args).await))
     }
+}
+
+/// The refusal of a post on `thread`, which has no turns left.
+fn thread_spent(thread: &ThreadId) -> String {
+    format!(
+        "thread {thread} has no turns left, so nothing was posted on it; call escalate to hand the thread on when it \
+         needs more"
+    )
 }
 
 /// A channel's members, messenger, owner and description.

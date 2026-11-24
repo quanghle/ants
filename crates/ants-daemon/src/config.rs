@@ -8,6 +8,8 @@
 //! nats = "wss://hub.example/nats"   # default server for every ant
 //! js_domain = "hub"                 # JetStream domain of the hub, if it has one; also per ant
 //! human = "alice"                   # default human, for escalations of threads with no owner; also per ant
+//! turn_budget = 8                   # turns a thread gets from a human's message, for ant-to-ant replies (the
+//!                                   # default); also per ant and per template
 //! metrics = "127.0.0.1:9464"        # serve /healthz and /metrics there (crate::monitoring::metrics); off without it
 //! timezone = "America/New_York"     # default zone of the schedules' cron, else UTC
 //! redact = true                     # redact secrets from what the ants publish (the default; crate::secrets::redact)
@@ -214,6 +216,8 @@ struct File {
     nats: Option<String>,
     js_domain: Option<JsDomain>,
     human: Option<UserId>,
+    /// Turns a thread gets from a human's message to an ant naming none ([`crate::escalation::Chain::turn_budget`]).
+    turn_budget: Option<u32>,
     /// Where to serve health and metrics ([`crate::monitoring::metrics`]).
     metrics: Option<SocketAddr>,
     /// Default time zone of the schedules' cron timetables.
@@ -338,7 +342,7 @@ pub fn load(path: &Path) -> Result<Loaded> {
 }
 
 /// Parse the text of the config file at `path`: expand `~` to `home`, resolve relative paths against the file's
-/// directory, apply the top-level `harness`, `nats`, `js_domain` and `human`, check that names are unique, workdirs
+/// directory, apply the top-level `harness`, `nats`, `js_domain`, `human` and `turn_budget`, check that names are unique, workdirs
 /// exist and every harness named is defined, add the built-in messenger unless `messenger = false`,
 /// settle each ant's sage and add the built-in sage while an ant names it (`sage::settle`), leave
 /// to another machine the built-in ants it doesn't serve ([`builtins`]), a harness being needed only by those it

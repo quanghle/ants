@@ -9,10 +9,11 @@ use ants_proto::{
 use anyhow::Result;
 
 use crate::bus;
-use crate::channel::{Context, Earlier};
+use crate::channel::{Context, Earlier, Threads};
 use crate::delivery::attempts::{GivenFiles, Reply, StoredFiles};
 use crate::escalation::{self, Route};
 use crate::monitoring::status;
+use crate::people::humans::Registry;
 use crate::stream::notes;
 
 use super::{Handling, Inbox, Incoming};
@@ -191,7 +192,10 @@ impl Inbox<'_> {
         // Other members' replies stored during the prompt spent the thread's turns too.
         let humans = self.humans.humans();
         let later = match self.threads.context(post, seq, Earlier::Omitted, &humans).await {
-            Ok(now) => now.later,
+            Ok(mut now) => {
+                self.fresh_budgets(&mut now.later, &humans);
+                now.later
+            }
             Err(e) => {
                 let thread = &incoming.envelope.thread_id;
                 tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns");
@@ -227,39 +231,18 @@ impl Inbox<'_> {
         &self,
         h @ Handling { incoming, seq, .. }: Handling<'_>,
         answered: &ChannelPost,
-        mut post: ChannelPost,
+        post: ChannelPost,
     ) -> Result<Option<ChannelPost>> {
-        let thread = &incoming.envelope.thread_id;
         let id = reply_id(self.ant, &incoming.envelope);
-        let filter = subject::chan_room(&answered.channel);
-        for _ in 0..SPEND_TRIES {
-            let humans = self.humans.humans();
-            let read = match self.threads.context(answered, seq, Earlier::Omitted, &humans).await {
-                Ok(read) => read,
-                Err(e) => {
-                    tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns; posting");
-                    break;
-                }
-            };
-            if read.later.iter().any(|later| later.id == post.id) {
-                return Ok(Some(post));
-            }
-            post = match post.clone().spend(answered.turns_left(&read.later, &humans)) {
-                Ok(post) => post,
-                Err(ProtoError::BudgetExhausted(_)) => {
-                    self.unposted(h, &post.text).await?;
-                    return Ok(None);
-                }
-                Err(e) => return Err(e.into()),
-            };
-            match bus::store_expecting(self.js, post.subject(), &post, &id, &filter, read.last_seq).await? {
-                bus::Expected::Stored(_) => return Ok(Some(post)),
-                bus::Expected::Moved => {}
+        let turn_budget = self.escalator.turn_budget();
+        let spending = Spending { js: self.js, threads: self.threads, humans: self.humans, turn_budget };
+        match spending.store(answered, seq, post, &id).await? {
+            Spent::Stored(post) => Ok(Some(post)),
+            Spent::Exhausted(post) => {
+                self.unposted(h, &post.text).await?;
+                Ok(None)
             }
         }
-        tracing::warn!(%thread, "the channel kept changing while posting; posting with the turns last read");
-        bus::store(self.js, post.subject(), &post, &id).await?;
-        Ok(Some(post))
     }
 
     /// The post of `text` to the notes of the thread of `incoming`, with `title` and `files`, those the turn attached:
@@ -434,4 +417,89 @@ pub(super) fn fit_to(text: String, room: usize) -> String {
 /// The message id of `ant`'s reply to `request`: the same for every attempt at it.
 pub(super) fn reply_id(ant: &UserId, request: &Envelope) -> String {
     format!("reply-{ant}-{}", request.id)
+}
+
+/// What storing an ant's post on a channel thread, spending one of the thread's turns, reads and writes through.
+pub(super) struct Spending<'a> {
+    pub(super) js: &'a async_nats::jetstream::Context,
+    pub(super) threads: &'a Threads,
+    pub(super) humans: &'a Registry,
+    /// The turns a human's post gives the thread ([`Inbox::fresh_budgets`]).
+    pub(super) turn_budget: u32,
+}
+
+/// What came of storing a post spending a turn.
+pub(super) enum Spent {
+    /// Stored, with the turns it left the thread.
+    Stored(ChannelPost),
+    /// Not stored: the thread had no turns left.
+    Exhausted(ChannelPost),
+}
+
+impl Spending<'_> {
+    /// Store `post`, answering the channel post `answered` at stream sequence `seq`, as message `id`, spending one of
+    /// the thread's turns: the thread is read again and the post stored with what is left only while no other post
+    /// reached the channel since, else read again, so members answering at once each spend a turn of their own. One
+    /// stored already under its id is not stored again.
+    pub(super) async fn store(
+        &self,
+        answered: &ChannelPost,
+        seq: u64,
+        mut post: ChannelPost,
+        id: &str,
+    ) -> Result<Spent> {
+        let thread = &answered.thread_id;
+        let filter = subject::chan_room(&answered.channel);
+        for _ in 0..SPEND_TRIES {
+            let humans = self.humans.humans();
+            let read = match self.threads.context(answered, seq, Earlier::Omitted, &humans).await {
+                Ok(mut read) => {
+                    super::admission::fresh_budgets(&mut read.later, &humans, self.turn_budget);
+                    read
+                }
+                Err(e) => {
+                    tracing::warn!(%thread, error = format!("{e:#}"), "rereading the thread's turns; posting");
+                    break;
+                }
+            };
+            if read.later.iter().any(|later| later.id == post.id) {
+                return Ok(Spent::Stored(post));
+            }
+            post = match post.clone().spend(answered.turns_left(&read.later, &humans)) {
+                Ok(post) => post,
+                Err(ProtoError::BudgetExhausted(_)) => return Ok(Spent::Exhausted(post)),
+                Err(e) => return Err(e.into()),
+            };
+            match bus::store_expecting(self.js, post.subject(), &post, id, &filter, read.last_seq).await? {
+                bus::Expected::Stored(_) => return Ok(Spent::Stored(post)),
+                bus::Expected::Moved => {}
+            }
+        }
+        tracing::warn!(%thread, "the channel kept changing while posting; posting with the turns last read");
+        bus::store(self.js, post.subject(), &post, id).await?;
+        Ok(Spent::Stored(post))
+    }
+}
+
+/// What stores the posts the ant makes on the channel thread its turn handles with `post_channel`'s `on_thread`
+/// ([`crate::mcp::Mcp::with_thread_posts`]), redacted, spending a turn as its own replies do.
+pub(super) fn thread_poster(
+    js: async_nats::jetstream::Context,
+    threads: std::sync::Arc<Threads>,
+    humans: Registry,
+    turn_budget: u32,
+    redactor: std::sync::Arc<crate::secrets::redact::Redactor>,
+) -> crate::mcp::ThreadPoster {
+    std::sync::Arc::new(move |answered: ChannelPost, seq, mut post: ChannelPost| {
+        let (js, threads, humans) = (js.clone(), threads.clone(), humans.clone());
+        redactor.redact_string(&mut post.text);
+        Box::pin(async move {
+            let spending = Spending { js: &js, threads: &threads, humans: &humans, turn_budget };
+            let id = post.id.to_string();
+            Ok(match spending.store(&answered, seq, post, &id).await? {
+                Spent::Stored(post) => Some(post),
+                Spent::Exhausted(_) => None,
+            })
+        })
+    })
 }

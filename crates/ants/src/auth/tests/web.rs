@@ -16,7 +16,7 @@ use crate::test_support::colony::entry as colony_entry;
 
 /// Web credentials of `human` issued to `out`: the device.
 fn issue_web(team: &Path, human: &UserId, out: &Path) -> ants_proto::DeviceId {
-    let new = NewDevice { label: Some("browser"), web: true, ..NewDevice::default() };
+    let new = Registered { label: Some("browser"), web: true, ..Registered::default() };
     Issue::new(team, human, Kind::Human, Permissions::for_web(human)).with(&new).into_file(out).unwrap().unwrap()
 }
 
@@ -249,7 +249,7 @@ async fn page(
     ants_daemon::hub::init(&h_js, |s| rights.may_publish(s)).await.unwrap();
 
     let out = server.dir().join("alice-web.creds");
-    let new = NewDevice { web: true, ..NewDevice::default() };
+    let new = Registered { web: true, ..Registered::default() };
     let web = Permissions::for_web(&alice).with_js_domain(domain);
     let device = Issue::new(&team, &alice, Kind::Human, web).with(&new).into_file(&out).unwrap().unwrap();
     let (jwt, key) = read_creds(&out).unwrap();
@@ -418,7 +418,7 @@ async fn a_web_device_reaches_a_hub_s_domain_with_the_same_rights() {
     crate::messages::inbox::ensure_bucket(&h_js).await.unwrap();
 
     let out = server.dir().join("alice-web.creds");
-    let new = NewDevice { web: true, ..NewDevice::default() };
+    let new = Registered { web: true, ..Registered::default() };
     let web = Permissions::for_web(&alice).with_js_domain(Some(&hub));
     Issue::new(&team, &alice, Kind::Human, web).with(&new).into_file(&out).unwrap();
     let finding = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
@@ -473,10 +473,10 @@ fn web_credentials_carry_the_tag_never_the_admin_role_nor_an_encryption_key_and_
     assert_eq!(refused.unwrap_err(), ants_proto::JwtError::NotAdmin(alice.clone()));
 
     // Never with the admin role, an encryption key, or for another than a human.
-    let admin = NewDevice { web: true, admin: true, ..NewDevice::default() };
+    let admin = Registered { web: true, admin: true, ..Registered::default() };
     let err = Issue::new(&team, &alice, Kind::Human, web()).with(&admin).for_key(&new(), None).unwrap_err().to_string();
     assert!(err.contains("never carry the admin role"), "{err}");
-    let plain = NewDevice { web: true, ..NewDevice::default() };
+    let plain = Registered { web: true, ..Registered::default() };
     let xkey = device_key(&XKey::new()).unwrap();
     let err = Issue::new(&team, &alice, Kind::Human, web())
         .with(&plain)
@@ -504,7 +504,7 @@ fn web_credentials_carry_the_tag_never_the_admin_role_nor_an_encryption_key_and_
     assert_eq!((record.label.as_deref(), record.renewed_from), (Some("browser"), Some(key.public_key())));
     // And the lifetime: as long from now as the earlier credentials had from their issue.
     let week = 7 * 86_400;
-    let expiring = NewDevice { web: true, expires_at: Some(now().unwrap() + week), ..NewDevice::default() };
+    let expiring = Registered { web: true, expires_at: Some(now().unwrap() + week), ..Registered::default() };
     let (expiring, _) = Issue::new(&team, &alice, Kind::Human, web()).with(&expiring).for_key(&new(), None).unwrap();
     let phone = new();
     let exp = verified(&renew(&team, &expiring, &phone, None).unwrap().jwt).unwrap().exp;
@@ -513,12 +513,12 @@ fn web_credentials_carry_the_tag_never_the_admin_role_nor_an_encryption_key_and_
     // `ants auth devices` marks them, beside the human's other devices.
     let human = Permissions::for_user(&alice, Role::Human);
     Issue::new(&team, &alice, Kind::Human, human).labelled(Some("laptop")).into_file(&dir.join("alice.creds")).unwrap();
-    let devices = issued::devices(&team, "alice").unwrap();
+    let devices = devices::devices(&team, "alice").unwrap();
     let listed: Vec<(Option<&str>, bool)> = devices.iter().map(|d| (d.label.as_deref(), d.web)).collect();
     assert_eq!(listed, [(Some("browser"), true), (None, true), (Some("laptop"), false)]);
     assert_eq!(serde_json::to_value(&devices[0]).unwrap()["web"], true);
     assert!(serde_json::to_value(&devices[2]).unwrap().get("web").is_none());
-    assert_eq!((issued::marks(&devices[0]), issued::marks(&devices[2])), ("  web".to_owned(), String::new()));
+    assert_eq!((devices::marks(&devices[0]), devices::marks(&devices[2])), ("  web".to_owned(), String::new()));
     let listing = crate::credentials::listing::listing(&team, now().unwrap()).unwrap();
     let expiring = listing.iter().find(|l| l.issued.key == phone).unwrap();
     assert!(expiring.expiring && expiring.issued.web, "{expiring:?}");

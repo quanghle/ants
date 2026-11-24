@@ -151,3 +151,65 @@ async fn post_channel_starts_a_thread_the_ant_created_where_it_may_post() {
     assert!(!ok && text.contains("has no turns left"), "{text}");
     assert_eq!(posted.locked().len(), 2);
 }
+
+#[tokio::test]
+async fn post_channel_on_thread_replies_on_the_thread_of_the_post_being_handled() {
+    let home = home("post-on-thread");
+    let (mcp, _sent) = start(&home).await;
+    let mut ops = ChannelEntry::new("ops".parse().unwrap());
+    ops.add_member(user("dev-a"));
+    ops.add_member(user("dev-b"));
+    let mut dev = ChannelEntry::new("dev".parse().unwrap());
+    dev.add_member(user("dev-a"));
+    let posted = Arc::new(StdMutex::new(Vec::new()));
+    mcp.with_channels(channels(vec![ops, dev], posted.clone()));
+    // Spends as the daemon's replies do, from the turns the post answered leaves after those stored on its thread.
+    let stored = Arc::new(StdMutex::new(Vec::<(ChannelPost, u64)>::new()));
+    mcp.with_thread_posts(Arc::new({
+        let stored = stored.clone();
+        move |answered: ChannelPost, seq, post: ChannelPost| {
+            let later: Vec<_> = stored.locked().iter().map(|(post, _)| post.clone()).collect();
+            let left = answered.turns_left(&later, &ants_proto::Humans::default());
+            let kept = post.spend(left).ok();
+            if let Some(post) = &kept {
+                stored.locked().push((post.clone(), seq));
+            }
+            Box::pin(async move { Ok(kept) })
+        }
+    }));
+    let humans = ants_proto::Humans::default();
+    let root = ChannelPost::new("ops".parse().unwrap(), user("dev-a"), "@dev-b review this")
+        .with_creator(Some(user("dev-a")))
+        .with_allow(Some(vec!["read:*".to_owned()]));
+    let mut review = root.reply(user("dev-b"), "@dev-a looks good", &[], &humans).unwrap();
+    review.turn_budget = 2;
+    let envelope = Envelope::on_thread(review.thread_id.clone(), user("dev-b"), user("dev-a"), "looks good");
+    let client = {
+        let (url, token) = http_server(&mcp, &review.thread_id);
+        http_client(&url, &token).await
+    };
+    let on_thread = |channel: &str| serde_json::json!({"channel": channel, "text": "@dev-b thanks", "on_thread": true});
+
+    // Outside a channel post's turn, on_thread is refused.
+    let turn = mcp.begin(&envelope);
+    let (ok, text) = call(&client, "post_channel", on_thread("ops")).await;
+    assert!(!ok && text.contains("on_thread posts only while the message being handled is a post"), "{text}");
+    drop(turn);
+
+    let _turn = mcp.begin(&envelope).answering(Some((review.clone(), 41)));
+    let (ok, text) = call(&client, "post_channel", on_thread("dev")).await;
+    assert!(!ok && text.contains("a post on a thread of #dev"), "another channel: {text}");
+    let (ok, text) = call(&client, "post_channel", on_thread("#ops")).await;
+    let thread = &review.thread_id;
+    assert!(ok && text == format!("Posted to #ops on thread {thread} (1 turns left); it wakes dev-b."), "{text}");
+    let (got, seq) = stored.locked()[0].clone();
+    assert_eq!((&got.thread_id, got.in_reply_to, got.turn_budget, seq), (thread, Some(review.id), 1, 41));
+    assert_eq!((&got.creator, &got.owner, &got.allow), (&Some(user("dev-a")), &None, &root.allow));
+    assert!(posted.locked().is_empty(), "no new thread is started");
+
+    let (ok, text) = call(&client, "post_channel", on_thread("ops")).await;
+    assert!(ok && text.contains("(0 turns left)"), "{text}");
+    let (ok, text) = call(&client, "post_channel", on_thread("ops")).await;
+    assert!(!ok && text.contains("has no turns left") && text.contains("escalate"), "{text}");
+    assert_eq!(stored.locked().len(), 2);
+}

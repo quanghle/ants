@@ -103,9 +103,9 @@ impl Links {
 
 /// The machine's host connection, kept up ([`host::keep`]), if any, in its task.
 #[derive(Default)]
-pub(super) struct HostRun(Option<HostTask>);
+struct HostRun(Option<HostTask>);
 
-pub(super) struct HostTask {
+struct HostTask {
     host: Host,
     /// The contents of its credentials file when it started ([`creds_snapshot`]).
     creds: Option<Vec<u8>>,
@@ -148,9 +148,9 @@ impl HostRun {
 
 /// Sense's link of its own without a host connection, kept up ([`host::keep_sense`]), if any, in its task.
 #[derive(Default)]
-pub(super) struct SenseRun(Option<SenseTask>);
+struct SenseRun(Option<SenseTask>);
 
-pub(super) struct SenseTask {
+struct SenseTask {
     host: Host,
     /// The contents of its credentials file when it started ([`creds_snapshot`]).
     creds: Option<Vec<u8>>,

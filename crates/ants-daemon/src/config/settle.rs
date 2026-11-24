@@ -35,6 +35,9 @@ pub(super) fn check_top_level(
     file.storage.validate().with_context(|| format!("config {}", path.display()))?;
     file.memory_pressure.validate().with_context(|| format!("config {}", path.display()))?;
     file.trails.validate().with_context(|| format!("config {}", path.display()))?;
+    if file.turn_budget == Some(0) {
+        bail!("config {}: turn_budget must be at least 1", path.display());
+    }
     if let Some(machine) = &file.machine {
         check_machine(machine).with_context(|| format!("config {}", path.display()))?;
     }
@@ -86,6 +89,9 @@ pub(super) fn settle_ant(
     }
     if ant.human.is_none() {
         ant.human.clone_from(&file.human);
+    }
+    if ant.turn_budget.is_none() {
+        ant.turn_budget = file.turn_budget;
     }
     ant.redact = file.redact;
     ant.machine.clone_from(&file.machine);

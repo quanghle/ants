@@ -696,15 +696,21 @@ async fn a_mention_notice_that_failed_is_sent_on_the_post_s_redelivery_and_only_
     let alice: UserId = "alice".parse().unwrap();
     let (ops, _) = bus.channel("ops", &["dev-a", "alice"]).await;
     let own = ChannelPost::new(ops.clone(), bus.dev.clone(), "@alice done");
-    // The markers' bucket is gone, so the first attempts fail and the post waits for a redelivery.
+    // The markers' bucket is gone, so the first attempts fail and the post waits for a redelivery: far enough apart
+    // that the bucket is back before the last one, however slow the machine.
+    bus.retry_delay = Duration::from_secs(2);
     bus.js.delete_key_value(ants_proto::SESSIONS_BUCKET).await.unwrap();
     let seq = bus.post(&own).await;
 
     let ctrl_c = Arc::new(Semaphore::new(0));
     let check = async {
+        let mut consumer: PullConsumer = bus.stream.get_consumer(&ants_proto::chan_consumer(&bus.dev)).await.unwrap();
+        eventually_every(Duration::from_millis(20), WAIT, "the post is not delivered", async || {
+            consumer.info().await.unwrap().delivered.stream_sequence >= seq
+        })
+        .await;
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(bus.stored(&subject::inbox(&alice, &bus.dev)).await, 0);
-        let mut consumer: PullConsumer = bus.stream.get_consumer(&ants_proto::chan_consumer(&bus.dev)).await.unwrap();
         assert!(consumer.info().await.unwrap().ack_floor.stream_sequence < seq, "not acked before the notice");
         bus::ensure_sessions(&bus.js, None, &bus.dev).await.unwrap();
         bus.until_posts_acked(seq).await;

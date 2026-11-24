@@ -13,8 +13,8 @@ use clap_complete::engine::ArgValueCandidates;
 use crate::completions;
 use crate::connection::Nats;
 use crate::trails::{
-    Found, LimitArgs, ResumeLimitArgs, RunArgs, Shown, TipsArgs, control, find, follow, human, ratings, run_shown,
-    runs, saved, saved_trails, start, tips,
+    Found, LimitArgs, ResumeLimitArgs, RunArgs, Shown, TipsArgs, control, find, follow, ratings, run_shown, runs,
+    saved, saved_trails, start, tips,
 };
 
 #[derive(Subcommand, Debug)]
@@ -104,7 +104,7 @@ pub(crate) enum TrailCommand {
 pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
     match command {
         TrailCommand::Save { file, name } => {
-            human(nats, "saving a trail")?;
+            nats.me.must_be_human("saving a trail")?;
             let trail = saved::read(&file, name, &nats.me.id, Utc::now())?;
             let (_, js) = nats.connect("ants-cli").await?;
             match saved::put(&js, &trail).await? {
@@ -132,7 +132,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
         }
         TrailCommand::Show { what, json, follow } => {
             if matches!(what, Shown::Run(_) | Shown::Pick(_)) {
-                human(nats, "reading a trail's runs")?;
+                nats.me.must_be_human("reading a trail's runs")?;
             }
             let (_, js) = nats.connect("ants-cli").await?;
             match find(&js, what, nats.me.role.is_human()).await? {
@@ -142,15 +142,15 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
                 Found::Run(run) => show_run(nats, &js, run, json, follow).await?,
             }
         }
-        TrailCommand::Run(args) => start::run(nats, args, start::ask_terminal).await?,
+        TrailCommand::Run(args) => start::run(nats, args, crate::tty::confirm_on_stderr).await?,
         TrailCommand::Stop { run } => {
-            human(nats, "stopping a run")?;
+            nats.me.must_be_human("stopping a run")?;
             let (client, js) = nats.connect("ants-cli").await?;
             let header = runs::pick(&js, &run).await?;
             print!("{}", control::stop(&client, &nats.me.id, &header).await?.said(&header));
         }
         TrailCommand::Resume { run, limits, follow } => {
-            human(nats, "resuming a run")?;
+            nats.me.must_be_human("resuming a run")?;
             let (client, js) = nats.connect("ants-cli").await?;
             let header = runs::pick(&js, &run).await?;
             control::resumable(&header)?;
@@ -163,7 +163,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
         }
         TrailCommand::Tips { tips: args, json } => show_tips(nats, &args, json).await?,
         TrailCommand::Rm { name } => {
-            human(nats, "removing a trail")?;
+            nats.me.must_be_human("removing a trail")?;
             let (_, js) = nats.connect("ants-cli").await?;
             let purged = saved::remove(&js, &saved::local_dir()?, &name).await?;
             let rated = ratings::purged(purged.ratings, purged.tips > 0);
@@ -171,7 +171,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
             println!("{removed} {name}{rated}{}", tips::purged(purged.tips));
         }
         TrailCommand::Runs { ant, json } => {
-            human(nats, "reading the runs of trails")?;
+            nats.me.must_be_human("reading the runs of trails")?;
             let (_, js) = nats.connect("ants-cli").await?;
             let listed = runs::list(&js, ant.as_ref()).await?;
             let rated = ratings::of_runs(&ratings::read_or_none(&js, ant.as_ref()).await);
@@ -195,7 +195,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TrailCommand) -> Result<()> {
 /// List the tips of the trail `args` names, or retire the one `--retire` names.
 async fn show_tips(nats: &Nats<'_>, args: &TipsArgs, json: bool) -> Result<()> {
     if args.retire.is_some() {
-        human(nats, "retiring a tip")?;
+        nats.me.must_be_human("retiring a tip")?;
     }
     let (_, js) = nats.connect("ants-cli").await?;
     if let Some(id) = &args.retire {
@@ -221,7 +221,7 @@ async fn show_tips(nats: &Nats<'_>, args: &TipsArgs, json: bool) -> Result<()> {
 
 /// Show the run `run`, or with `follow` follow it.
 async fn show_run(nats: &Nats<'_>, js: &jetstream::Context, run: RunId, json: bool, follow: bool) -> Result<()> {
-    human(nats, "reading a trail's runs")?;
+    nats.me.must_be_human("reading a trail's runs")?;
     if follow {
         return follow::follow(js, runs::find(js, &run).await?, json).await;
     }

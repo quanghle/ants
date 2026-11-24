@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ants_proto::provider::{BoxFuture, CallContext, Format, Origin, Starter, ToolCall};
 use ants_proto::{SenseId, UserId};
@@ -24,12 +25,27 @@ pub mod proposal {
     pub use crate::proposal::{Decided, Proposal, ProposalItem, Status, propose};
 }
 
-/// The one store of every ant.
-pub struct One(pub Arc<dyn Items>);
+/// The one store of every ant, counting how often it is asked for.
+pub struct One {
+    pub items: Arc<dyn Items>,
+    reads: AtomicUsize,
+}
+
+impl One {
+    pub fn new(items: Arc<dyn Items>) -> Self {
+        Self { items, reads: AtomicUsize::new(0) }
+    }
+
+    /// How many times an ant's items were asked for.
+    pub fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
 
 impl Stores for One {
     fn items<'a>(&'a self, _: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        Box::pin(std::future::ready(Ok(self.0.clone())))
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::ready(Ok(self.items.clone())))
     }
 }
 
@@ -75,7 +91,7 @@ pub async fn store<L: EventLog>(log: L, sense: SenseId, ant: UserId) -> Kept<L> 
 /// Sense keeping the items of `dev-a` in `log` as those of every ant, and those items.
 pub async fn fixture<L: EventLog + Send + Sync + 'static>(log: L) -> (Sense, Arc<Kept<L>>) {
     let items = Arc::new(store(log, SenseId::new(), "dev-a".parse().unwrap()).await);
-    (Sense::with_stores(Arc::new(One(items.clone()))), items)
+    (Sense::with_stores(Arc::new(One::new(items.clone()))), items)
 }
 
 /// [`fixture`] over a log of its own.

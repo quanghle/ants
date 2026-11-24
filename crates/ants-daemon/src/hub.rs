@@ -393,6 +393,24 @@ pub async fn ensure_unseen_bucket(js: &jetstream::Context, object: Object) -> Re
     Box::pin(object.create(js, false)).await
 }
 
+/// The buckets held in memory, whose entries their writers' next heartbeats put again: a restart of nats-server drops
+/// them, and nothing an ant or a web page holds may create them again ([`ensure_in_memory`]).
+pub const IN_MEMORY: [Object; 2] = [Object::Colony, Object::Presence];
+
+/// Create each bucket of [`IN_MEMORY`] that is missing, as [`ensure_unseen_bucket`] does, so that the heartbeats of
+/// daemons, CLIs and web pages are stored again after a restart of nats-server: what a human's CLI does when its
+/// presence cannot be put, and `ants signer` on the hub at every beat. One already there costs two requests and stays
+/// as it is. Fails with the first error, after trying each.
+pub async fn ensure_in_memory(js: &jetstream::Context) -> Result<()> {
+    let mut first = None;
+    for object in IN_MEMORY {
+        if let Err(e) = ensure_unseen_bucket(js, object).await {
+            first.get_or_insert(e);
+        }
+    }
+    first.map_or(Ok(()), Err)
+}
+
 /// Create the colony bucket as `ants init` does, but with entries expiring `ttl` after their last put.
 pub async fn create_colony(js: &jetstream::Context, ttl: Duration) -> Result<kv::Store> {
     let store = js.create_key_value(colony_config(ttl)).await.context("creating bucket ants_colony")?;

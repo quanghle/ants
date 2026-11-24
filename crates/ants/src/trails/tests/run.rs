@@ -189,11 +189,11 @@ fn a_follower_prints_each_change_of_a_run_once() {
 #[test]
 fn the_start_is_asked_only_with_a_terminal_on_stdin_and_stderr() {
     let mut asked = Vec::new();
-    assert_eq!(start::ask("Start the run?", false, &b"y\n"[..], &mut asked).unwrap(), None);
+    assert_eq!(crate::tty::confirm("Start the run?", false, &b"y\n"[..], &mut asked).unwrap(), None);
     assert!(asked.is_empty());
-    assert_eq!(start::ask("Start the run?", true, &b"y\n"[..], &mut asked).unwrap(), Some(true));
+    assert_eq!(crate::tty::confirm("Start the run?", true, &b"y\n"[..], &mut asked).unwrap(), Some(true));
     assert_eq!(asked, b"Start the run? [y/N] ");
-    assert_eq!(start::ask("Start the run?", true, &b"\n"[..], std::io::sink()).unwrap(), Some(false));
+    assert_eq!(crate::tty::confirm("Start the run?", true, &b"\n"[..], std::io::sink()).unwrap(), Some(false));
 }
 
 /// Records read in the order given, then unchanged.

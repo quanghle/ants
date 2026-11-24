@@ -2,9 +2,9 @@
 //! stream by batched direct gets (`batch_get`, [`batch_answer`]), the publish of an [`Envelope`] under its id
 //! with the stream's ack (`publish`, `stored`), the record of a thread's owner (`owner_record`, `owner_recorded`),
 //! a bucket's entry read by a direct get and put by compare-and-set (`kv_get`, `kv_entry`, `kv_update`,
-//! `kv_updated`), as the human's [`ReadMarker`] is, a device's [`Presence`] put and deleted ([`presence_put`],
-//! [`presence_delete`]), the colony's entries by a batched direct get of the last of each ([`colony_get`],
-//! [`colony_entry`]), and what is heard live: an ant's [`StatusEvent`]s on a thread (`status_event`,
+//! `kv_updated`), as the human's [`ReadMarker`] is, a device's [`Presence`] put and deleted (`presence_put`,
+//! `presence_delete`), the colony's entries by a batched direct get of the last of each (`colony_get`,
+//! `colony_entry`), and what is heard live: an ant's [`StatusEvent`]s on a thread (`status_event`,
 //! [`status_on`]) and the messages to the human (`heard`).
 //!
 //! What a client of another kind sends and awaits itself, over async-nats, is public; the rest is
@@ -292,22 +292,22 @@ pub(crate) fn kv_updated(what: &str, answer: &Message) -> Result<Option<u64>, Er
 }
 
 /// The put of `presence` under its key, in the presence bucket.
-pub fn presence_put(domain: Option<&JsDomain>, presence: &Presence) -> Message {
+pub(crate) fn presence_put(domain: Option<&JsDomain>, presence: &Presence) -> Message {
     let value = serde_json::to_vec(presence).unwrap_or_default();
     Message::new(put_subject(domain, PRESENCE_BUCKET, &presence.key()), value)
 }
 
 /// The delete of `presence`, in the presence bucket.
-pub fn presence_delete(domain: Option<&JsDomain>, presence: &Presence) -> Message {
+pub(crate) fn presence_delete(domain: Option<&JsDomain>, presence: &Presence) -> Message {
     Message::new(put_subject(domain, PRESENCE_BUCKET, &presence.key()), Vec::new()).header(KV_OPERATION, "DEL")
 }
 
 /// Most ants a read of the colony lists.
-pub const COLONY_BATCH: usize = 1024;
+pub(crate) const COLONY_BATCH: usize = 1024;
 
 /// The batched direct get of the last entry of each ant in the colony bucket, its answers to come on `reply`, as no
 /// consumer of a web device's lists them.
-pub fn colony_get(domain: Option<&JsDomain>, reply: String) -> Message {
+pub(crate) fn colony_get(domain: Option<&JsDomain>, reply: String) -> Message {
     let request = serde_json::json!({ "multi_last": [subject::kv_all(COLONY_BUCKET)], "batch": COLONY_BATCH });
     let payload = serde_json::to_vec(&request).unwrap_or_default();
     Message { reply: Some(reply), ..Message::new(format!("{}DIRECT.GET.KV_{COLONY_BUCKET}", api(domain)), payload) }
@@ -315,7 +315,7 @@ pub fn colony_get(domain: Option<&JsDomain>, reply: String) -> Message {
 
 /// The entry `stored`, one of the answers to a [`colony_get`], holds: none for a deleted one, one that does not parse
 /// and one under another ant's key.
-pub fn colony_entry(stored: &Stored) -> Option<ColonyEntry> {
+pub(crate) fn colony_entry(stored: &Stored) -> Option<ColonyEntry> {
     let deleted = stored
         .headers
         .iter()
