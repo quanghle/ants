@@ -568,7 +568,7 @@ async fn buckets_made_on_first_use_are_made_as_ants_init_makes_them() {
     crate::people::humans::ensure(&js).await.unwrap();
     let own = crate::people::devices::Own::from_creds(Some(&creds)).unwrap().unwrap();
     crate::people::devices::publish(&js, &own).await.unwrap();
-    crate::webhook::ensure_bucket(&js).await.unwrap();
+    crate::test_support::webhook::ensure_bucket(&js).await.unwrap();
     bus::ensure_channels(&js).await.unwrap();
     bus::ensure_chains(&js).await.unwrap();
     bus::ensure_links(&js).await.unwrap();

@@ -16,10 +16,10 @@ use super::conf::{entries, quote, uncommented, unquote};
 
 /// The port `ants web` serves the page on by default: fixed, so that the page's origin, and what the browser keeps
 /// for it, stay.
-pub const PAGE_PORT: u16 = 4280;
+const PAGE_PORT: u16 = 4280;
 
 /// The port of the loopback WebSocket listener `ants setup --web` and `ants leaf config --web` add.
-pub const LISTENER_PORT: u16 = 4281;
+const LISTENER_PORT: u16 = 4281;
 
 /// The address `ants web` serves the page on by default.
 pub const fn page_listen() -> SocketAddr {

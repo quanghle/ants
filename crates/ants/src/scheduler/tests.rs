@@ -40,7 +40,7 @@ fn credentials_must_be_the_schedule_s_own() {
     let to = Destination::Ant(p("dev-a"));
     crate::auth::init(&dir.join("auth")).unwrap();
     let permissions = ants_proto::Permissions::for_webhook(&p("other"), std::slice::from_ref(&to));
-    crate::auth::issue_with(
+    crate::test_support::issue_with(
         &dir.join("auth"),
         &p("other"),
         crate::credentials::issued::Kind::Webhook,

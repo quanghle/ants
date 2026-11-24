@@ -1,7 +1,6 @@
 //! `ants trail run`: what a run of a trail may spend, shown and confirmed, then the run asked of its conductor.
 
 use std::fmt::Write as _;
-use std::io::{BufRead, IsTerminal as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -109,7 +108,7 @@ impl Start {
 }
 
 /// The plan of the script of the file `path`, checked here and sent inline.
-pub(super) fn file_plan(path: &Path) -> Result<Plan> {
+fn file_plan(path: &Path) -> Result<Plan> {
     let script = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     if script.len() > MAX_TRAIL_SCRIPT {
         bail!("{} has {} bytes; a trail takes at most {MAX_TRAIL_SCRIPT}", path.display(), script.len());
@@ -126,7 +125,7 @@ pub(super) fn file_plan(path: &Path) -> Result<Plan> {
 
 /// The plan of the saved trail `found`: the colony's by name, a local one inline, as its conductor may run on another
 /// machine.
-pub(super) fn found_plan(found: saved::Found, now: chrono::DateTime<Utc>) -> Plan {
+fn found_plan(found: saved::Found, now: chrono::DateTime<Utc>) -> Plan {
     let saved::Trail { name, description, phases, source, script, .. } = found.trail;
     let (from, source) = match source {
         saved::Source::Colony { saved_by, saved_at, .. } => (
@@ -181,29 +180,6 @@ pub(crate) fn summary(plan: &Plan, conductor: &UserId, thread: Option<&ThreadId>
     out
 }
 
-/// Ask `question` on the terminal, stdin and stderr: None without one on both.
-pub(crate) fn ask_terminal(question: &str) -> Result<Option<bool>> {
-    let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    ask(question, terminal, std::io::stdin().lock(), std::io::stderr())
-}
-
-/// Ask `question` on `output`, reading the answer from `input`: None unless both are a `terminal`.
-pub(super) fn ask(
-    question: &str,
-    terminal: bool,
-    mut input: impl BufRead,
-    mut output: impl std::io::Write,
-) -> Result<Option<bool>> {
-    if !terminal {
-        return Ok(None);
-    }
-    write!(output, "{question} [y/N] ")?;
-    output.flush()?;
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    Ok(Some(matches!(line.trim(), "y" | "Y" | "yes")))
-}
-
 /// `ants trail run`, confirming with `confirm` unless --yes: it answers None without a terminal to ask on.
 pub(crate) async fn run(
     nats: &Nats<'_>,
@@ -211,7 +187,7 @@ pub(crate) async fn run(
     confirm: impl FnOnce(&str) -> Result<Option<bool>>,
 ) -> Result<()> {
     let RunArgs { trail, args, ant, thread, limits, yes, follow, json } = args;
-    super::human(nats, "starting a run")?;
+    nats.me.must_be_human("starting a run")?;
     let limits = limits.over(TrailLimits::DEFAULT)?;
     let args = sized(args, "--args")?;
     let plan = match trail {

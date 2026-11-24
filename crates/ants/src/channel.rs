@@ -48,7 +48,7 @@ pub fn parse_ant(s: &str) -> Result<UserId, String> {
 }
 
 /// The messenger is an ant a daemon serves, as it triages with an agent; `humans` may be members instead.
-pub fn check_messenger_not_human(messenger: Option<&UserId>, humans: &Humans) -> Result<()> {
+fn check_messenger_not_human(messenger: Option<&UserId>, humans: &Humans) -> Result<()> {
     if let Some(human) = messenger.filter(|m| humans.contains(m)) {
         bail!(
             "{human} is a human, so not the messenger of a channel, which is an ant; `--member {human}` adds a member"
@@ -58,7 +58,7 @@ pub fn check_messenger_not_human(messenger: Option<&UserId>, humans: &Humans) ->
 }
 
 /// A channel's owner is an ant: `humans` override any owner anyway.
-pub fn check_owner_not_human(owner: Option<&UserId>, humans: &Humans) -> Result<()> {
+fn check_owner_not_human(owner: Option<&UserId>, humans: &Humans) -> Result<()> {
     if let Some(human) = owner.filter(|o| humans.contains(o)) {
         bail!("{human} is a human, who needs no ownership: humans change every channel");
     }
@@ -288,7 +288,7 @@ pub async fn compose(
 /// The owner and creator of `thread` in `channel`, read as `reader` reads channels back ([`read_from`]): as its posts
 /// still kept say ([`ThreadOrigin`] with `humans`), or None. A thread named after the post that started it is read from its
 /// start; any other from the channel's oldest post kept.
-pub async fn thread_origin(
+async fn thread_origin(
     js: &jetstream::Context,
     reader: &Me,
     channel: &ChannelId,
@@ -451,7 +451,7 @@ impl Seen {
 /// through a free spare of its reader consumer, taken for the read and deleted after it, so any number of reads, and
 /// the ant's daemon's, may run at once. Posts whose sender or channel disagrees with their subject are dropped with a
 /// warning.
-pub async fn read_from(
+async fn read_from(
     js: &jetstream::Context,
     reader: &Me,
     channel: &ChannelId,

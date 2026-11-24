@@ -19,7 +19,7 @@ use chrono::{DateTime, Utc};
 use futures::TryStreamExt as _;
 
 /// A [`Serving`] put longer ago than this is of a process that stopped.
-pub const SERVING_STALE_AFTER: Duration = SERVING_EVERY.saturating_mul(2);
+const SERVING_STALE_AFTER: Duration = SERVING_EVERY.saturating_mul(2);
 
 /// A running component and the version it publishes.
 #[derive(Debug, Clone, PartialEq, Eq)]

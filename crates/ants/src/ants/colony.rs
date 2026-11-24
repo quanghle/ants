@@ -217,7 +217,7 @@ pub fn sense_unkept(entries: &[ColonyEntry]) -> Vec<String> {
 
 /// One line per ant whose machine's config sets some of its shared settings otherwise ([`ColonyEntry::drift`]), which
 /// the daemon ignores for the shared ones.
-pub fn drifted(entries: &[ColonyEntry]) -> Vec<String> {
+fn drifted(entries: &[ColonyEntry]) -> Vec<String> {
     entries
         .iter()
         .filter(|e| !e.drift.is_empty())
@@ -245,7 +245,7 @@ pub enum Absent {
 }
 
 /// A note for a colony listing no ant at all ([`Absent::Empty`]).
-pub const EMPTY_COLONY: &str = "no daemon beats, or the hub's JetStream memory store is full and refuses their \
+const EMPTY_COLONY: &str = "no daemon beats, or the hub's JetStream memory store is full and refuses their \
                                 heartbeats (`ants doctor` shows its usage)";
 
 /// Why no daemon serves `ant` now, given its colony entry, or None when one does: no entry (with no escalation chain
@@ -406,7 +406,7 @@ pub fn json(entry: &ColonyEntry, now: DateTime<Utc>, faces: &Faces) -> Result<St
 }
 
 /// `table` with each ant's face before its row, in its colour, the header indented to line up.
-pub fn faced(table: &str, entries: &[ColonyEntry], faces: &Faces) -> String {
+fn faced(table: &str, entries: &[ColonyEntry], faces: &Faces) -> String {
     let mut lines = table.lines();
     let header = lines.next().map(|h| format!("{:width$} {h}", "", width = ants_proto::FACE_WIDTH));
     let rows = lines.zip(entries).map(|(line, e)| format!("{} {line}", faces.face(&e.ant)));

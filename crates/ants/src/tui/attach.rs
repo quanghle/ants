@@ -167,7 +167,7 @@ pub async fn fetched(js: &jetstream::Context, keyring: Option<&Keyring>, listed:
         attachments::open(js, keyring, &listed.handle, Some(&listed.attachment), listed.stored).await?;
     let dir = private_dir(&std::env::temp_dir(), attachment.id)?;
     let path = dir.join(&attachment.name);
-    attachments::write_new(&path, &bytes)?;
+    crate::files::write_new(&path, &bytes)?;
     Ok(path)
 }
 

@@ -19,15 +19,6 @@ use serde::{Deserialize, Serialize};
 
 use super::ACK_TIMEOUT;
 
-/// The bucket of delivered events ([`WEBHOOKS_BUCKET`]), created when missing and the credentials allow it (a
-/// human's), as `ants init` does.
-#[cfg(test)]
-pub async fn ensure_bucket(js: &jetstream::Context) -> Result<jetstream::kv::Store> {
-    Box::pin(ants_daemon::hub::ensure_bucket(js, ants_daemon::hub::Object::Webhooks))
-        .await
-        .context("opening the webhooks bucket (with credentials, `ants init` as a human creates it)")
-}
-
 /// What [`WEBHOOKS_BUCKET`] keeps of a delivered event.
 #[derive(Serialize, Deserialize)]
 pub(super) struct Seen {

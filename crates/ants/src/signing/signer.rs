@@ -57,7 +57,7 @@ mod ordered;
 pub use asking::{Requester, Retired, ask, retire};
 
 /// Most requests of one manager waiting for a human at once; more are refused.
-pub const MAX_WAITING: usize = 3;
+const MAX_WAITING: usize = 3;
 /// How often the signer looks for the humans' decisions on the requests it asked them about.
 pub const TICK: Duration = Duration::from_secs(1);
 /// Least time a request must have left for a human to be asked about it.
@@ -873,7 +873,7 @@ mod tests {
             };
             assert_eq!(asked.ant, p("lead"));
             assert!(asked.tool.title.contains("max_ants"), "{}", asked.tool.title);
-            tools::answer(&js, &stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
+            crate::test_support::answer(&js, &stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
         };
 
         let user = KeyPair::new_user();

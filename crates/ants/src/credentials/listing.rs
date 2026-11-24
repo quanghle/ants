@@ -249,7 +249,7 @@ mod tests {
         let team = dir.join("auth");
         auth::init(&team).unwrap();
         let ant = |name: &str, out: &Path| {
-            auth::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, out).unwrap();
+            crate::test_support::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, out).unwrap();
         };
         ant("dev-a", &dir.join("dev-a-old.creds"));
         ant("dev-a", &team.join("dev-a.creds"));

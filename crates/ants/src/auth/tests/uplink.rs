@@ -257,7 +257,7 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
     h_js.set_timeout(Duration::from_secs(1));
     bus::ensure_stream(&h_js).await.unwrap();
     bus::init_own_buckets(&h_js).await.unwrap();
-    crate::webhook::ensure_bucket(&h_js).await.unwrap();
+    crate::test_support::webhook::ensure_bucket(&h_js).await.unwrap();
 
     let (github, alerts) = (p("github"), p("alerts"));
     for hook in [&github, &alerts] {

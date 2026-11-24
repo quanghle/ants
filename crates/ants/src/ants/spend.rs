@@ -236,7 +236,7 @@ fn layout(header: &[&str], rows: Vec<Vec<String>>) -> String {
 }
 
 /// One row per ant: what it spent today, against its daily caps, and in all `days` days.
-pub fn summary_table(reports: &[AntReport], days: u32) -> String {
+fn summary_table(reports: &[AntReport], days: u32) -> String {
     let (tokens_n, cost_n) = (format!("TOKENS_{days}D"), format!("COST_{days}D"));
     let rows = reports
         .iter()
@@ -289,7 +289,7 @@ pub fn ant_tables(report: &AntReport) -> String {
 
 /// One row per ant on the thread: what it spent since a human's last message there, against its thread caps, then in
 /// all.
-pub fn thread_table(reports: &[ThreadReport]) -> String {
+fn thread_table(reports: &[ThreadReport]) -> String {
     let rows = reports
         .iter()
         .map(|r| {

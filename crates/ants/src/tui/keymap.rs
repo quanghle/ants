@@ -31,7 +31,7 @@ pub type When = fn(&Model, DateTime<Utc>) -> Result<(), &'static str>;
 pub const HELP_ONLY: u8 = u8::MAX;
 
 /// What the footer always ends in.
-pub const HELP_HINT: &str = "? help";
+const HELP_HINT: &str = "? help";
 
 /// One row of the table.
 #[derive(Debug, Clone, Copy)]

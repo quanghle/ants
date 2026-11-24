@@ -20,20 +20,6 @@ use super::uplink::allowed;
 use super::{ACCOUNT_SEED, check_not_reserved};
 use crate::credentials::issued::{self, Issued, Kind};
 
-/// Issue a new NATS user for `user`, an ant or a human, in `role`, for the hub's JetStream domain if it has one, and
-/// write its `.creds` file to `out`. Earlier credentials stay valid.
-#[cfg(test)]
-pub fn issue(dir: &Path, user: &UserId, role: Role, js_domain: Option<&JsDomain>, out: &Path) -> Result<()> {
-    issue_with(dir, user, role.into(), Permissions::for_user(user, role).with_js_domain(js_domain), out)
-}
-
-/// Issue a new NATS user for `user`, of `kind`, with `permissions`, write its `.creds` file to `out` and record its
-/// key ([`issued::record`]). A human's are for a new device ([`Issue`]).
-#[cfg(test)]
-pub fn issue_with(dir: &Path, user: &UserId, kind: Kind, permissions: Permissions, out: &Path) -> Result<()> {
-    Issue::new(dir, user, kind, permissions).into_file(out).map(drop)
-}
-
 /// Credentials to issue, signed with the account key in the team directory `dir`: those of `user`, of `kind`, with
 /// `permissions`. A human's are for a new device, whose id their user JWT carries ([`DeviceId::tag`]) and the
 /// registry records with `new`.
@@ -148,11 +134,7 @@ pub(crate) fn device_key(xkey: &XKey) -> Result<DeviceKey> {
 /// marked [`REGISTERED_TAG`] when a registration grants it (`new.grant`), [`ADMIN_TAG`] for an admin (`new.admin`)
 /// and [`WEB_TAG`] for a web device (`new.web`), which is never an admin's and binds no encryption key; an
 /// assistant's carry its human's [`AssistantOf::tag`] instead.
-pub(super) fn device_claims(
-    kind: Kind,
-    new: &NewDevice<'_>,
-    xkey: Option<&DeviceKey>,
-) -> Result<(Option<DeviceId>, Value)> {
+fn device_claims(kind: Kind, new: &NewDevice<'_>, xkey: Option<&DeviceKey>) -> Result<(Option<DeviceId>, Value)> {
     if new.admin && kind != Kind::Human {
         bail!("only a human's credentials carry the admin role");
     }
@@ -204,12 +186,7 @@ pub(super) fn human_tags(
     tags.chain(web.then(|| WEB_TAG.to_owned())).collect()
 }
 
-pub(super) fn with_device(
-    issued: Issued,
-    device: Option<DeviceId>,
-    label: Option<&str>,
-    xkey: Option<DeviceKey>,
-) -> Issued {
+fn with_device(issued: Issued, device: Option<DeviceId>, label: Option<&str>, xkey: Option<DeviceKey>) -> Issued {
     match device {
         Some(device) => issued.for_device(device, label.map(str::to_owned), xkey),
         None => issued,

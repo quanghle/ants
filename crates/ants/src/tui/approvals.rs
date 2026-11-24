@@ -23,7 +23,7 @@ mod full;
 mod text;
 
 /// How long the card of a request settled while the UI runs stays.
-pub const SETTLED_FOR: TimeDelta = TimeDelta::minutes(2);
+const SETTLED_FOR: TimeDelta = TimeDelta::minutes(2);
 /// How many settled requests are kept at most.
 const SETTLED_KEEP: usize = 64;
 

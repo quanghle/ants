@@ -215,7 +215,7 @@ async fn decide(js: &async_nats::jetstream::Context, stream: &Stream, login: &st
     };
     assert_eq!(asked.ant, UserId::signer());
     assert!(asked.tool.title.contains(&format!("GitHub user {login} ")), "{}", asked.tool.title);
-    tools::answer(js, stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
+    crate::test_support::answer(js, stream, &asked.id.to_string(), verdict, Utc::now()).await.unwrap();
 }
 
 /// Whether `answers` tell the device to wait for a human.

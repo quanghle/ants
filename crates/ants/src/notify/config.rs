@@ -451,7 +451,7 @@ pub fn resolve_program(program: &str, resolve: &impl Fn(&Path) -> PathBuf) -> St
 }
 
 /// A sink's `timeout`, [`SEND_TIMEOUT`] unless given.
-pub(super) fn sink_timeout(text: Option<String>) -> Result<Duration> {
+fn sink_timeout(text: Option<String>) -> Result<Duration> {
     let Some(text) = text else { return Ok(SEND_TIMEOUT) };
     let timeout = ants_proto::duration::parse(&text).map_err(|e| anyhow!(e))?;
     if timeout.is_zero() || timeout > MAX_SEND_TIMEOUT {

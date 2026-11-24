@@ -5,7 +5,7 @@
 use std::path::Path;
 
 /// The file of the bundle naming the ants version it is built for, in a line.
-pub const VERSION_FILE: &str = "ants-version";
+const VERSION_FILE: &str = "ants-version";
 
 /// The page a pin names: the bundle's SHA-256, the ants-web commit it is built from, and the ants version it is built
 /// for.

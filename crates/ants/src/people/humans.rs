@@ -6,7 +6,7 @@ use std::path::Path;
 
 use ants_daemon::stream::reading::Reading;
 use ants_proto::{DeviceId, HUMANS_BUCKET, HumanEntry, Humans, Role, UserId, subject};
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use async_nats::jetstream::stream::DirectGetErrorKind;
 use async_nats::jetstream::{self, kv};
 use data_encoding::BASE64URL_NOPAD;
@@ -39,6 +39,14 @@ impl Me {
         };
         let text = std::fs::read_to_string(path).with_context(|| format!("reading credentials {}", path.display()))?;
         Self::from_creds_text(&text).with_context(|| format!("credentials {}", path.display()))
+    }
+
+    /// Refuse the credentials of an ant for `what`, which the server allows only a human.
+    pub fn must_be_human(&self, what: &str) -> Result<()> {
+        if !self.role.is_human() {
+            bail!("{what} needs a human's credentials; those of {} are an ant's", self.id);
+        }
+        Ok(())
     }
 
     fn from_creds_text(text: &str) -> Result<Self> {

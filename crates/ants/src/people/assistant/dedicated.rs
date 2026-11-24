@@ -9,7 +9,6 @@
 //! dedicated ant when asked: its entry leaves the config file, its credentials are revoked and their file and the
 //! seed of its encryption key removed, its home stays.
 
-use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -401,7 +400,13 @@ async fn issue(nats: &Nats<'_>, dir: &Path, ant: &UserId, out: &Path, store_key:
 
 /// `ants assistant disable`.
 pub async fn disable(nats: &Nats<'_>, args: DisableArgs) -> Result<()> {
-    disable_with(nats, args, retire::STOP_WAIT, confirm).await
+    disable_with(
+        nats,
+        args,
+        retire::STOP_WAIT,
+        |question| Ok(crate::tty::confirm_on_stdout(question)?.unwrap_or(false)),
+    )
+    .await
 }
 
 /// [`disable`], waiting up to `wait` for a retired assistant to stop, and asking with `ask` whether to retire it
@@ -472,18 +477,6 @@ async fn disable_with(
         return Ok(());
     }
     dedicated.retire(&path, &js, wait, args.dir, args.no_push, nats).await
-}
-
-/// Ask `question` on the terminal; no without one.
-fn confirm(question: &str) -> Result<bool> {
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        return Ok(false);
-    }
-    print!("{question} [y/N] ");
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
 /// An assistant `ants assistant enable` created, as the config file lists it: no template, working in its own home,

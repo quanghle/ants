@@ -1,9 +1,12 @@
 //! Questions put to the terminal with escape sequences ([`ask`]), each answered within 200ms or taken as unanswered,
-//! and the keys typed while waiting for the answers, kept for the UI ([`typed_keys`]).
+//! and the keys typed while waiting for the answers, kept for the UI ([`typed_keys`]); and those put to whoever sits
+//! at it, to answer by yes or no ([`confirm`]).
 
+use std::io::{BufRead, IsTerminal as _};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// How long the terminal has to answer.
@@ -14,6 +17,36 @@ const WAIT: Duration = Duration::from_millis(200);
 /// last tells that the terminal has answered all it will.
 #[cfg_attr(not(unix), expect(dead_code, reason = "the terminal is asked on unix alone"))]
 const ATTRIBUTES: &[u8] = b"\x1b[c";
+
+/// Ask `question`, to be answered by yes or no, on `output`, reading the answer from `input`: yes for `y`, `Y` or
+/// `yes`, no for anything else, None unless both are a `terminal`.
+pub fn confirm(
+    question: &str,
+    terminal: bool,
+    mut input: impl BufRead,
+    mut output: impl std::io::Write,
+) -> Result<Option<bool>> {
+    if !terminal {
+        return Ok(None);
+    }
+    write!(output, "{question} [y/N] ")?;
+    output.flush()?;
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    Ok(Some(matches!(line.trim(), "y" | "Y" | "yes")))
+}
+
+/// [`confirm`] on the terminal, standard input and error: None without one on both.
+pub fn confirm_on_stderr(question: &str) -> Result<Option<bool>> {
+    let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    confirm(question, terminal, std::io::stdin().lock(), std::io::stderr())
+}
+
+/// [`confirm`] on the terminal, standard input and output: None without one on both.
+pub fn confirm_on_stdout(question: &str) -> Result<Option<bool>> {
+    let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    confirm(question, terminal, std::io::stdin().lock(), std::io::stdout())
+}
 
 /// The bytes typed while the terminal was asked, which were no answer.
 static TYPED: Mutex<Vec<u8>> = Mutex::new(Vec::new());

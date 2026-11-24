@@ -377,9 +377,15 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 };
                 assert!(asked.tool.title.contains("lead is not among the managers of template helper"));
-                tools::answer(&js, &stream, &asked.id.to_string(), Verdict::AllowOnce, chrono::Utc::now())
-                    .await
-                    .unwrap();
+                crate::test_support::answer(
+                    &js,
+                    &stream,
+                    &asked.id.to_string(),
+                    Verdict::AllowOnce,
+                    chrono::Utc::now(),
+                )
+                .await
+                .unwrap();
             };
             let (added, ()) = tokio::join!(manager.add(ask("lead-h", "helper", Request::default())), approving);
             assert!(added.unwrap().starts_with("Added lead-h from template helper"));

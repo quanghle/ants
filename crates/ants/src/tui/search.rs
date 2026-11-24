@@ -29,7 +29,7 @@ use crate::threads::search::{self, Search};
 use crate::threads::thread::Parser;
 
 /// How many matches a search lists, the latest.
-pub const LIMIT: usize = 50;
+const LIMIT: usize = 50;
 /// How wide the place and the sender of a match show.
 const PLACE: usize = 24;
 const SENDER: usize = 12;

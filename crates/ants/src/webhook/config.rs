@@ -59,7 +59,7 @@ pub(super) struct Entry {
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
-pub(super) enum AuthKind {
+enum AuthKind {
     HmacSha256,
     Bearer,
     Token,

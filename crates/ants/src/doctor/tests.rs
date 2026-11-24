@@ -183,8 +183,14 @@ async fn the_versions_check_waits_for_every_component_to_allow_renewal() {
     let creds = server.dir().join("github.creds");
     let to = [ants_proto::Destination::Ant(dev_a.clone())];
     let permissions = ants_proto::Permissions::for_webhook(&hook, &to);
-    auth::issue_with(&server.dir().join("auth"), &hook, crate::credentials::issued::Kind::Webhook, permissions, &creds)
-        .unwrap();
+    crate::test_support::issue_with(
+        &server.dir().join("auth"),
+        &hook,
+        crate::credentials::issued::Kind::Webhook,
+        permissions,
+        &creds,
+    )
+    .unwrap();
     let _bus = crate::webhook::Bus::connect(&hook, Some(&creds), &server.url, None, "test").await.unwrap();
 
     let may = |s: &str| rights.may_publish(s);

@@ -95,7 +95,7 @@ pub enum Event {
 /// What a timeline record holding an end with no reply has in its JSON.
 const NO_REPLY: &[u8] = br#""no_reply""#;
 
-pub(crate) type Tail = LocalBoxFuture<'static, (Parser, Result<(Vec<Entry>, u64)>)>;
+type Tail = LocalBoxFuture<'static, (Parser, Result<(Vec<Entry>, u64)>)>;
 
 /// Read the messages stored after sequence `after`, or else those of the window `since`, with `parser`, which keeps
 /// the threads of the tool requests read for their decisions and opens sealed messages. Returns them and the sequence read up to. With

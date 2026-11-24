@@ -7,7 +7,7 @@
 //! resume` ask the run's conductor as `ants trail stop` and `ants trail resume` do.
 
 use ants_proto::{ThreadId, TipBoard, TrailLimits, TrailName, UserId};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -187,9 +187,7 @@ async fn shown(ctx: &Ctx, what: Shown) -> Result<Done> {
 async fn tips(ctx: &Ctx, args: &TipsArgs) -> Result<Done> {
     let now = Utc::now();
     if let Some(id) = &args.retire {
-        if !ctx.me.role.is_human() {
-            bail!("retiring a tip needs a human's credentials; those of {} are an ant's", ctx.me.id);
-        }
+        ctx.me.must_be_human("retiring a tip")?;
         let retired = cli_tips::retire(&ctx.js, &args.name, id, args.writer.as_ref(), &ctx.me.id, now).await?;
         return Ok(Done { line: cli_tips::retired(&retired, now), ..Done::default() });
     }

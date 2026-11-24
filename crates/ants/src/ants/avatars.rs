@@ -178,7 +178,7 @@ impl Faces {
 }
 
 /// `text` in `color`, as `depth` shows it.
-pub fn paint(depth: Depth, text: &str, color: Rgb) -> String {
+fn paint(depth: Depth, text: &str, color: Rgb) -> String {
     match depth {
         Depth::Plain => text.to_owned(),
         Depth::Palette => format!("\x1b[38;5;{}m{text}\x1b[0m", color.ansi256()),

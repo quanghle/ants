@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use super::model::{Action, Key, Level, Model, Page};
 
 /// From how many columns the nav shows beside the view.
-pub const NAV_FROM: u16 = 100;
+const NAV_FROM: u16 = 100;
 /// From how many columns the thread view's side panel shows.
-pub const PANEL_FROM: u16 = 140;
+const PANEL_FROM: u16 = 140;
 /// The key that folds or shows the nav.
 pub const NAV_KEY: Key = Key::Ctrl('o');
 /// The key that folds or shows the thread view's side panel.

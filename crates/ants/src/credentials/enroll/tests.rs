@@ -160,7 +160,7 @@ async fn requests_must_prove_their_enrollment_and_leaf_credentials() {
     let (leaf_jwt, leaf_key) = auth::read_creds(&leaf_creds).unwrap();
     // An ant named like a leaf's uplink user, which may connect as a client only.
     let posing = server.dir().join("leaf-m1-ant.creds");
-    auth::issue(&team, &p("leaf-m1"), Role::Ant, None, &posing).unwrap();
+    crate::test_support::issue(&team, &p("leaf-m1"), Role::Ant, None, &posing).unwrap();
     let (posing_jwt, posing_key) = auth::read_creds(&posing).unwrap();
     let revoked = server.dir().join("leaf-m1-revoked.creds");
     auth::issue_leaf(&team, &m1, &[(p("dev-b"), Role::Ant)], &[], EnrollApprover::Without, None, &revoked).unwrap();
@@ -308,7 +308,7 @@ async fn an_ant_new_to_a_leaf_enrolls_through_it_and_reaches_the_hub() {
     let (human, dev_a, dev_c) = (UserId::human(), p("dev-a"), p("dev-c"));
     let creds = |user: &UserId| {
         let out = hub.dir().join(format!("{user}.creds"));
-        auth::issue(&team, user, Role::by_default(user), Some(&domain), &out).unwrap();
+        crate::test_support::issue(&team, user, Role::by_default(user), Some(&domain), &out).unwrap();
         out
     };
     let (h, h_js) = bus::connect(&hub.url, Some(&creds(&human)), Some(&domain), &human, "test").await.unwrap();

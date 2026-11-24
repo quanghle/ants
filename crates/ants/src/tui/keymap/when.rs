@@ -38,7 +38,7 @@ pub(super) fn thread_selected(model: &Model, now: DateTime<Utc>) -> Result<(), &
     check(model.target(now).is_ok(), "no thread selected")
 }
 
-pub(super) fn home_item(model: &Model, now: DateTime<Utc>) -> Option<home::Item> {
+fn home_item(model: &Model, now: DateTime<Utc>) -> Option<home::Item> {
     match model.page() {
         Page::Home(page) => page.selected(&model.data, now),
         _ => None,

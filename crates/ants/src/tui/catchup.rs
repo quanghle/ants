@@ -203,7 +203,7 @@ pub fn since_line(model: &Model, now: DateTime<Utc>) -> Line<'static> {
 
 /// The TL;DR of `thread` as the thread view shows it, in lines of `width`: who wrote it and how long ago, stale once
 /// a newer entry is stored, then its first lines; or that one is being asked for. None when there is neither.
-pub fn tldr_lines(model: &Model, thread: &ThreadId, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
+fn tldr_lines(model: &Model, thread: &ThreadId, now: DateTime<Utc>, width: usize) -> Vec<Line<'static>> {
     let data = &model.data;
     let asking = model.catchup.asking.contains(thread);
     let Some(tldr) = data.cards.tldr.get(thread) else {

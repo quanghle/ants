@@ -49,7 +49,7 @@ pub(super) enum LinkError {
     Expired,
 }
 
-pub(super) fn parse_verdict(text: &str) -> Option<Verdict> {
+fn parse_verdict(text: &str) -> Option<Verdict> {
     [Verdict::AllowOnce, Verdict::AllowAlways, Verdict::Reject].into_iter().find(|v| v.as_str() == text)
 }
 

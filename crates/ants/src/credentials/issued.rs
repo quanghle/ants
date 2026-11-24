@@ -422,7 +422,7 @@ mod tests {
         auth::init(&team).unwrap();
         let ant = |name: &str| {
             let out = dir.join(format!("{name}.creds"));
-            auth::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, &out).unwrap();
+            crate::test_support::issue(&team, &name.parse().unwrap(), ants_proto::Role::Ant, None, &out).unwrap();
             auth::read_creds(&out).unwrap()
         };
         let renewed = |jwt: &str| {

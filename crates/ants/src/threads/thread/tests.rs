@@ -1022,7 +1022,7 @@ async fn a_sealed_message_from_a_device_enrolled_mid_follow_opens_everywhere_it_
     let (alice, bob) = (p("alice"), p("bob"));
     let enrolled = |name: &str| {
         let creds = server.dir().join(format!("alice-{name}.creds"));
-        crate::auth::issue(&server.dir().join("auth"), &alice, Role::Human, None, &creds).unwrap();
+        crate::test_support::issue(&server.dir().join("auth"), &alice, Role::Human, None, &creds).unwrap();
         creds
     };
     let desk = enrolled("desk");

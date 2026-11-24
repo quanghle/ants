@@ -25,7 +25,7 @@ use crate::threads::thread::{self, Parser};
 type Time = DateTime<Utc>;
 
 /// How far before `--until` (or now) a search reads without `--since`.
-pub const DEFAULT_SINCE: Duration = Duration::from_hours(24);
+const DEFAULT_SINCE: Duration = Duration::from_hours(24);
 /// How long the line of text shown for a match may be.
 const LINE: usize = 100;
 

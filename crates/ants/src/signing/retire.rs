@@ -178,7 +178,7 @@ pub async fn leave_leaves(dir: &Path, ant: &UserId, hub: Option<&Context>) -> Ve
 }
 
 /// [`leave_leaves`], `local` reading this machine's leaf node configuration, and `apply` reloading the node.
-pub(crate) async fn leave_leaves_with(
+async fn leave_leaves_with(
     dir: &Path,
     ant: &UserId,
     hub: Option<&Context>,

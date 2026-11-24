@@ -31,7 +31,7 @@ use tokio::time::timeout;
 use super::uplink::allowed;
 use super::*;
 use crate::node::members::EnrollApprover;
-use crate::test_support::Server;
+use crate::test_support::{Server, issue, issue_with};
 
 mod channels;
 mod credentials;

@@ -132,7 +132,7 @@ pub(super) fn check_xkey(check: &str, path: &Path, finding: &creds::Finding, sto
 
 /// A failed check of a seed that did not load: unlocking the OS credential store when it did not answer, else
 /// restoring the seed or `issue` again.
-pub(super) fn unloaded(check: &str, e: &anyhow::Error, issue: Vec<String>) -> Check {
+fn unloaded(check: &str, e: &anyhow::Error, issue: Vec<String>) -> Check {
     if keystore::is_unavailable(e) {
         let fix = "unlock the OS credential store (log in), then check again; services started before then wait for it";
         return Check::fail(check, format!("{e:#}"), vec![fix.to_owned()]);

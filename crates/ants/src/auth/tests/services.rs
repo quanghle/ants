@@ -18,7 +18,7 @@ async fn a_webhook_posts_as_itself_to_its_destinations_only_and_reads_no_message
     .unwrap();
     let (_, h_js) = server.connect(&UserId::human()).await;
     bus::ensure_stream(&h_js).await.unwrap();
-    crate::webhook::ensure_bucket(&h_js).await.unwrap();
+    crate::test_support::webhook::ensure_bucket(&h_js).await.unwrap();
 
     let (raw, mut errors) = server.watched_with(&hook, &creds).await;
     for allowed in [

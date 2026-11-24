@@ -451,7 +451,7 @@ async fn pause(ctx: &Ctx, ant: &UserId, paused: bool) -> Result<Done> {
 }
 
 /// Write `change` to the entry of `channel` with the human's credentials ([`crate::channel::Change::write`]).
-pub async fn change_channel(ctx: &Ctx, channel: ChannelId, change: &crate::channel::Change) -> Result<Done> {
+async fn change_channel(ctx: &Ctx, channel: ChannelId, change: &crate::channel::Change) -> Result<Done> {
     let kv = crate::channel::open(&ctx.js).await?;
     let humans = humans::load(&ctx.js, &ctx.me).await;
     let changed = change.write(&ctx.js, &kv, &channel, &humans).await?;

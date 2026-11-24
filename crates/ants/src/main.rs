@@ -15,6 +15,7 @@ mod cmd;
 mod completions;
 mod connection;
 mod defaults;
+mod files;
 mod http;
 mod text;
 

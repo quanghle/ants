@@ -237,7 +237,7 @@ async fn an_add_order_on_a_leaf_node_s_machine_renews_its_uplink_to_carry_the_an
     let m1: Machine = "m1".parse().unwrap();
     let (alice, bob, dev_a, dev_b) = (p("alice"), p("bob"), p("dev-a"), p("dev-b"));
     let bob_creds = hub.dir().join("bob.creds");
-    auth::issue(&team, &bob, Role::Human, Some(&domain), &bob_creds).unwrap();
+    crate::test_support::issue(&team, &bob, Role::Human, Some(&domain), &bob_creds).unwrap();
     let (_h, h_js) = bus::connect(&hub.url, Some(&bob_creds), Some(&domain), &bob, "test").await.unwrap();
     bus::ensure_stream(&h_js).await.unwrap();
     h_js.create_key_value(ants_daemon::hub::machines_config()).await.unwrap();
