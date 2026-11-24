@@ -4,7 +4,7 @@
 use ants_proto::UserId;
 use anyhow::Result;
 use async_nats::jetstream;
-use futures::stream::{Stream, StreamExt as _};
+use futures::stream::Stream;
 
 use crate::approvals::NatsApprover;
 use crate::channel::Channels;
@@ -32,7 +32,8 @@ use super::redacting::{
     RedactingNotes, redacting_notes_sender, redacting_outbox, redacting_posts, redacting_sender, redactor,
 };
 use super::settings::{Config, Connection, HarnessSettings, Spending, WorktreeSettings};
-use super::{ACK_WAIT, GROWN_WAIT, IN_HAND_PER_HARNESS, MAX_DELIVER, Served, Stop, mcp_sign_in, stopped};
+use super::window::Window;
+use super::{ACK_WAIT, GROWN_WAIT, IN_HAND_PER_HARNESS, Served, Stop, mcp_sign_in, stopped};
 
 /// The config with worktrees turned on or off for good, telling of a default turning them on and warning of threads
 /// running at once in one git work tree. Whether threads do get a worktree each is told once the repository is looked
@@ -598,14 +599,16 @@ pub(super) async fn publisher(
     })
 }
 
-/// The messages to the ant, from its inbox and the posts to its channels, and the channels; the inbox alone when the
-/// channels fail. While the ant is paused ([`Config::pause`]) the consumers are not pulled from ([`pause::pausable`]).
+/// The messages to the ant, from its inbox and the posts to its channels, the channels, and the window of their
+/// consumers ([`Window`]); the inbox alone when the channels fail. While the ant is paused ([`Config::pause`]) the
+/// consumers are not pulled from ([`pause::pausable`]).
 pub(super) async fn inbox_messages(
     js: &jetstream::Context,
     stream: &jetstream::stream::Stream<()>,
     config: &Config,
-) -> Result<(impl Stream<Item = Result<jetstream::Message, anyhow::Error>> + Unpin, Channels)> {
+) -> Result<(impl Stream<Item = Result<jetstream::Message, anyhow::Error>> + Unpin, Channels, std::sync::Arc<Window>)> {
     let in_hand = i64::try_from(config.pooling.max_harnesses.max(1) * IN_HAND_PER_HARNESS)?;
+    let window = std::sync::Arc::new(Window::new(stream.clone(), config.ant.clone(), ACK_WAIT, in_hand));
     let channels = match async { Channels::watch(bus::ensure_channels(js).await?).await }.await {
         Ok(channels) => Some(channels),
         Err(e) => {
@@ -617,32 +620,10 @@ pub(super) async fn inbox_messages(
     let paused = config.pause.subscribe();
     // Not across the opening: a reload replacing the pause meanwhile would block the daemon's thread on its lock.
     let is_paused = paused.borrow().is_some();
-    let current = if is_paused { None } else { Some(open_messages(stream, &config.ant, in_hand, posts).await?) };
-    let (stream, ant) = (stream.clone(), config.ant.clone());
-    let messages = pause::pausable(paused, current, async move || open_messages(&stream, &ant, in_hand, posts).await);
-    Ok((Box::pin(messages), channels.unwrap_or_default()))
-}
-
-/// The ant's inbox consumer, with its channel consumer if `posts`, as one stream.
-async fn open_messages(
-    stream: &jetstream::stream::Stream<()>,
-    ant: &UserId,
-    in_hand: i64,
-    posts: bool,
-) -> Result<impl Stream<Item = <bus::Pull as Stream>::Item> + Unpin + use<>> {
-    let messages = bus::inbox_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await?;
-    let posts = if posts {
-        match bus::chan_consumer(stream, ant, ACK_WAIT, MAX_DELIVER, in_hand).await {
-            Ok(posts) => Some(posts),
-            Err(e) => {
-                tracing::warn!(error = format!("{e:#}"), "serving the inbox without channel posts");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    Ok(futures::stream::select(messages, futures::stream::iter(posts).flatten()))
+    let current = if is_paused { None } else { Some(window.open(posts).await?) };
+    let opening = window.clone();
+    let messages = pause::pausable(paused, current, async move || opening.open(posts).await);
+    Ok((Box::pin(messages), channels.unwrap_or_default(), window))
 }
 
 /// Put the ant on the colony, holding its entry from the revision claimed, if any, its first entry showing the profile

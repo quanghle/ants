@@ -18,6 +18,7 @@ use crate::monitoring::status;
 
 use super::control::{Cancel, Why};
 use super::handling::Handled;
+use super::window::{Over, THREAD_HEAD};
 use super::{EVICT_EVERY, InHand, Inbox, Incoming, Steered, is_post, sleep_until, stream_seq};
 
 /// How long [`Inbox::answer_queue`] waits for each consumer's info, well inside the 5 s `ants queue` waits for an
@@ -189,6 +190,7 @@ impl Inbox<'_> {
         let mut answering = FuturesUnordered::new();
         let mut paused = self.settings.pause.subscribe();
         let mut drift = self.settings.drift.subscribe();
+        let mut widening: Waiting<'_> = Fuse::terminated();
         loop {
             let junk_waits = !self.holds.junk.is_empty() && waits.stalling.is_terminated();
             let retry_deadline = threads.values().filter_map(|t| t.retry.as_ref().map(|r| r.until)).min();
@@ -225,6 +227,7 @@ impl Inbox<'_> {
                     }
                 }
                 Some(()) = answering.next(), if !answering.is_empty() => {}
+                () = &mut widening => {}
                 Some((thread, handled, joiner)) = running.next(), if !running.is_empty() => {
                     if let Some(wait) = handed_back(&mut threads, &thread, handled, joiner, &self.holds.stall) {
                         waits.start(self, wait);
@@ -246,6 +249,12 @@ impl Inbox<'_> {
                 running.push(self.handle(incoming, msg).map(move |(thread, handled)| (thread, handled, joiner)));
             }
             self.report_in_hand(&threads);
+            if widening.is_terminated() {
+                let held = self.holds_messages(paused.borrow().is_some());
+                if let Some(widen) = self.window.fit(if held { Over::default() } else { over(&threads) }) {
+                    widening = widen.boxed().fuse();
+                }
+            }
         }
 
         drop(messages);
@@ -561,6 +570,23 @@ fn next_turn(threads: &mut HashMap<ThreadId, Thread>, thread: ThreadId) -> Optio
             None
         }
     }
+}
+
+/// The messages in hand that wait on their thread behind its first [`THREAD_HEAD`], for the window to widen by
+/// ([`super::window`]): while held ([`Inbox::holds_messages`]) the messages wait in the window as it is.
+fn over(threads: &HashMap<ThreadId, Thread>) -> Over {
+    let mut over = Over::default();
+    for t in threads.values() {
+        let head = usize::from(t.busy) + t.joining.len();
+        for (_, msg) in t.waiting.iter().skip(THREAD_HEAD.saturating_sub(head)) {
+            if is_post(msg) {
+                over.posts += 1;
+            } else {
+                over.inbox += 1;
+            }
+        }
+    }
+    over
 }
 
 /// The messages in hand on every thread, as `ants queue` lists them, by stream sequence.

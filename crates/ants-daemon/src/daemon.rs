@@ -54,6 +54,7 @@ mod review;
 mod settings;
 mod setup;
 mod steering;
+mod window;
 
 pub use admission::Claims;
 use control::Cancels;
@@ -90,7 +91,8 @@ const STREAM_SOURCE: &str = "Nats-Stream-Source";
 const EVICT_EVERY: Duration = Duration::from_secs(30);
 /// How often the worktrees of threads whose session expired are looked for, besides at start.
 const PRUNE_WORKTREES_EVERY: Duration = Duration::from_hours(1);
-/// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness.
+/// Inbox messages in hand per harness: prompting, or waiting for their thread or for a free harness. A thread's
+/// messages past its first two widen that ([`window`]).
 const IN_HAND_PER_HARNESS: usize = 2;
 /// How long a daemon stopping waits for the ant's sense to note its growth ([`growth`]).
 const GROWN_WAIT: Duration = Duration::from_secs(10);
@@ -274,7 +276,7 @@ async fn serve(
     let marks = delivery_marks(attempts_kv, &config.ant, &config.storage.home).await;
     let pool = harness_pool(config, launch, sessions, &workload).await.with_lifecycle(lifecycle.clone());
     let publisher = publisher(config, &js, redactor, &pool).await;
-    let (messages, channels) = inbox_messages(&js, &stream, config).await?;
+    let (messages, channels, window) = inbox_messages(&js, &stream, config).await?;
     let provider = services.provider(providers.sense_of(&config.provider));
     let registration = {
         let open = config.connection.creds.is_none();
@@ -284,6 +286,7 @@ async fn serve(
         client: &client,
         js: &js,
         ant: &config.ant,
+        window: &window,
         settings: config.inbox(),
         reading: *reading,
         machine: &entry.machine,
@@ -591,6 +594,8 @@ struct Inbox<'a> {
     client: &'a async_nats::Client,
     js: &'a jetstream::Context,
     ant: &'a UserId,
+    /// How many messages the inbox and channel consumers hand over before their acks.
+    window: &'a window::Window,
     /// What the inbox takes of the ant's settings.
     settings: InboxSettings<'a>,
     /// How the daemon reads through the ant's own readers ([`Reading::daemon`]).

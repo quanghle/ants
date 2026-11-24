@@ -20,6 +20,7 @@ use tokio::time::timeout;
 
 use super::delivery::reply_id;
 use super::prompt::text::prompt_text;
+use super::window::Window;
 use super::*;
 use crate::admin::restart::Restarted;
 use crate::channel;
@@ -50,6 +51,8 @@ mod store;
 /// ends the wait.
 const WAIT: Duration = Duration::from_secs(20);
 const IDLE: Duration = Duration::from_secs(60);
+/// The window of each consumer the inbox serves ([`Window`]), before it widens.
+const IN_HAND: i64 = 4;
 
 /// dev-a's side of a server: it serves its inbox, and the human sends to it.
 struct Bus {
@@ -256,11 +259,9 @@ impl Bus {
     }
 
     async fn serve_timed(&self, pool: &Pool, ctrl_c: &Arc<Semaphore>, progress_every: Duration, ack_wait: Duration) {
-        let open = async || {
-            let messages = bus::inbox_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await?;
-            let posts = bus::chan_consumer(&self.stream, &self.dev, ack_wait, MAX_DELIVER, 4).await?;
-            anyhow::Ok(futures::stream::select(messages, posts))
-        };
+        let stream = self.js.get_stream_no_info(ants_proto::STREAM).await.unwrap();
+        let window = Window::new(stream, self.dev.clone(), ack_wait, IN_HAND);
+        let open = async || window.open(true).await;
         let messages = Box::pin(pause::pausable(self.pause.subscribe(), None, open));
         let channels = Channels::watch(self.channels.clone()).await.unwrap();
         let escalator = self.escalator();
@@ -270,6 +271,7 @@ impl Bus {
             client: &self.client,
             js: &self.js,
             ant: &self.dev,
+            window: &window,
             settings: InboxSettings {
                 builtin: self.builtin,
                 pause: &self.pause,

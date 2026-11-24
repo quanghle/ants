@@ -708,7 +708,7 @@ Without `--harness`, `ants setup` creating a config file chooses the file's top-
 
 ### Sign-in, provider limits and failures
 
-When a harness cannot run prompts for an environmental reason, the daemon holds messages in hand with 20 s progress acks (up to `max_harnesses × 2`), spending no attempts, incrementing no delivery count and dead-lettering nothing (if a tool call already started before a sign-out or limit error, `<ant>.<seq>` is kept so the retry prepends the cut-off warning):
+When a harness cannot run prompts for an environmental reason, the daemon holds messages in hand with 20 s progress acks (up to `max_harnesses × 2` per consumer, the window not widening for a thread's backlog while they are held, [architecture.md](architecture.md)), spending no attempts, incrementing no delivery count and dead-lettering nothing (if a tool call already started before a sign-out or limit error, `<ant>.<seq>` is kept so the retry prepends the cut-off warning):
 
 - **Signed out** (ACP `auth_required` `-32000`, or auth error text on error/stderr): publishes `signed_out` in `ants_colony` (`since`, `sign_in`) and `ants.status`, notifies the thread owner (else default human) once directly on the thread with the sign-in command and machine, and probes every 60 s (`initialize` + `session/new` in `workdir`) until signed in.
 - **Provider limits** (classified from prompt errors, or from Copilot/Antigravity replies ≤ 4096 chars whose streamed chunks all start with `Error:`, `API Error:`, `Info:` or `⚠`):

@@ -31,6 +31,43 @@ async fn threads_run_concurrently_and_each_stays_in_order() {
     assert_eq!(bus.unacked().await, 0);
 }
 
+/// A thread whose prompt runs with more messages waiting than the window holds leaves room for the other threads: the
+/// window widens by its messages past the first two, so another thread's message starts on a free harness.
+#[tokio::test]
+async fn one_threads_backlog_does_not_keep_another_threads_message_in_the_stream() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (t1, t2) = (ThreadId::generate(), ThreadId::generate());
+    bus.send(&t1, "hold a").await;
+    let backlog: Vec<String> = (1..=2 * IN_HAND).map(|n| format!("b{n}")).collect();
+    for text in &backlog {
+        bus.send_ant(&t1, text).await;
+    }
+    bus.send(&t2, "c").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        assert_eq!(next_reply(&mut replies).await, (t2.clone(), "c".to_owned()), "c does not wait for t1's backlog");
+        assert_eq!(log.locked().answered, ["c"], "t1's prompt still runs");
+        gate.add_permits(1);
+        let mut t1_order = vec![next_reply(&mut replies).await.1];
+        for _ in &backlog {
+            t1_order.push(next_reply(&mut replies).await.1);
+        }
+        let expected: Vec<_> = std::iter::once("hold a".to_owned()).chain(backlog.iter().cloned()).collect();
+        assert_eq!(t1_order, expected, "t1 stays in order");
+        eventually_every(Duration::from_millis(20), WAIT, "the window to narrow back", async || {
+            bus.consumer().await.config.max_ack_pending == IN_HAND
+        })
+        .await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+}
+
 #[tokio::test]
 async fn a_paused_ant_keeps_its_messages_queued_and_takes_no_prompt_until_resumed() {
     let Some((mut bus, _)) = Bus::start().await else { return };

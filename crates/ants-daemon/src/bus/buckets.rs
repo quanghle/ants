@@ -137,8 +137,33 @@ async fn create_kept(js: &jetstream::Context, object: hub::Object) -> Result<()>
         .with_context(|| format!("creating {object} (with credentials, `ants init` as the human creates it)"))
 }
 
-/// Messages from the durable consumer of `ant`'s inbox, which is created if missing and updated if its settings
-/// changed. At most `max_ack_pending` messages are in hand at once.
+/// The durable consumer of `ant`'s inbox, at most `max_ack_pending` of its messages in hand at once.
+pub fn inbox_config(ant: &UserId, ack_wait: Duration, max_deliver: i64, max_ack_pending: i64) -> pull::Config {
+    pull::Config {
+        durable_name: Some(ants_proto::inbox_consumer(ant)),
+        filter_subject: subject::inbox_of(ant),
+        ack_policy: consumer::AckPolicy::Explicit,
+        ack_wait,
+        max_deliver,
+        max_ack_pending,
+        ..Default::default()
+    }
+}
+
+/// The durable consumer `chan-<ant>` of every channel post, with the settings of [`inbox_config`]; the daemon picks
+/// out the posts meant for the ant. A new consumer starts with the posts stored from then on, so a first start does not
+/// answer a channel's history.
+pub fn chan_config(ant: &UserId, ack_wait: Duration, max_deliver: i64, max_ack_pending: i64) -> pull::Config {
+    pull::Config {
+        durable_name: Some(ants_proto::chan_consumer(ant)),
+        filter_subject: subject::ALL_CHANNELS.to_owned(),
+        deliver_policy: consumer::DeliverPolicy::New,
+        ..inbox_config(ant, ack_wait, max_deliver, max_ack_pending)
+    }
+}
+
+/// Messages from the durable consumer of `ant`'s inbox ([`inbox_config`]), which is created if missing and updated if
+/// its settings changed.
 pub async fn inbox_consumer<I>(
     stream: &stream::Stream<I>,
     ant: &UserId,
@@ -146,28 +171,11 @@ pub async fn inbox_consumer<I>(
     max_deliver: i64,
     max_ack_pending: i64,
 ) -> Result<super::Pull> {
-    let name = ants_proto::inbox_consumer(ant);
-    let consumer = stream
-        .create_consumer(pull::Config {
-            durable_name: Some(name.clone()),
-            filter_subject: subject::inbox_of(ant),
-            ack_policy: consumer::AckPolicy::Explicit,
-            ack_wait,
-            max_deliver,
-            max_ack_pending,
-            ..Default::default()
-        })
-        .await;
-    let consumer: PullConsumer = match consumer {
-        Ok(consumer) => consumer,
-        Err(e) => return Err(creating(e, &name, stream).await),
-    };
-    Ok(super::pull(consumer).await?)
+    consumer_pull(stream, inbox_config(ant, ack_wait, max_deliver, max_ack_pending)).await
 }
 
-/// Messages from the durable consumer `chan-<ant>` of every channel post, with the settings of
-/// [`inbox_consumer`]; the daemon picks out the posts meant for the ant. A new consumer starts with the posts
-/// stored from then on, so a first start does not answer a channel's history.
+/// Messages from the durable consumer of every channel post for `ant` ([`chan_config`]), which is created if missing
+/// and updated if its settings changed.
 pub async fn chan_consumer<I>(
     stream: &stream::Stream<I>,
     ant: &UserId,
@@ -175,24 +183,24 @@ pub async fn chan_consumer<I>(
     max_deliver: i64,
     max_ack_pending: i64,
 ) -> Result<super::Pull> {
-    let name = ants_proto::chan_consumer(ant);
-    let consumer = stream
-        .create_consumer(pull::Config {
-            durable_name: Some(name.clone()),
-            filter_subject: subject::ALL_CHANNELS.to_owned(),
-            deliver_policy: consumer::DeliverPolicy::New,
-            ack_policy: consumer::AckPolicy::Explicit,
-            ack_wait,
-            max_deliver,
-            max_ack_pending,
-            ..Default::default()
-        })
-        .await;
-    let consumer: PullConsumer = match consumer {
+    consumer_pull(stream, chan_config(ant, ack_wait, max_deliver, max_ack_pending)).await
+}
+
+/// Messages from the durable consumer `config` names, created if missing and updated if its settings changed.
+async fn consumer_pull<I>(stream: &stream::Stream<I>, config: pull::Config) -> Result<super::Pull> {
+    let name = config.durable_name.clone().unwrap_or_default();
+    let consumer: PullConsumer = match stream.create_consumer(config).await {
         Ok(consumer) => consumer,
         Err(e) => return Err(creating(e, &name, stream).await),
     };
     Ok(super::pull(consumer).await?)
+}
+
+/// Update the durable consumer `config` names, as a change of its `max_ack_pending` does, its pull requests going on.
+pub async fn update_consumer<I>(stream: &stream::Stream<I>, config: pull::Config) -> Result<()> {
+    let name = config.durable_name.clone().unwrap_or_default();
+    stream.update_consumer(config).await.with_context(|| format!("updating consumer {name}"))?;
+    Ok(())
 }
 
 /// The error of creating the consumer `name` on the `ANTS` stream; when the stream is at its consumer limit, naming

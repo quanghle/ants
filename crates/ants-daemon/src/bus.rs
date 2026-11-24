@@ -13,8 +13,9 @@ mod pull;
 pub mod relayed;
 
 pub use buckets::{
-    chan_consumer, ensure_attempts, ensure_chains, ensure_channels, ensure_colony, ensure_links, ensure_owners,
-    ensure_sessions, ensure_stream, forget_retired, inbox_consumer, init_own_buckets, open_stream,
+    chan_config, chan_consumer, ensure_attempts, ensure_chains, ensure_channels, ensure_colony, ensure_links,
+    ensure_owners, ensure_sessions, ensure_stream, forget_retired, inbox_config, inbox_consumer, init_own_buckets,
+    open_stream, update_consumer,
 };
 pub use connect::{
     authenticate, check_url, connect, connect_retrying, connect_retrying_with, connect_watched, connect_with,
