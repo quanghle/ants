@@ -99,15 +99,13 @@ fn a_lead_is_one_of_its_team_s_direct_ants_and_removing_it_clears_it() {
 }
 
 #[test]
-fn renaming_retiring_revoking_and_deleting_keep_the_forest() {
+fn retiring_revoking_and_deleting_keep_the_forest() {
     let mut directory = forest();
     assert_eq!(directory.lead_of(&p("backend")), Ok(&p("dev-a")));
     assert_eq!(directory.lead_of(&p("nobody")), Err(TeamRefusal::NoSuchTeam { team: p("nobody") }));
-    assert!(directory.rename_ant(&p("dev-a"), &p("dev-x")));
-    assert_eq!(directory.team(&p("backend")).unwrap().lead, Some(p("dev-x")));
     assert_eq!(directory.drop_ant(&p("dev-b")), Some(p("backend")));
     assert_eq!(directory.drop_ant(&p("dev-b")), None);
-    assert_eq!(directory.drop_ant(&p("dev-x")), Some(p("backend")), "a revoked lead");
+    assert_eq!(directory.drop_ant(&p("dev-a")), Some(p("backend")), "a revoked lead");
     let backend = directory.team(&p("backend")).unwrap();
     assert!(backend.lead.is_none() && backend.members.is_empty());
     assert_eq!(directory.check(), Ok(()));

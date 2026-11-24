@@ -331,7 +331,8 @@ impl Signer<'_> {
         if request.retire {
             return self.retire(approver, &request, report).await;
         }
-        let judgement = match self.judge(&request) {
+        let free = crate::teams::check_no_team(approver.hub(), approver.js_domain(), &request.name).await;
+        let judgement = match free.and_then(|()| self.judge(&request)) {
             Ok(judgement) => judgement,
             Err(e) => Judgement::Refuse(format!("{e:#}")),
         };
@@ -446,9 +447,9 @@ impl Signer<'_> {
         Ok((jwt, Some(renewed)))
     }
 
-    /// Retire the ant `request` names, if its manager added it and it leads no team: revoke its live keys, push the
-    /// account to the hub when any were, take it off its team, drop it from the leaf node the request came through
-    /// ([`ordered::drop_from_leaf`]), and answer.
+    /// Retire the ant `request` names, if its manager added it: revoke its live keys, push the account to the hub when
+    /// any were, take it off its team, clearing the team's lead when it led it ([`crate::teams::drop_ant`]), drop it
+    /// from the leaf node the request came through ([`ordered::drop_from_leaf`]), and answer.
     async fn retire(
         &mut self,
         approver: &Approver,
@@ -821,6 +822,13 @@ mod tests {
         let (taken, _) = signing(&server, &config, lead.ask("lead-a", "{}", &other)).await;
         let err = format!("{:#}", taken.unwrap_err());
         assert!(err.contains("the signer refused lead-a") && err.contains("holds credentials named lead-a"), "{err}");
+
+        // Nor under the name of a team.
+        let (_, h_js) = server.connect_as(&ants_test_support::human(), Role::Human).await;
+        crate::test_support::put_team(&h_js, "crew").await;
+        let (named, _) = signing(&server, &config, lead.ask("crew", "{}", &KeyPair::new_user())).await;
+        let err = format!("{:#}", named.unwrap_err());
+        assert!(err.contains("the name crew is taken by a team"), "{err}");
 
         // An ant added from a template never adds ants, whatever the signer's templates say.
         auth::sign_added(&team, &p("lead"), None, &KeyPair::new_user().public_key(), "worker", &p("boss")).unwrap();

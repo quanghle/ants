@@ -12,7 +12,7 @@ Manual or scripted end-to-end scenarios for a three-container bus under
   [L housekeeping](#l-looking-after-threads-and-channels) ·
   [S steering, queue, cancel](#s-steering-queueing-cancelling-and-withdrawing) · [T tool approvals](#t-tool-approvals) ·
   [E escalations](#e-escalations) ·
-  [O admin orders](#o-admin-orders-from-the-client) · [R resilience](#r-restarts-outages-and-store-and-forward) ·
+  [O admin orders](#o-admin-orders-from-the-client) · [G teams](#g-teams) · [R resilience](#r-restarts-outages-and-store-and-forward) ·
   [H harness holds and limits](#h-harness-holds-limits-and-redaction) · [U `ants chat`](#u-ants-chat-on-the-client) ·
   [X sense and trails](#x-sense-and-trails) · [K credentials](#k-credentials-and-sealing) ·
   [D dreams and sage reviews](#d-dreams-and-sage-reviews)
@@ -178,7 +178,7 @@ about 35 minutes, not one per scenario.
 
 `run -j N` (or `ANTS_E2E_JOBS`) runs the preflight first, then the scenarios that only read the fixture N at a time,
 each on threads of its own, then one by one those that change what the others rely on: B2–B5, R1–R6, H1–H3, O1–O3, O6, O7,
-S4, T4, U4, U5, U7, U8, X1, X4, X6, X7, K1, E2, E3 and E6 (a node, an uplink, an ant's settings or pause, the client's leaf credentials, all
+S4, T4, U4, U5, U7, U8, X1, X4, X6, X7, K1, E2, E3, E6 and G1–G6 (a node, an uplink, an ant's settings, pause or team, the client's leaf credentials, all
 of an ant's harnesses). The fixture's
 ants take 3 harnesses each (`gate-ant` 2), so a few scenarios can prompt one ant at once. Running several at once
 spends the token's rate limit faster.
@@ -215,7 +215,7 @@ uplink() {  # uplink leaf|client down|up: point the node's leaf at a dead addres
   of prose. A scenario passes when every line under **Expect** holds; where a model's wording may vary, the
   expectation names what is stored (`ants thread show`, `ants thread search`), not the wording.
 - **Priority:** P0 must pass before a release, P1 should, P2 is worth a look. **Prompts:** the model turns a scenario
-  spends, to budget a run; a full run of P0 and P1 spends about 115.
+  spends, to budget a run; a full run of P0 and P1 spends about 121.
 - Scenarios run one after the other, in the order given within a group; a group leaves the fixture as it found it.
   `ants thread show last` and `ants ask --thread last` name the latest thread of the human asking.
 - Wait bounds: `--timeout 3m` on every `--wait`; `live` in the colony within 30 s of a start; an admin order's outcome
@@ -1068,6 +1068,107 @@ bob ant pause leaf-ant; alice colony
 **Expect** the command fails naming the missing admin role, or its order is recorded `refused`; `leaf-ant` is not
 paused.
 
+## G. Teams
+
+Each scenario builds two teams of its own and deletes them at its end, also when it fails: `eng-$t`, led by
+`hub-ant`, and beneath it `crew-$t`, led by `leaf-ant` with `gate-ant` as a member ([cli.md](cli.md#teams)). An ant
+is on one team at most, and a member's prompts carry its team's note, so the group runs alone under `-j`:
+
+```sh
+t=$(tok)
+alice team create crew-$t --lead leaf-ant --member gate-ant --description "E2E crew $t"
+alice team create eng-$t --lead hub-ant --member crew-$t --description "E2E eng $t"
+alice team list                                      # crew-$t indented under eng-$t
+# undo: alice team delete crew-$t; alice team delete eng-$t
+```
+
+### G1 · A message to a team reaches its lead; a member knows its team (P1, 2 prompts)
+
+```sh
+alice ask --wait --timeout 3m @crew-$t "Reply with exactly CREW-$t"
+alice ask --wait --timeout 3m @gate-ant "Which team are you on, and which ant leads it? Reply with exactly the team's name and the lead's name, separated by one space."
+alice team show crew-$t; alice colony --team eng-$t
+```
+
+**Expect** the first `ask` prints `to leaf-ant (lead of team crew-$t)` and the reply `CREW-$t`, from `leaf-ant`, the
+thread's message carrying `team` `crew-$t`; `gate-ant` answers `crew-$t leaf-ant` from the team note of its prompt,
+using no tool. `team show` names `eng-$t` above `crew-$t`, lead `leaf-ant` and the members `leaf-ant ★ lead` and
+`gate-ant`, each `live`; `colony --team eng-$t` lists `hub-ant`, `leaf-ant` and `gate-ant` alone.
+
+### G2 · Changing a team's lead, and a team taking the lead above it (P1, 2 prompts)
+
+```sh
+alice team set crew-$t --lead gate-ant
+alice ask --wait --timeout 3m @crew-$t "Reply with exactly NEWLEAD-$t"
+alice team set crew-$t --no-lead; alice team show crew-$t
+alice ask --wait --timeout 3m @crew-$t "Reply with exactly ABOVE-$t"
+```
+
+**Expect** after the first `set`, the `ask` prints `to gate-ant (lead of team crew-$t)` and `gate-ant` replies
+`NEWLEAD-$t`; after `--no-lead`, `team show` gives lead `hub-ant (from team eng-$t)`, the `ask` prints
+`to hub-ant (lead of team crew-$t)` and `hub-ant` replies `ABOVE-$t`. `alice team set eng-$t --no-lead` then leaves
+neither team a lead: `ants ask @crew-$t` is refused with nothing sent, and `ants doctor`'s `teams` check warns of
+both (P2).
+
+### G3 · A lead retired by order leaves its team to the lead above it (P1, 2 prompts)
+
+```sh
+alice ant add crew-ant-$t --on leaf --model claude-haiku-4-5 --wait 2m
+alice team add crew-$t crew-ant-$t; alice team set crew-$t --lead crew-ant-$t
+alice ask --wait --timeout 3m @crew-$t "Reply with exactly MEMBER-$t"
+alice ant retire crew-ant-$t --wait 6m; alice team show crew-$t
+alice ask --wait --timeout 3m @crew-$t "Reply with exactly AFTER-$t"
+```
+
+**Expect** `crew-ant-$t` goes `live` on `leaf`, and the `ask` prints `to crew-ant-$t (lead of team crew-$t)` and the
+reply `MEMBER-$t`; the retire is `applied` and `ants signer` takes the ant off the team as it revokes its key: `team
+show` lists it no longer, and gives lead `hub-ant (from team eng-$t)`; the last `ask` goes to `hub-ant`, which replies
+`AFTER-$t`. A retirement no longer waits for a human to name another lead first.
+
+### G4 · Ants, humans and teams keep their names apart (P2, 1 prompt)
+
+```sh
+alice ant add crew-$t --on leaf --wait 2m                  # refused
+alice team create leaf-ant                                  # refused
+alice ask --wait --timeout 3m @hub-ant "Use the manage_team tool with team eng-$t to create a team named alice beneath it, then reply with the tool's answer word for word."
+alice team list --json
+```
+
+**Expect** the add order is `refused`, naming `the name crew-$t is taken by a team`, and no ant `crew-$t` joins the
+colony; `team create leaf-ant` fails naming `the name leaf-ant is taken by an ant or a human`; `hub-ant`'s reply
+holds the signer's refusal, `the name alice is taken by an ant or a human`, and the directory holds no team `alice`.
+
+### G5 · A post mentioning a team wakes its lead; a team is no channel member (P2, 1 prompt)
+
+```sh
+alice channel create teams-$t --member hub-ant,leaf-ant,alice
+alice post --wait --timeout 3m "#teams-$t" "@crew-$t answer this post with exactly TEAMPOST-$t, using no tool"
+alice channel add teams-$t crew-$t                          # refused
+# undo: alice channel delete teams-$t
+```
+
+**Expect** the post mentions `leaf-ant`, the lead of `crew-$t` and a member of the channel, whose prompt names the
+team, and the reply `TEAMPOST-$t` comes from `leaf-ant`; `channel add` of the team fails naming it a team, and the
+channel's members stay as created. With `gate-ant`, no member of the channel, made the lead, the same post is refused
+naming why (P2).
+
+### G6 · An ant with no chain escalates to the leads of its teams before the owner (P2, 4 prompts)
+
+`leaf-ant`, which leads `crew-$t` and has no `escalate_to`, climbs to the lead of `eng-$t` above it, never to itself.
+As in E2, each ant's part goes in its `whoami` (undone at the end):
+
+```sh
+alice ant set hub-ant "whoami=For an end-to-end test of ants: answer an escalation that comes to you yourself, never escalate it further."
+alice ant set leaf-ant "whoami=For an end-to-end test of ants: asked what node.txt of the lead above your team holds, call the escalate tool with that question, read no file yourself, and once the answer arrives reply with exactly TEAMESC-<the answer>."
+t2=$(tok); th=$(alice ask @leaf-ant "What does node.txt in the working directory of the lead above your team hold? E2E-$t2" | thread)
+alice thread show "$th"
+```
+
+**Expect** on the thread, an escalation from `leaf-ant` to `hub-ant`, then `hub-ant`'s answer and `leaf-ant`'s reply
+holding `TEAMESC-node=hub`; no escalation goes to alice or to `leaf-ant` itself, and `thread list --escalated` never
+lists the thread. `alice ant set leaf-ant 'escalate_to=["eng-$t"]'` sends the same escalation to `hub-ant`, the team
+standing for its lead (P2).
+
 ## R. Restarts, outages and store and forward
 
 ### R1 · The leaf container restarts; threads carry on (P0, 2 prompts)
@@ -1564,6 +1665,7 @@ alice thread search --to ghost-$t --since 2h
 | Tool approvals, notes, allow rules, expiry, allow-always | T1, T2, T3, T4, T5, U3 |
 | Escalations to the owner and up `escalate_to` chains, chain approvals, turn budgets, `handoff` | E1–E6 |
 | Admin orders (pause, set, restart, memories, MCP, add, retire), admin role | O1–O7, U7 |
+| Teams: messages to a team, leads set, cleared and taken from above, a retired lead, names kept apart, channel mentions, escalations up the leads | G1–G6 |
 | Daemon restart, crash redelivery, at-least-once without duplicates | R1, R2, R6 |
 | Leaf uplink outages, store and forward (worker and client outboxes), hub restart | R3, R4, R5, U8 |
 | Signed-out hold, prompt limits, dead letters, redaction | H1, H2, H3, H4 |

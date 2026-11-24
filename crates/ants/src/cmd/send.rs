@@ -142,11 +142,15 @@ async fn addressee(js: &jetstream::Context, nats: &Nats<'_>, to: Option<UserId>)
 }
 
 /// Where a message to `to` goes: to the lead of the team `to` names, carrying the team
-/// ([`ants_client::sending::addressed`]), refused for a team with no lead, nor any above it; to `to` itself on a bus
-/// without teams, or, with a warning, when the team directory cannot be read.
-async fn to_team(js: &jetstream::Context, js_domain: Option<&ants_proto::JsDomain>, to: UserId) -> Result<Addressed> {
-    match crate::teams::read_of(js, js_domain).await {
-        Ok(Some(directory)) => Ok(ants_client::sending::addressed(&directory, to)?),
+/// ([`ants_client::sending::addressed`]), refused for a team with no lead, nor any above it; to `to` itself when a
+/// human, on a bus without teams, or, with a warning, when the team directory cannot be read.
+async fn to_team(js: &jetstream::Context, nats: &Nats<'_>, to: UserId) -> Result<Addressed> {
+    match crate::teams::read_of(js, nats.domain).await {
+        Ok(Some(directory)) if directory.is_team(&to) => {
+            let humans = humans::load(js, &nats.me).await;
+            Ok(ants_client::sending::addressed(&directory, |u| humans.contains(u), to)?)
+        }
+        Ok(Some(_)) => Ok(Addressed { to, team: None }),
         Ok(None) => Ok(Addressed { to, team: None }),
         Err(e) => {
             tracing::warn!("not checking whether {to} names a team: {e:#}");
@@ -281,7 +285,7 @@ pub(crate) async fn ask(nats: &Nats<'_>, args: AskArgs) -> Result<()> {
     let (to, unaddressed) = addressee(&js, nats, to.or_else(|| author.cloned())).await;
     let addressed = match unaddressed {
         Some(_) => Addressed { to, team: None },
-        None => to_team(&js, nats.domain, to).await?,
+        None => to_team(&js, nats, to).await?,
     };
     ants_client::sending::one_recipient(&nats.me.id, &addressed.to, &text)?;
     let mut envelope = match &forwarded {

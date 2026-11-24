@@ -1,7 +1,7 @@
 //! `ants ant retire ANT`: the retire order ([`AdminOp::Retire`]) to the daemon of the ant's machine, which runs the
 //! `ants retire` flow there for any ant: its `[[ant]]` table goes, its key is revoked by `ants signer` on the order and
-//! its credentials are deleted; its home stays. An ant leading a team is refused before the order is sent, and a
-//! retired ant leaves its team: `ants signer` takes it off as it revokes the key, and the CLI makes sure.
+//! its credentials are deleted; its home stays. A retired ant leaves its team, a lead leaving it without a lead of its
+//! own ([`crate::teams::drop_ant`]): `ants signer` takes it off as it revokes the key, and the CLI makes sure.
 
 use std::time::Duration;
 

@@ -181,7 +181,8 @@ fn check_leaf(
         .with_context(|| format!("the uplink credentials of {machine}"))
 }
 
-/// Sign the key `request` asks for, of the ant the order adds on `machine` or the clone it makes there: never a key revoked or issued to other
+/// Sign the key `request` asks for, of the ant the order adds on `machine` or the clone it makes there, under no name a
+/// team holds ([`crate::teams::check_no_team`]): never a key revoked or issued to other
 /// credentials than the ant's on an order, nor another key on the same order, nor while the team holds live
 /// credentials of the name for another key. Behind a leaf node, also renew its uplink credentials the request carries
 /// to carry the ant, first, so that an uplink the hub would refuse leaves no ant signed; keep the ant among the leaf's
@@ -197,6 +198,7 @@ async fn add(
     let dir = approver.dir.as_path();
     let (ant, key) = (&request.ant, request.public_key.as_str());
     auth::check_not_reserved(ant)?;
+    crate::teams::check_no_team(approver.hub(), approver.js_domain(), ant).await?;
     if revoked.contains(key) {
         bail!("the key {key} is revoked");
     }

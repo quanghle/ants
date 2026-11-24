@@ -25,7 +25,7 @@ use crate::signing::signer::AbortOnDrop;
 
 impl Registrar<'_> {
     /// Answer the registration request `msg`, if it is one: a repeat with what its key has, a new one by beginning
-    /// a GitHub sign-in or refusing.
+    /// a GitHub sign-in or refusing, as for a name a team holds ([`crate::teams::check_no_team`]).
     pub async fn heard(&mut self, approver: &Approver, msg: &async_nats::Message) -> Result<()> {
         let request = match serde_json::from_slice::<LoginRequest>(&msg.payload) {
             Ok(request) => request,
@@ -50,7 +50,8 @@ impl Registrar<'_> {
             flow.request = request;
             return self.answer(approver, &key).await;
         }
-        let answer = match self.start(&request) {
+        let free = crate::teams::check_no_team(approver.hub(), approver.js_domain(), &request.name).await;
+        let answer = match free.and_then(|()| self.start(&request)) {
             Ok(task) => {
                 (self.report)(&request, &Event::Started);
                 self.flows.insert(key, Flow { request, answer: None, task: Some(task), asking: None });

@@ -189,6 +189,18 @@ pub(crate) fn issue_with(dir: &Path, user: &UserId, kind: Kind, permissions: Per
     Issue::new(dir, user, kind, permissions).into_file(out).map(drop)
 }
 
+/// Add a team `team`, of no member, to the team directory with `js`, a human's, creating `ants_teams` when missing.
+pub(crate) async fn put_team(js: &jetstream::Context, team: &str) {
+    if js.get_stream(ants_proto::subject::kv_stream(ants_proto::TEAMS_BUCKET)).await.is_err() {
+        js.create_stream(ants_daemon::hub::teams_config()).await.unwrap();
+    }
+    let kv = ants_daemon::teams::open(js, None).await.unwrap();
+    let (mut directory, last) = ants_daemon::teams::read_checked(&kv).await.unwrap();
+    let team = ants_proto::Team::unled(team.parse().unwrap(), ants_test_support::human());
+    directory.create(team, None).unwrap();
+    assert!(ants_daemon::teams::write(&kv, &directory, last).await.unwrap());
+}
+
 /// Answer the pending tool request `id` picks (see [`tools::find`]) as the human, and wait until JetStream has stored
 /// the decision ([`tools::answer_request`]).
 pub(crate) async fn answer(

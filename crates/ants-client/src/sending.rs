@@ -74,9 +74,14 @@ impl Addressed {
 
 /// Where a message to `to` goes, given the team directory `teams`: to the lead of the team `to` names, carrying the
 /// team, else to `to` itself: its own lead, else the lead of the nearest team above it that has one; a team with no
-/// lead in it nor above it is refused ([`TeamDirectory::lead_of`]).
-pub fn addressed(teams: &TeamDirectory, to: UserId) -> Result<Addressed, TeamRefusal> {
-    if !teams.is_team(&to) {
+/// lead in it nor above it is refused ([`TeamDirectory::lead_of`]). A human's name (`is_human`) is the human's whatever
+/// the directory holds, so that a team written under it takes no message meant for the human.
+pub fn addressed(
+    teams: &TeamDirectory,
+    is_human: impl Fn(&UserId) -> bool,
+    to: UserId,
+) -> Result<Addressed, TeamRefusal> {
+    if is_human(&to) || !teams.is_team(&to) {
         return Ok(Addressed { to, team: None });
     }
     let lead = teams.lead_of(&to)?.clone();
@@ -210,16 +215,31 @@ mod tests {
     fn a_message_to_a_team_goes_to_its_lead_carrying_the_team_and_one_without_any_lead_is_refused() {
         let mut teams = TeamDirectory::default();
         teams.create(ants_proto::Team::new(p("backend"), p("dev-a"), p("alice")), None).unwrap();
-        let to = addressed(&teams, p("backend")).unwrap();
+        let nobody = |_: &UserId| false;
+        let to = addressed(&teams, nobody, p("backend")).unwrap();
         assert_eq!(to, Addressed { to: p("dev-a"), team: Some(p("backend")) });
         let mut envelope = ask_envelope(&p("alice"), true, None, p("backend"), "fix it".into());
         to.apply(&mut envelope);
         assert_eq!((envelope.subject(), envelope.team), ("ants.inbox.dev-a.alice".to_owned(), Some(p("backend"))));
-        assert_eq!(addressed(&teams, p("dev-b")).unwrap(), Addressed { to: p("dev-b"), team: None });
+        assert_eq!(addressed(&teams, nobody, p("dev-b")).unwrap(), Addressed { to: p("dev-b"), team: None });
 
         teams.create(ants_proto::Team::unled(p("db"), p("alice")), Some(&p("backend"))).unwrap();
-        assert_eq!(addressed(&teams, p("db")).unwrap(), Addressed { to: p("dev-a"), team: Some(p("db")) }, "inherited");
+        assert_eq!(
+            addressed(&teams, nobody, p("db")).unwrap(),
+            Addressed { to: p("dev-a"), team: Some(p("db")) },
+            "inherited"
+        );
         assert_eq!(teams.drop_ant(&p("dev-a")), Some(p("backend")));
-        assert_eq!(addressed(&teams, p("db")).unwrap_err(), TeamRefusal::NoLead { team: p("db") });
+        assert_eq!(addressed(&teams, nobody, p("db")).unwrap_err(), TeamRefusal::NoLead { team: p("db") });
+    }
+
+    #[test]
+    fn a_human_s_name_goes_to_the_human_even_when_the_directory_holds_a_team_of_it() {
+        let mut teams = TeamDirectory::default();
+        teams.create(ants_proto::Team::new(p("alice"), p("dev-a"), p("dev-a")), None).unwrap();
+        let alice = |user: &UserId| *user == p("alice");
+        assert_eq!(addressed(&teams, alice, p("alice")).unwrap(), Addressed { to: p("alice"), team: None });
+        let nobody = |_: &UserId| false;
+        assert_eq!(addressed(&teams, nobody, p("alice")).unwrap().to, p("dev-a"), "a team otherwise");
     }
 }

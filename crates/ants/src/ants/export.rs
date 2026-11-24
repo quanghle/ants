@@ -542,6 +542,7 @@ async fn import_with(nats: &crate::connection::Nats<'_>, args: ImportArgs, store
         bail!("the home {} of {name} is not empty: --home names an empty one", home.display());
     }
     let (_, js) = nats.connect("ants-import").await?;
+    add::check_name_free_on(&js, nats.domain, &name).await?;
     let kv = DirectKv::whole(&js, nats.domain, IDENTITIES_BUCKET).await?;
     let identity = AntIdentity { ant: name.clone(), moved: None, ..export.identity.clone() };
     create(&js, &kv, &identity).await?;

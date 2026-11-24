@@ -107,7 +107,8 @@ async fn import_as(nats: &crate::connection::Nats<'_>, args: &[&str]) -> Result<
 }
 
 /// An ant exported with `--move` is marked moved on its bus, and imports on another with its id, birth, avatar,
-/// prompts, settings and memories, under its name or another, refused while a record holds its name or its id, into
+/// prompts, settings and memories, under its name or another, refused while a record holds its name or its id or a
+/// team its name, into
 /// an empty home only, its harness memory left out when it runs another harness there. Unseal clears the mark.
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "one scenario: an export, then the import on another bus")]
@@ -203,6 +204,9 @@ async fn an_ant_moves_to_another_bus_with_its_identity_and_memories() {
     assert!(err.contains("holds an ant named dev-a"), "{err}");
     let err = import(&["--as", "dev-b"]).await.unwrap_err().to_string();
     assert!(err.contains("holds this ant already, as dev-a"), "{err}");
+    crate::test_support::put_team(&js, "crew").await;
+    let err = import(&["--as", "crew"]).await.unwrap_err().to_string();
+    assert!(err.contains("the name crew is taken by a team"), "{err}");
     write(&home_b.join("old.md"), "x");
     kv.delete("dev-a").await.unwrap();
     let err = import(&["--as", "dev-b"]).await.unwrap_err().to_string();

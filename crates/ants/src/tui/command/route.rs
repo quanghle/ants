@@ -67,9 +67,11 @@ impl Route {
 }
 
 /// `to` as the bar's title names it: a team with its lead, its own or one above it, where the message goes, or that
-/// it has none.
+/// it has none; a human's name is the human's.
 fn named(to: &UserId, data: &Data) -> String {
-    let Some(teams) = data.teams.as_ref().filter(|teams| teams.is_team(to)) else { return to.to_string() };
+    let Some(teams) = data.teams.as_ref().filter(|teams| teams.is_team(to) && !data.is_human(to)) else {
+        return to.to_string();
+    };
     match teams.lead_source(to) {
         Some(source) if source.team == *to => format!("team {to} (lead {})", source.lead.as_ref().expect("a lead")),
         Some(source) => {
@@ -155,11 +157,13 @@ impl Model {
         })
     }
 
-    /// Where a message to `to` goes: to its lead when `to` names a team of the directory read, carrying the team;
-    /// a team with no lead, nor any above it, refused ([`ants_client::sending::addressed`]).
+    /// Where a message to `to` goes: to its lead when `to` names a team of the directory read and no human, carrying
+    /// the team; a team with no lead, nor any above it, refused ([`ants_client::sending::addressed`]).
     fn addressed(&self, to: UserId) -> Result<Addressed, String> {
         match &self.data.teams {
-            Some(teams) => ants_client::sending::addressed(teams, to).map_err(|e| e.to_string()),
+            Some(teams) => {
+                ants_client::sending::addressed(teams, |u| self.data.is_human(u), to).map_err(|e| e.to_string())
+            }
             None => Ok(Addressed { to, team: None }),
         }
     }

@@ -311,8 +311,11 @@ fn leaf_role<'a>(assistants: &'a BTreeMap<UserId, UserId>, member: &UserId, role
 /// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take,
 /// [`REVOKED_DEVICES`], under which the devices bucket keeps its revocation records, [`UserId::signer`], and
 /// [`ants_proto::BOOTSTRAP_USER`], the name of the public bootstrap credentials, which `ants auth revoke bootstrap`
-/// revokes.
+/// revokes: those [`UserId::is_reserved`] holds.
 pub fn check_not_reserved(user: &UserId) -> Result<()> {
+    if !user.is_reserved() {
+        return Ok(());
+    }
     if let Some(builtin) = BuiltinAnt::from_id(user.as_str()) {
         bail!("{user} is reserved for a built-in ant (`ants auth builtin {}`); choose another name", builtin.name());
     }
@@ -328,7 +331,7 @@ pub fn check_not_reserved(user: &UserId) -> Result<()> {
     if user.as_str() == ants_proto::BOOTSTRAP_USER {
         bail!("{user} is reserved for the public bootstrap credentials (`ants auth bootstrap`); choose another name");
     }
-    Ok(())
+    bail!("{user} is a reserved name; choose another name")
 }
 
 /// The `server.conf` of the team, with `operator_jwt` if given, else a new one.
