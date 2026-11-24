@@ -10,8 +10,8 @@ use ants_proto::provider::{BoxFuture, CallContext, Format, Origin, Provider as _
 use ants_sense::items::{ItemId, ItemValues};
 use ants_sense::log::EventLog;
 use ants_sense::persona::{PERSONA, PROFILE, persona_id};
-use ants_sense::store::{Stores, Write};
-use ants_sense::testing::SharedLog;
+use ants_sense::store::Write;
+use ants_sense::testing::{One, SharedLog};
 use serde_json::{Value, json};
 
 use super::*;
@@ -22,25 +22,13 @@ mod probes;
 
 const DAY: Duration = Duration::from_hours(24);
 
-struct One {
-    items: Arc<dyn Items>,
-    reads: AtomicUsize,
-}
-
-impl Stores for One {
-    fn items<'a>(&'a self, _: &'a UserId) -> BoxFuture<'a, Result<Arc<dyn Items>, StoreError>> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Ok(self.items.clone()) })
-    }
-}
-
 async fn open(log: SharedLog, sense: SenseId) -> Arc<dyn Items> {
     Arc::new(ants_sense::testing::store(log, sense, ant()).await)
 }
 
 async fn setup() -> (Arc<Sense>, Arc<One>) {
     let items = open(SharedLog::default(), SenseId::new()).await;
-    let stores = Arc::new(One { items, reads: AtomicUsize::new(0) });
+    let stores = Arc::new(One::new(items));
     (Arc::new(Sense::with_stores(stores.clone())), stores)
 }
 
@@ -138,10 +126,10 @@ async fn an_empty_schedule_sleeps_until_maintenance_or_a_tool_changes_it() {
     let host = Arc::new(Wakes::default());
     let scheduler = start(sense.clone(), host.clone(), settings());
     settle().await;
-    let reads = stores.reads.load(Ordering::SeqCst);
+    let reads = stores.reads();
     tokio::time::advance(DAY - Duration::from_secs(1)).await;
     settle().await;
-    assert_eq!(stores.reads.load(Ordering::SeqCst), reads, "no trigger deadline means no polling before maintenance");
+    assert_eq!(stores.reads(), reads, "no trigger deadline means no polling before maintenance");
     let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
     settle().await;
     let requests = host.requests.locked().clone();
@@ -150,11 +138,11 @@ async fn an_empty_schedule_sleeps_until_maintenance_or_a_tool_changes_it() {
     assert_eq!(requests[0].thread.as_ref().unwrap().as_str(), "scheduler-thread");
     assert!(requests[0].text.contains("scheduled work") && requests[0].text.contains("reminder time reached"));
     scheduler.stop().await;
-    let reads = stores.reads.load(Ordering::SeqCst);
+    let reads = stores.reads();
     create(&sense, json!({"kind":"at","at":Utc::now()})).await;
     settle().await;
     // The call's own: as it starts, caught up with the log, and as it writes.
-    assert_eq!(stores.reads.load(Ordering::SeqCst), reads + 2, "stopped scheduler no longer reads");
+    assert_eq!(stores.reads(), reads + 2, "stopped scheduler no longer reads");
     assert_eq!(host.requests.locked().len(), 1);
 }
 
@@ -244,7 +232,7 @@ async fn takeover_delivers_persisted_pending_work_before_new_due_work() {
     let log = SharedLog::default();
     let identity = SenseId::new();
     let first = open(log.clone(), identity.clone()).await;
-    let sense = Sense::with_stores(Arc::new(One { items: first.clone(), reads: AtomicUsize::new(0) }));
+    let sense = Sense::with_stores(Arc::new(One::new(first.clone())));
     let id = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
     let pending = remind::prepare_firing(&*first, &id, Utc::now(), "original cause").await.unwrap().unwrap();
     let newer = create(&sense, json!({"kind":"at","at":Utc::now()})).await;
@@ -346,10 +334,10 @@ async fn maintenance_rechecks_citations_on_start_then_daily_without_trigger_poll
     assert_eq!((run.citations_checked, run.citations_marked), (1, 1));
     let second = ItemId::new();
     stores.items.write(&[memory.create(second.clone())], "test").await.unwrap();
-    let reads = stores.reads.load(Ordering::SeqCst);
+    let reads = stores.reads();
     tokio::time::advance(DAY - Duration::from_secs(1)).await;
     settle().await;
-    assert_eq!(stores.reads.load(Ordering::SeqCst), reads, "no minute polling");
+    assert_eq!(stores.reads(), reads, "no minute polling");
     assert_eq!(status(&second).await, Status::Active);
     scheduler.stop().await;
     let day_later = run.ran + chrono::Duration::hours(24);

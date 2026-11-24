@@ -121,7 +121,7 @@ async fn persisted_reservations_prevent_overlapping_checks_on_takeover() {
     let log = SharedLog::default();
     let identity = SenseId::new();
     let items = open(log.clone(), identity.clone()).await;
-    let sense = Arc::new(Sense::with_stores(Arc::new(One { items: items.clone(), reads: AtomicUsize::new(0) })));
+    let sense = Arc::new(Sense::with_stores(Arc::new(One::new(items.clone()))));
     let id = create(&sense, json!({"kind":"condition","condition":{"kind":"command","command":"./probe"}})).await;
     let host = Arc::new(Wakes::default());
     let config = Arc::new(Settings { workdir: root.clone(), allow: vec!["execute:*".into()], ..settings() });

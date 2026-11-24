@@ -95,7 +95,7 @@ impl Stores for Stuck {
 #[tokio::test(start_paused = true)]
 async fn the_first_entry_shows_the_profile_read_in_time() {
     let (items, dev, workload) = (items().await, ant(), Workload::default());
-    let sense = Sense::with_stores(Arc::new(One(items.clone())));
+    let sense = Sense::with_stores(Arc::new(One::new(items.clone())));
     first_profile(&sense, &dev, &workload).await;
     assert_eq!(workload.profile(), None, "no persona confirmed");
     confirm(&*items, "Good for Rust daemons.").await;

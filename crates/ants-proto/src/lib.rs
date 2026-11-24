@@ -194,11 +194,11 @@ pub use trails::{SAVE_TRAIL_REPEAT, SAVE_TRAIL_WAIT, SaveTrailOutcome, SaveTrail
 pub const STREAM: &str = "ANTS";
 /// Subjects captured by [`STREAM`]. Status updates are core NATS only and stay out of it.
 pub const STREAM_SUBJECTS: [&str; 7] = [
-    "ants.inbox.>",
-    "ants.notes.>",
-    "ants.approvals.>",
-    "ants.dead.>",
-    "ants.chan.>",
+    subject::ALL_INBOXES,
+    subject::ALL_NOTES,
+    subject::ALL_APPROVALS,
+    subject::DEAD_ALL,
+    subject::ALL_CHANNELS,
     subject::ALL_TIMELINE,
     subject::ALL_ADMIN_ORDERS,
 ];
