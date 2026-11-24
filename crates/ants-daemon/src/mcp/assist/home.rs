@@ -45,7 +45,7 @@ pub(super) struct AnswerForHuman {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub(super) struct SendForHuman {
-    /// The ant or human to send to.
+    /// The ant or human to send to, or a team, reaching its lead.
     to: String,
     text: String,
     /// The thread to send on, such as one human_queue lists; omitted for a new thread.
@@ -255,7 +255,7 @@ impl Hub {
 
     async fn send_for_human(&self, args: SendForHuman) -> Result<String, String> {
         let (human, store) = self.acting_for()?;
-        let to: UserId = args.to.trim().trim_start_matches('@').parse().map_err(|e| format!("{e}"))?;
+        let (to, team) = self.addressed(&args.to).await?;
         if to == human || to == self.ant {
             return Err(format!("{to} is {human} or this ant; send to someone else"));
         }
@@ -268,6 +268,7 @@ impl Hub {
         }
         .on_behalf(Some(human.clone()))
         .with_owner(Some(human.clone()));
+        envelope.team = team;
         let excerpt = behalf::excerpt(&envelope.text);
         if !self.humans.is_human(&to) {
             // Before the message, so the ant's own messages on the thread name the human as their owner.
@@ -276,8 +277,9 @@ impl Hub {
                 tracing::warn!(%thread, %to, error = format!("{e:#}"), "recording the thread's owner for the human");
             }
             self.send(&envelope).await?;
+            let through = envelope.team.as_ref().map_or_default(|team| format!(", the lead of team {team},"));
             return Ok(format!(
-                "Sent {to} message {} on thread {} for {human}; its daemon tells {human}.",
+                "Sent {to}{through} message {} on thread {} for {human}; its daemon tells {human}.",
                 envelope.id, envelope.thread_id
             ));
         }
@@ -426,7 +428,8 @@ impl Tools {
     }
 
     #[tool(description = "As the assistant of a human, send a message for it to an ant or another human, on \
-        `thread` or a new one, as this ant's, for the human; the human is told. A message to a human is sealed for \
+        `thread` or a new one, as this ant's, for the human; the human is told. A team in `to` reaches its lead, \
+        as with send_message. A message to a human is sealed for \
         the recipient's and the human's devices, which needs the human to have enrolled this ant as one of its \
         devices; `plaintext` sends it unsealed. Attachments are not sent for a human.")]
     async fn send_for_human(&self, Parameters(args): Parameters<SendForHuman>) -> Result<CallToolResult, ErrorData> {
