@@ -166,14 +166,11 @@ mod tests {
     use std::time::Duration;
 
     use ants_proto::Role;
+    use ants_test_support::user as p;
 
     use super::*;
     use crate::test_support::Server;
     use crate::test_support::presence::device;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     /// Runs as two devices of alice and one of bob, with their own credentials, so it also checks their permissions.
     #[tokio::test]

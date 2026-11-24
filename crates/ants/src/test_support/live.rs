@@ -3,19 +3,14 @@
 use std::time::Duration;
 
 use ants_client::entry::Entry;
-use ants_proto::{
-    ApprovalRequest, Envelope, Escalation, EscalationReason, ThreadId, ToolCall, UserId, Verdict, subject,
-};
+use ants_proto::{ApprovalRequest, Envelope, Escalation, EscalationReason, ThreadId, ToolCall, Verdict, subject};
+pub(crate) use ants_test_support::user;
 use chrono::{DateTime, Utc};
 
 use crate::threads::thread::Parser;
 
 pub(crate) fn at(secs: i64) -> DateTime<Utc> {
     DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap()
-}
-
-pub(crate) fn user(name: &str) -> UserId {
-    name.parse().unwrap()
 }
 
 /// The entry of a message from `from` to `to` on `thread`, stored at sequence `seq`.

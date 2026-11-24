@@ -4,7 +4,8 @@
 use std::future::pending;
 
 use ants_daemon::secrets::keystore;
-use ants_proto::{Role, UserId};
+use ants_proto::Role;
+use ants_test_support::user as p;
 use tokio::time::timeout;
 
 use super::*;
@@ -18,10 +19,6 @@ use crate::test_support::Server;
 const WAIT: Duration = Duration::from_secs(5);
 const REPEAT: Duration = Duration::from_millis(100);
 const LISTEN: Duration = Duration::from_millis(400);
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 #[tokio::test]
 async fn an_approved_renewal_gives_working_credentials_of_the_same_kind() {

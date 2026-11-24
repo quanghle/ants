@@ -11,6 +11,7 @@ use ants_daemon::records::direct_kv::DirectKv;
 use ants_daemon::records::owners;
 use ants_daemon::schedule::Mentions;
 use ants_proto::{ChannelId, ChannelPost, Destination, Envelope, STREAM, WEBHOOKS_BUCKET, subject, webhook_marker_key};
+use ants_test_support::user as p;
 use async_nats::jetstream;
 use data_encoding::HEXLOWER;
 use hyper::http::HeaderMap;
@@ -26,10 +27,6 @@ use super::config::IdSource;
 use super::requests::recent;
 use super::*;
 use crate::test_support::webhook::{creds, hub, stored};
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 fn parse(text: &str) -> Result<Config> {
     let env = |name: &str| match name {

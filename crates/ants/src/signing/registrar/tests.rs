@@ -10,6 +10,7 @@ use ants_daemon::bus;
 use ants_daemon::secrets::creds::{Finding, Kind as CredsKind};
 use ants_daemon::secrets::keystore;
 use ants_proto::{AntRequest, DeviceKey, LoginReply, Role, UserId, Verdict, subject};
+use ants_test_support::user as p;
 use async_nats::jetstream::stream::Stream;
 use data_encoding::BASE64URL_NOPAD;
 use futures::StreamExt as _;
@@ -26,10 +27,6 @@ use crate::{auth, tools};
 
 const WAIT: Duration = Duration::from_secs(20);
 const REPEAT: Duration = Duration::from_millis(200);
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 type Users = &'static [(u64, &'static str, &'static str, bool)];
 

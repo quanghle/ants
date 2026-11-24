@@ -6,14 +6,11 @@ use std::time::Duration;
 use ants_daemon::bus;
 use ants_daemon::people::humans::{Registry, Withdrawal};
 use ants_proto::{Acting, Role};
+use ants_test_support::user as p;
 
 use super::*;
 use crate::connection::Nats;
 use crate::test_support::Server;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 #[test]
 fn templated_ants_are_refused_and_wide_ones_warned_of() {

@@ -6,6 +6,7 @@ use ants_daemon::admin::ConfigFile;
 use ants_daemon::admin::restart::Restarts;
 use ants_daemon::host::{self, Host};
 use ants_proto::UserId;
+pub(crate) use ants_test_support::user as p;
 use anyhow::Result;
 use async_nats::jetstream;
 
@@ -16,10 +17,6 @@ use crate::test_support::Server;
 /// How long a test waits for a daemon to decide an order. An order delivered to a pull request that went silent comes
 /// again after a few seconds, and a loaded test machine may take several more; a decided order ends the wait.
 pub(crate) const WAIT: Duration = Duration::from_secs(20);
-
-pub(crate) fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 /// The host connection of m1 serving dev-a, as a daemon whose config sets `[admin] remote` to `remote` runs it,
 /// serving the file `config`, once it recorded its ants; dropping the sender stops it.

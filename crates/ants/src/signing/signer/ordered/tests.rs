@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_proto::{
-    AdminOp, AdminOrder, EnrollHost, EnrollLeaf, EnrollReply, EnrollRequest, Machine, Permissions, Role, UserId,
-    subject,
+    AdminOp, AdminOrder, EnrollHost, EnrollLeaf, EnrollReply, EnrollRequest, Machine, Permissions, Role, subject,
 };
+use ants_test_support::user as p;
 use futures::StreamExt as _;
 use nkeys::KeyPair;
 use serde_json::json;
@@ -21,10 +21,6 @@ use crate::test_support::Server;
 const WAIT: Duration = Duration::from_secs(10);
 /// How long a request the signer ignores goes unanswered before the test stops waiting.
 const IGNORED: Duration = Duration::from_millis(1500);
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 /// `op` about `ant` on `machine`, signed with the credentials `creds` of `admin`.
 fn order(admin: &str, creds: &Path, machine: &str, ant: &str, op: AdminOp) -> AdminOrder {

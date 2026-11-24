@@ -4,8 +4,9 @@
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{
     ColonyEntry, PendingCall, Role, RunLimit, RunState, TRAIL_RUNS_BUCKET, ThreadId, TrailFunction, TrailLeg,
-    TrailLimits, TrailParent, TrailRun, TrailSession, UserId, Uuid, trail_session_key,
+    TrailLimits, TrailParent, TrailRun, TrailSession, Uuid, trail_session_key,
 };
+use ants_test_support::user as p;
 use ants_test_support::{trail_leg, trail_run};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
@@ -15,10 +16,6 @@ use super::super::trails::check_worker;
 use super::super::trails::{MAX_LISTED, check_runs, stuck};
 use super::*;
 use crate::test_support::colony::entry;
-
-fn p(id: &str) -> UserId {
-    id.parse().unwrap()
-}
 
 /// A run of trail deploy that `conductor` conducts, in `state`, started `hours` before `now` and updated 30 minutes
 /// before it.

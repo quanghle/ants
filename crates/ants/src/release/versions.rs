@@ -273,36 +273,11 @@ mod tests {
     fn a_harness_at_different_versions_across_machines_drifts() {
         let now = Utc::now();
         let entry = |ant: &str, machine: &str, agent: Option<(&str, &str)>| ColonyEntry {
-            ant: ant.parse().unwrap(),
-            machine: machine.to_owned(),
-            instance: "run-1".to_owned(),
-            harness: "copilot".to_owned(),
             agent: agent
                 .map(|(name, version)| ants_proto::HarnessAgent { name: name.to_owned(), version: version.to_owned() }),
-            capabilities: Vec::new(),
-            whoami: None,
-            profile: None,
-            sense_unkept: None,
-            workdir: None,
             started_at: now,
             heartbeat_at: now,
-            activity: ants_proto::Activity::Idle,
-            handling: 0,
-            harnesses: 0,
-            escalate_to: Vec::new(),
-            sage: None,
-            version: ants_proto::ANTS_VERSION.to_owned(),
-            perms: ants_proto::PERMISSIONS_VERSION,
-            signed_out: None,
-            limited: None,
-            failing: None,
-            unserved: None,
-            fallback: None,
-            memory_low: None,
-            model: None,
-            paused: None,
-            drift: Vec::new(),
-            mcp: false,
+            ..ants_test_support::colony_entry(ant, machine)
         };
         let same = [entry("dev-a", "m1", Some(("copilot", "1.0.3"))), entry("dev-b", "m2", Some(("copilot", "1.0.3")))];
         assert!(harness_drift(&same, now).is_empty());

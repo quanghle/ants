@@ -4,16 +4,13 @@
 use ants_daemon::people::devices::verify;
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_proto::{DeviceKey, Permissions, Role};
+use ants_test_support::user as p;
 use data_encoding::BASE64URL_NOPAD;
 use nkeys::KeyPair;
 use serde_json::Value;
 
 use super::*;
 use crate::test_support::Server;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 /// Issue credentials of `user` in `role` from the team in `team`, as `ants auth user` does, returning their file's
 /// text.

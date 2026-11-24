@@ -5,6 +5,7 @@ use std::assert_matches;
 use std::path::Path;
 
 use ants_proto::{Away, DeviceId, Envelope, Escalation, EscalationReason, ThreadId, ToolCall, Verdict};
+use ants_test_support::user as p;
 use data_encoding::HEXLOWER;
 #[cfg(unix)]
 use http_body_util::BodyExt as _;
@@ -27,10 +28,6 @@ use super::links::{Action, LinkError, details, html};
 use super::notices::{Button, counted, notice_json};
 use super::sinks::{Delivery, cut};
 use super::*;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 fn human(text: &str) -> Result<Human> {
     let entry: HumanEntry = toml::from_str(text)?;

@@ -104,12 +104,9 @@ fn told(sent: &Sent) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use ants_proto::{AdminOrder, AdminOutcome, OrderState, RunId, TrailLimits, Uuid, WaitingStep};
+    use ants_test_support::user as p;
 
     use super::*;
-
-    fn p(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
 
     #[test]
     fn tells_what_the_order_stopped_or_resumed_or_why_not() {

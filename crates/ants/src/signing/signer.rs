@@ -680,6 +680,7 @@ mod tests {
 
     use ants_daemon::bus;
     use ants_proto::Role;
+    use ants_test_support::user as p;
     use nkeys::KeyPair;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
@@ -692,10 +693,6 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(20);
     const REPEAT: Duration = Duration::from_millis(200);
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn asked(name: &str, template: &str, request: &str, reason: &str) -> ants_proto::AskedAnt {
         let (template, request, reason) = (template.to_owned(), request.to_owned(), reason.to_owned());

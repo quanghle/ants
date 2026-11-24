@@ -4,13 +4,10 @@
 use std::time::Duration;
 
 use ants_proto::{ChannelNotify, ChannelReadMarkers, STREAM, chan_reader};
+use ants_test_support::user as p;
 
 use super::*;
 use crate::test_support::Server;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 fn ops() -> ChannelId {
     "ops".parse().unwrap()

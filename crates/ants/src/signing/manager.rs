@@ -255,6 +255,7 @@ mod tests {
 
     use ants_daemon::{bus, hub};
     use ants_proto::{Role, ThreadId, Verdict};
+    use ants_test_support::user as p;
     use tokio::time::timeout;
 
     use super::*;
@@ -264,10 +265,6 @@ mod tests {
     use crate::{serve, tools};
 
     const WAIT: Duration = Duration::from_secs(30);
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn ask(name: &str, template: &str, request: Request) -> AntAsk {
         let (manager, thread, name) = (p("lead"), ThreadId::generate(), p(name));

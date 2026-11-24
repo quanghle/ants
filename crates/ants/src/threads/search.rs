@@ -265,12 +265,9 @@ mod tests {
         ApprovalRequest, ChannelPost, DeadLetter, Envelope, Escalation, EscalationReason, NotesPost, Role, ToolCall,
         Verdict,
     };
+    use ants_test_support::user as p;
 
     use super::*;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn json<T: serde::Serialize>(value: &T) -> Vec<u8> {
         serde_json::to_vec(value).unwrap()

@@ -261,11 +261,9 @@ impl Io {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use ants_test_support::user;
 
-    fn user(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
+    use super::*;
 
     #[test]
     fn colour_follows_no_color_and_colorterm() {

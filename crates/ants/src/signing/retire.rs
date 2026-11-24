@@ -410,13 +410,10 @@ pub async fn retire(
 #[cfg(test)]
 mod tests {
     use ants_proto::{Permissions, Role};
+    use ants_test_support::user as p;
 
     use super::*;
     use crate::node::members::EnrollApprover;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn leaf_conf(path: &Path, machine: &Machine, creds: &Path) {
         std::fs::write(path, format!("server_name: \"{machine}\"\ncredentials: {creds:?}\n")).unwrap();

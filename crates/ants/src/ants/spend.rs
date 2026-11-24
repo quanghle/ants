@@ -358,13 +358,10 @@ mod tests {
     use ants_daemon::harness::Spend;
     use ants_daemon::limits::caps::Ledger;
     use ants_proto::{Role, daily_spend_key, session_key};
+    use ants_test_support::user as p;
 
     use super::*;
     use crate::test_support::Server;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn date(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()

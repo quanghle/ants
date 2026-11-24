@@ -121,13 +121,10 @@ impl Source {
 mod tests {
     use ants_client::entry::Entry;
     use ants_proto::{Attachment, AttachmentHandle, AttachmentScope, Uuid};
+    use ants_test_support::user as p;
     use chrono::TimeZone as _;
 
     use super::*;
-
-    fn p(name: &str) -> UserId {
-        name.parse().unwrap()
-    }
 
     fn message(text: &str) -> Entry {
         let at = chrono::Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap();

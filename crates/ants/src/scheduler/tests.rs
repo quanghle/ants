@@ -4,17 +4,14 @@
 use ants_daemon::bus;
 use ants_daemon::records::owners::Owners;
 use ants_daemon::schedule::{Mentions, When};
-use ants_proto::{ChannelId, ChannelPost, Destination, Envelope, UserId, WEBHOOKS_BUCKET, subject};
+use ants_proto::{ChannelId, ChannelPost, Destination, Envelope, WEBHOOKS_BUCKET, subject};
 use ants_proto::{webhook_marker_key, webhook_seen_key};
+use ants_test_support::user as p;
 
 use chrono::Timelike as _;
 
 use super::*;
 use crate::test_support::webhook::{creds, hub, stored};
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 fn schedule(name: &str, creds: Option<std::path::PathBuf>, destination: Destination) -> Schedule {
     Schedule {

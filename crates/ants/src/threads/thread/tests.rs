@@ -11,15 +11,12 @@ use ants_proto::{
     Acting, ApprovalRequest, ChannelId, ChannelPost, DeadLetter, DecidedBy, Envelope, Escalation, EscalationReason,
     Humans, NotesPost, SummaryRequest, ToolCall, Verdict,
 };
+use ants_test_support::user as p;
 use serde::Serialize;
 
 use super::pick::{made_within, select, select_any};
 use super::text::state;
 use super::*;
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 fn t(s: &str) -> ThreadId {
     s.parse().unwrap()

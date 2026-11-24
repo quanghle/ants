@@ -12,6 +12,7 @@ use std::path::Path;
 
 use ants_proto::provider::{Origin, Starter};
 use ants_proto::{Role, RunState, TRAIL_RUNS_BUCKET, TrailLeg, TrailRun, UserId};
+use ants_test_support::user as p;
 use ants_test_support::{trail_leg, trail_run};
 use async_nats::jetstream;
 use chrono::Utc;
@@ -19,10 +20,6 @@ use serde_json::json;
 
 use crate::connection::Nats;
 use crate::test_support::Server;
-
-fn p(id: &str) -> UserId {
-    id.parse().unwrap()
-}
 
 fn script(name: &str) -> String {
     format!(

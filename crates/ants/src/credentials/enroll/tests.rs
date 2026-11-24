@@ -4,6 +4,7 @@
 use std::future::pending;
 
 use ants_proto::{Destination, Machine, Role, UserId};
+use ants_test_support::user as p;
 use async_nats::Event;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -20,10 +21,6 @@ use crate::test_support::Server;
 const WAIT: Duration = Duration::from_secs(5);
 const REPEAT: Duration = Duration::from_millis(100);
 const LISTEN: Duration = Duration::from_millis(400);
-
-fn p(s: &str) -> UserId {
-    s.parse().unwrap()
-}
 
 fn enrollment(server: &Server, ant: &UserId, ttl: Duration) -> std::path::PathBuf {
     let out = server.dir().join(format!("enroll-{ant}.creds"));

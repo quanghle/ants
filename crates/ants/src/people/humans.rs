@@ -213,6 +213,7 @@ pub async fn register_or_warn(js: &jetstream::Context, me: &Me) {
 #[cfg(test)]
 mod tests {
     use ants_daemon::bus;
+    use ants_test_support::user as p;
     use serde_json::json;
 
     use super::*;
@@ -223,10 +224,6 @@ mod tests {
         let part = |v: &Value| BASE64URL_NOPAD.encode(&serde_json::to_vec(v).unwrap());
         let jwt = format!("{}.{}.c2ln", part(&json!({ "typ": "JWT" })), part(&claims));
         format!("-----BEGIN NATS USER JWT-----\n{jwt}\n------END NATS USER JWT------\n\nseed follows\n")
-    }
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
     }
 
     #[test]

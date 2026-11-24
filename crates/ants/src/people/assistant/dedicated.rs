@@ -588,13 +588,10 @@ impl Dedicated {
 mod tests {
     use ants_daemon::bus;
     use ants_proto::Role;
+    use ants_test_support::user as p;
 
     use super::*;
     use crate::test_support::Server;
-
-    fn p(s: &str) -> UserId {
-        s.parse().unwrap()
-    }
 
     fn enable_args(config: &Path, dir: &Path, home: &Path) -> EnableArgs {
         EnableArgs {
