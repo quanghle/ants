@@ -10,7 +10,7 @@ const ANTS_NAMING: [&str; 6] = [
     "src/ants/export.rs",
     "src/auth/tests/machines.rs",
     "src/doctor/ants.rs",
-    "src/doctor/tests.rs",
+    "src/doctor/tests/ants.rs",
 ];
 
 fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
