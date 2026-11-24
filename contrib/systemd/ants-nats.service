@@ -3,6 +3,8 @@
 # Reload a new uplink: systemctl --user reload ants-nats
 # Renewed uplink credentials need a restart (ants add does it itself): systemctl --user restart ants-nats
 # On the hub, the configuration needs `feature_flags { js_api_reply_v2: true }` for leaf outboxes (docs/transport.md, "Hub").
+# Restart=always starts nats-server again after any exit, also a clean one on a SIGTERM systemd did not send; only
+# systemctl --user stop ants-nats keeps it stopped.
 
 [Unit]
 Description=ants: local nats-server (leaf node or hub)
@@ -12,7 +14,7 @@ After=ants-devtunnel.service ants-bridge.service
 [Service]
 ExecStart="@NATS_SERVER@" -c "@NATS_CONF@"
 ExecReload=kill -HUP $MAINPID
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]

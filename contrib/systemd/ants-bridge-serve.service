@@ -6,6 +6,8 @@
 # the bridge may open sessions, which NATS authentication then checks.
 # The bearer token is read from its file at each start, so a new token takes effect at the next restart:
 # systemctl --user restart ants-bridge-serve
+# Restart=always starts it again after any exit, also a clean one on a SIGTERM systemd did not send; only
+# systemctl --user stop ants-bridge-serve keeps it stopped.
 
 [Unit]
 Description=ants: bridge serve for the hub
@@ -16,7 +18,7 @@ After=ants-nats.service
 @IF_NO_BRIDGE_TOKEN@ExecStart="@ANTS@" bridge serve
 @IF_BRIDGE_TOKEN@ExecStart="@ANTS@" bridge serve --token-file "@BRIDGE_TOKEN@"
 Environment=NO_COLOR=1
-Restart=on-failure
+Restart=always
 RestartSec=10
 # A replaced ants executable (an upgrade) exits with status 75, restarting onto the new one.
 SuccessExitStatus=75

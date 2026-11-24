@@ -5,7 +5,9 @@
      ~/Library/LaunchAgents/ants.webhook.plist. Until ants.nats listens, requests answer 503 and the ingress retries
      the connection. Secrets come from secret_file entries of the config file.
      The ingress reloads an edited config file within seconds; to reload at once: launchctl kill SIGHUP gui/$(id -u)/ants.webhook
-     A replaced ants executable (an upgrade) exits with status 75, which KeepAlive restarts onto the new one. -->
+     KeepAlive starts it again after any exit, also a clean one on a SIGTERM launchd did not send, at most every
+     ThrottleInterval, and a replaced ants executable (an upgrade) exits with status 75 for it to start the new one;
+     only launchctl bootout gui/$(id -u)/ants.webhook stops it for good. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -26,10 +28,7 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
+	<true/>
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 	<key>StandardOutPath</key>

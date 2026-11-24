@@ -3,6 +3,8 @@
 # ~/.config/systemd/user. Until ants-nats listens, requests answer 503 and the ingress retries the connection.
 # Secrets come from secret_file entries of the config file.
 # The ingress reloads an edited config file within seconds; to reload at once: systemctl --user reload ants-webhook
+# Restart=always starts it again after any exit, also a clean one on a SIGTERM systemd did not send; only
+# systemctl --user stop ants-webhook keeps it stopped.
 
 [Unit]
 Description=ants: webhook ingress
@@ -13,7 +15,7 @@ After=ants-nats.service
 ExecStart="@ANTS@" webhook serve --config "@WEBHOOK_CONFIG@"
 ExecReload=kill -HUP $MAINPID
 Environment=NO_COLOR=1
-Restart=on-failure
+Restart=always
 RestartSec=10
 # A replaced ants executable (an upgrade) exits with status 75, restarting onto the new one.
 SuccessExitStatus=75

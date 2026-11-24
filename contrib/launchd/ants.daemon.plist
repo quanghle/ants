@@ -4,12 +4,13 @@
      ants.nats agent's, or, with [nats_server] in the config file and no ants.nats agent, one the daemon starts and
      stops itself.
      scripts/install-units.sh fills in the @...@ placeholders and installs it as ~/Library/LaunchAgents/ants.daemon.plist.
-     launchd has no start order: until ants.nats listens, the daemon waits, retrying the connection. KeepAlive and
-     ThrottleInterval cover other failures.
+     launchd has no start order: until ants.nats listens, the daemon waits, retrying the connection.
      SIGTERM lets prompts in flight finish for up to ExitTimeOut seconds; messages cut off are redelivered. Then the
      daemon stops its harnesses and its nats-server.
      The daemon reloads an edited config file within seconds; to reload at once: launchctl kill SIGHUP gui/$(id -u)/ants.daemon
-     A replaced ants executable (an upgrade) exits with status 75, which KeepAlive restarts onto the new one. -->
+     KeepAlive starts it again after any exit, also a clean one on a SIGTERM launchd did not send, at most every
+     ThrottleInterval, and a replaced ants executable (an upgrade) exits with status 75 for it to start the new one;
+     only launchctl bootout gui/$(id -u)/ants.daemon stops it for good. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -39,10 +40,7 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
+	<true/>
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 	<key>ExitTimeOut</key>

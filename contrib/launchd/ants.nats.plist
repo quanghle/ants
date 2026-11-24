@@ -6,7 +6,9 @@
      Renewed uplink credentials need a restart (ants add does it itself): launchctl kickstart -k gui/$(id -u)/ants.nats
      On the hub, the configuration needs `feature_flags { js_api_reply_v2: true }` for leaf outboxes (docs/transport.md, "Hub").
      launchd has no start order: with an uplink through ants.devtunnel or ants.bridge, the leaf retries it until the
-     tunnel or bridge is up. -->
+     tunnel or bridge is up.
+     KeepAlive starts nats-server again after any exit, also a clean one on a SIGTERM launchd did not send, at most
+     every ThrottleInterval; only launchctl bootout gui/$(id -u)/ants.nats stops it for good. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -20,10 +22,7 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
+	<true/>
 	<key>ThrottleInterval</key>
 	<integer>5</integer>
 	<key>StandardOutPath</key>

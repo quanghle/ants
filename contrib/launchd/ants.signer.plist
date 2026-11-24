@@ -4,9 +4,11 @@
      policy of the [[ant_template]] tables of its config file, on a human's approval otherwise. Run it on the machine
      holding the auth directory (~/.config/ants/auth), whose account key it signs with.
      scripts/install-units.sh --signer fills in the @...@ placeholders and installs it as
-     ~/Library/LaunchAgents/ants.signer.plist. Until the hub answers, the signer fails, and KeepAlive and
-     ThrottleInterval start it again.
-     A replaced ants executable (an upgrade) exits with status 75, which KeepAlive restarts onto the new one. -->
+     ~/Library/LaunchAgents/ants.signer.plist. Until the hub answers, the signer fails, and KeepAlive starts it
+     again.
+     KeepAlive starts it again after any exit, also a clean one on a SIGTERM launchd did not send, at most every
+     ThrottleInterval, and a replaced ants executable (an upgrade) exits with status 75 for it to start the new one;
+     only launchctl bootout gui/$(id -u)/ants.signer stops it for good. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -26,10 +28,7 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
+	<true/>
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
 	<key>StandardOutPath</key>

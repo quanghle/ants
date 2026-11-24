@@ -1,5 +1,5 @@
-//! Tests of the user services: launchd and systemd reloads and restarts, service states, the logrotate agent, units
-//! reading back what was installed, installing, and the manual commands.
+//! Tests of the user services: launchd and systemd reloads and restarts, service states, the logrotate agent, the
+//! units' restart policy, units reading back what was installed, installing, and the manual commands.
 
 use super::*;
 use std::sync::{Arc, Mutex};
@@ -279,4 +279,39 @@ fn the_manual_commands_cover_both_managers() {
         manual(Service::Daemon, Action::Reload),
         "macOS: launchctl kill SIGHUP gui/$(id -u)/ants.daemon, Linux: systemctl --user reload ants-daemon"
     );
+}
+
+/// The units of contrib/`dir` with `extension`, by file name.
+fn contrib_units(dir: &str, extension: &str) -> Vec<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib").join(dir);
+    let mut units: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == extension))
+        .map(|path| (path.file_name().unwrap().to_string_lossy().into_owned(), std::fs::read_to_string(&path).unwrap()))
+        .collect();
+    units.sort();
+    units
+}
+
+/// A stray SIGTERM, on which the services exit cleanly, must not leave one down: only a stop through the service
+/// manager keeps it stopped.
+#[test]
+fn every_long_running_unit_starts_its_program_again_after_any_exit() {
+    let plists = contrib_units("launchd", "plist");
+    assert!(plists.iter().any(|(name, _)| name == "ants.nats.plist") && plists.len() > 5, "{plists:?}");
+    for (name, plist) in &plists {
+        let keep_alive = plist.split_once("<key>KeepAlive</key>").map(|(_, after)| after.trim_start());
+        if *name == format!("{LOGROTATE}.plist") {
+            assert_eq!(keep_alive, None, "{name} runs at load and hourly");
+        } else {
+            assert!(keep_alive.is_some_and(|v| v.starts_with("<true/>")), "{name}: KeepAlive true");
+        }
+    }
+    let units = contrib_units("systemd", "service");
+    assert!(units.iter().any(|(name, _)| name == "ants-nats.service") && units.len() > 5, "{units:?}");
+    for (name, unit) in &units {
+        let restart: Vec<_> = unit.lines().filter(|l| l.starts_with("Restart=")).collect();
+        assert_eq!(restart, ["Restart=always"], "{name}");
+    }
 }

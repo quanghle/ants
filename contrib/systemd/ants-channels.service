@@ -1,8 +1,9 @@
 # ants: the channel manager (`ants channel serve`), applying the channel changes owner ants ask for. Run it on one
 # machine where no ant runs, such as the hub, with the credentials of `ants auth channel-manager`.
 # User unit: scripts/install-units.sh --channel-manager CREDS fills in the @...@ placeholders and installs it in
-# ~/.config/systemd/user. Until the hub answers, the channel manager waits, retrying the connection; Restart covers
-# other failures, such as a missing channels bucket before `ants init`.
+# ~/.config/systemd/user. Until the hub answers, the channel manager waits, retrying the connection; Restart=always
+# covers other failures, such as a missing channels bucket before `ants init`, and a clean exit on a SIGTERM systemd
+# did not send; only systemctl --user stop ants-channels keeps it stopped.
 
 [Unit]
 Description=ants: channel manager
@@ -12,7 +13,7 @@ After=ants-nats.service
 [Service]
 ExecStart="@ANTS@" channel serve
 Environment="ANTS_CREDS=@CHANNEL_CREDS@" NO_COLOR=1
-Restart=on-failure
+Restart=always
 RestartSec=10
 # A replaced ants executable (an upgrade) exits with status 75, restarting onto the new one.
 SuccessExitStatus=75
