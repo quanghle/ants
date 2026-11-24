@@ -247,7 +247,7 @@ An empty command bar says what `Enter` does with plain text in the active view. 
 
 ### `ants dash`
 
-`ants dash [--since DUR]` (human creds + TTY, default `24h`) displays active threads (`▶` while busy, `done` when marked), selected thread live progress and history, 10 s colony refresh, and live pending tool requests (`Enter` inspects, naming what `allow_always` allows as the harness does; there `a`/`A`/`r` decide `allow_once`/`allow_always`/`reject` at once, a note with the rejection being `ants chat`'s `n` or `ants tools reject --note`; `Tab` switches panes, `R` refreshes, `q`/`Ctrl-C` quits). Records approval presence while open.
+`ants dash [--since DUR]` (human creds + TTY, default `24h`) displays active threads (`▶` while busy, `done` when marked), selected thread live progress and history, 10 s colony refresh, (live progress comes from best-effort status updates: each colony read takes an ant's progress off the threads last heard from before its heartbeat when its entry is gone, its daemon restarted since, or it had fewer messages in hand than such threads, those heard from longest ago first, so an update lost, or missed while disconnected, leaves no thread busy for good; `ants chat`'s `working` state follows the same) and live pending tool requests (`Enter` inspects, naming what `allow_always` allows as the harness does; there `a`/`A`/`r` decide `allow_once`/`allow_always`/`reject` at once, a note with the rejection being `ants chat`'s `n` or `ants tools reject --note`; `Tab` switches panes, `R` refreshes, `q`/`Ctrl-C` quits). Records approval presence while open.
 
 ### Reactions
 

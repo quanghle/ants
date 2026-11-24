@@ -11,9 +11,11 @@ fn the_view_shows_the_timeline_with_running_calls_and_a_panel_beside_it() {
     m.stored(entries[..3].to_vec(), at(5));
     calls.iter().for_each(|c| m.data.calls.status(c));
     let busy = ants_proto::StatusUpdate::State { state: ants_proto::State::Working };
-    m.data
-        .live
-        .status(&ants_proto::StatusEvent::new(crate::test_support::live::user("dev-a"), thread.clone(), busy), at(6));
+    let busy = ants_proto::StatusEvent {
+        at: at(6),
+        ..ants_proto::StatusEvent::new(crate::test_support::live::user("dev-a"), thread.clone(), busy)
+    };
+    m.data.live.status(&busy, at(6));
     let mut page = Page::new(thread.clone());
     page.history.loaded(&thread, Ok(entries[..3].to_vec())).unwrap();
     page.about = Some(About { spend: Some(Vec::new()), ..About::default() });
