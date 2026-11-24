@@ -461,7 +461,7 @@ sign_in = "agy"
 
 Even gated, Claude Code runs its built-in read-only tools (`Read`, `Grep`, `ls`, `echo`) and rules from `.claude/settings*.json` unasked, and Antigravity applies workspace reads/edits and its `settings.json` first.
 
-**Reviews run gated.** A sage's review ([The sage](#the-sage)) runs in a session of its own started with the harness's `review` table in place of its `args` and `mode`: `copilot` drops `--allow-all` (`review = { args = ["--acp"] }`), `claude` takes mode `default` and `codex` mode `read-only`. The daemon rejects each tool request of that session outside the review's read-only rules, asking no one. `antigravity` sets no `review`, as it applies edits unasked even gated, so a sage on it declines reviews and the ant reviews the packet alone. A harness that asks before running tools reviews on its own `args` and `mode`; one running its tools unasked (`bypass_permissions`, or a native protocol) needs a `review` naming the arguments or mode that keep its tools read only or make it ask, else its sage declines reviews and `ants doctor` warns (`ant NAME reviews`). A redefinition of a built-in sets its own `review`; for a native protocol, `review` takes the CLI's own read-only setting, and a definition setting none takes its [protocol's](#harness-protocols) (Claude Code's `plan`, codex's `read-only`; `copilot-sdk` and `antigravity` have none). A redefinition replaces the built-in's quota and context-overflow phrases, `window` and `context` table too: copy those from `harnesses.toml` to keep them.
+**Reviews run gated.** A sage's review ([The sage](#the-sage)) runs in a session of its own started with the harness's `review` table in place of its `args` and `mode`: `copilot` drops `--allow-all` (`review = { args = ["--acp"] }`), `claude` takes mode `default` and `codex` mode `read-only`. The daemon rejects each tool request of that session outside the review's read-only rules, asking no one. `antigravity` sets no `review`, as it applies edits unasked even gated, so a sage on it declines reviews and the ant reviews the packet alone. A harness that asks before running tools reviews on its own `args` and `mode`; one running its tools unasked (`bypass_permissions`, or a native protocol) needs a `review` naming the arguments or mode that keep its tools read only or make it ask, else its sage declines reviews and `ants doctor` warns (`ant NAME reviews`). A redefinition of a built-in sets its own `review`; for a native protocol, `review` takes the CLI's own read-only setting, and a definition setting none takes its [protocol's](#harness-protocols) (Claude Code's `plan`, codex's `read-only`; `copilot-sdk` and `antigravity` have none). A redefinition replaces the built-in's quota and context-overflow phrases, `window` and `context` table too: copy those from `harnesses.toml` to keep them (it keeps `memory_files` and `reports`).
 
 ### Custom harnesses
 
@@ -485,6 +485,7 @@ quota_exhausted = ["monthly cap reached"]      # extra quota-exhausted error sub
 window = 200000                                # optional context window (tokens); sizes history seed
 history_budget = 65536                         # optional history seed budget (bytes)
 memory_files = ["AGENTS.md", "~/.custom/*.md"] # memory files an admin's read shows (see Memory files)
+reports = ["tokens", "cost"]                 # what it reports of a prompt's spend; see Prompt limits and spending caps
 
 [harnesses.custom-acp.context]
 default = {}
@@ -506,14 +507,14 @@ huge = { model_suffix = "-1m", history_budget = 262144 }
 
 Any other value fails loading the file defining the harness, naming that file.
 
-**Protocol defaults.** A definition of a native protocol, under any name, takes that protocol's defaults for each of `memory_files`, `review` and `window` it does not set (`crates/ants-daemon/src/protocols.toml`), rather than those of a built-in it may replace:
+**Protocol defaults.** A definition of a native protocol, under any name, takes that protocol's defaults for each of `memory_files`, `review`, `window` and `reports` it does not set (`crates/ants-daemon/src/protocols.toml`), rather than those of a built-in it may replace:
 
-| `protocol` | `memory_files` | `review` | `window` |
-|---|---|---|---|
-| `claude` | as built-in `claude` | `{ mode = "plan" }` | `200000` |
-| `codex` | as built-in `codex` | `{ mode = "read-only" }` | none |
-| `copilot-sdk` | as built-in `copilot` | none: a sage on it declines reviews | none |
-| `antigravity` | as built-in `antigravity` | none: a sage on it declines reviews | none |
+| `protocol` | `memory_files` | `review` | `window` | `reports` |
+|---|---|---|---|---|
+| `claude` | as built-in `claude` | `{ mode = "plan" }` | `200000` | tokens and cost |
+| `codex` | as built-in `codex` | `{ mode = "read-only" }` | none | tokens |
+| `copilot-sdk` | as built-in `copilot` | none: a sage on it declines reviews | none | tokens and cost |
+| `antigravity` | as built-in `antigravity` | none: a sage on it declines reviews | none | tokens |
 
 Every protocol other than `acp` is native: the daemon runs a translator in its own process that starts the definition's command and speaks the CLI's protocol to it, and ACP to the rest of the daemon. The command is found and started as for ACP (a path, else looked up on `PATH`, as `.exe`, `.cmd` or `.bat` on Windows, without a shell), with the protocol's own arguments before the definition's `args` and those of the ant's `context`, and the same environment layering. The rest works as for ACP:
 
@@ -745,7 +746,7 @@ While the ant's own harness cannot serve, each message goes to the first fallbac
 - **Shown:** each reply ends with `[ants] Answered by fallback NAME, harness OWN being signed out.` (or `out of quota`, `failing to start`); `ants_colony` publishes `fallback` (`name`, `since`); `ants colony` shows `fallback` as the activity; `ants ask`, `ask_ant` and `route` treat the ant as served (`route` prefers ants answered by their own harness).
 - **Told once:** the owner's sign-in, quota or breaker notice (one per outage, as without fallbacks) says the messages go to the fallbacks meanwhile.
 - **Back:** a successful sign-in check or breaker probe, or after a quota's backoff the next message the own harness answers, sends messages to the own harness again and clears `fallback`; live fallback sessions are replaced as their threads come up.
-- **Caps:** prompt limits and spending caps apply to every prompt whichever harness runs it.
+- **Caps:** prompt limits and spending caps apply to every prompt whichever harness runs it, but a spending cap counts only what that harness [reports](#prompt-limits-and-spending-caps): a cost cap (`max_thread_cost`, `max_daily_cost`, `pool_daily_cost`) never trips on a fallback reporting no cost (`codex`, `antigravity`, protocols `codex` and `antigravity`), nor any cap on built-in `copilot` or `antigravity`. The daemon warns at its start, and `ants doctor` as `ant NAME spending caps`, of each harness of the ant, its own or a fallback, that cannot count one of its caps.
 
 ### Lost sessions and context window
 
@@ -922,7 +923,7 @@ Per-prompt defaults: `prompt_timeout = "30m"` (includes approval wait; `"0"` dis
 - **Warnings:** crossing `spend_warn_percent` (default `80`, `< 100`, `0` disables) sends one `[ants]` warning per allowance/UTC day on a new thread (thread cap -> thread owner else default human; daily/pool cap -> default human).
 - **Manual cancel:** `ants cancel ANT THREAD` (human creds; core NATS `ants.cancel.<ant>.<thread>`) cancels the active prompt the same way, replies with partial output and `[ants] The prompt was cancelled by <human> (ants cancel).`, and acks without retry, dead letter or escalation. Queued messages behind it still run.
 - **Automatic steering:** a human message (including channel replies waking the ant) or an ant message starting work on a thread with a running prompt steers it by default ([architecture.md](architecture.md#pool-worktrees-and-at-least-once-retries)): harnesses that [take steers](#harness-protocols) (`claude`, `codex`, `copilot-sdk`) fold it into the running turn, while others cancel the prompt like `ants cancel` (`[ants] <sender> interrupted the prompt to steer <ant> with a new message.`) and run it next in the same session ahead of ordinary queued messages. Messages marked `queue` (`ants ask --queue`, `ants post --queue`, `/later TEXT` in `ants chat`) wait behind the running prompt instead. A human's steer renews the turn budget and allowance; an ant's does not.
-- **Reporting:** prompt token totals (from ACP prompt responses) and cumulative session cost (from ACP `usage_update`) persist at `<ant>.<thread>.spend` and `<ant>.day.<YYYY-MM-DD>` in `ants_sessions`. Claude and protocol `copilot-sdk` report tokens and USD cost; Codex and protocol `antigravity` report tokens only; built-in ACP `copilot` and `antigravity` report neither.
+- **Reporting:** prompt token totals (from ACP prompt responses) and cumulative session cost (from ACP `usage_update`) persist at `<ant>.<thread>.spend` and `<ant>.day.<YYYY-MM-DD>` in `ants_sessions`. Claude and protocol `copilot-sdk` report tokens and USD cost; Codex and protocol `antigravity` report tokens only; built-in ACP `copilot` and `antigravity` report neither. A definition's `reports` says which (`["tokens", "cost"]`, `["tokens"]`, `["cost"]` or `[]`): the built-ins set it, a definition of a native protocol takes its protocol's, one replacing a built-in keeps the built-in's, and another ACP definition says nothing unless it sets it. A cap counting what the ant's harness or one of its fallbacks does not report never trips there: the daemon warns of it at its start and `ants doctor` as `ant NAME spending caps`, naming the cap and the harness.
 
 ### Spend report
 

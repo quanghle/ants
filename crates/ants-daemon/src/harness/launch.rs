@@ -230,6 +230,7 @@ impl Launch {
             window: None,
             history_budget: None,
             memory_files: None,
+            reports: None,
         };
         Self {
             harness: Arc::new(harness),

@@ -80,6 +80,18 @@ pub struct Harness {
     /// ([`crate::admin`]): relative to the ant's workdir, or under `~`. Unset, a table of a native protocol takes its
     /// protocol's, and one replacing a built-in harness keeps the built-in's.
     pub(crate) memory_files: Option<Vec<String>>,
+    /// What it reports of the spend of its prompts, which caps count ([`crate::limits::caps`]). Unset, nothing is
+    /// known of it, and no cap is warned of; a table of a native protocol takes its protocol's, and one replacing a
+    /// built-in harness keeps the built-in's.
+    pub(crate) reports: Option<Vec<Reported>>,
+}
+
+/// What a harness reports of the spend of a prompt: its tokens or its cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reported {
+    Tokens,
+    Cost,
 }
 
 /// What one `context` value selects.
@@ -242,6 +254,35 @@ impl Harness {
             (true, true) => "its allow rules and tool approvals by its escalate_to ants",
         };
         Some(format!("harness {} runs its tools unasked, so {gating} do not apply to them", self.name))
+    }
+
+    /// Why the caps of `caps`, by config key with what each counts, never trip on this harness: those counting what its
+    /// definition says it does not report (its `reports`). None when it reports all they count, or its definition
+    /// says nothing of what it reports.
+    pub fn uncounted(&self, caps: &[(&str, Reported)]) -> Option<String> {
+        let reports = self.reports.as_deref()?;
+        let missing: Vec<&str> =
+            caps.iter().filter(|(_, counts)| !reports.contains(counts)).map(|(cap, _)| *cap).collect();
+        let (last, rest) = missing.split_last()?;
+        let (caps, verb) = match rest {
+            [] => ((*last).to_owned(), "never trips"),
+            _ => (format!("{} and {last}", rest.join(", ")), "never trip"),
+        };
+        let reported = match (reports.contains(&Reported::Tokens), reports.contains(&Reported::Cost)) {
+            (false, false) => "neither tokens nor cost",
+            (true, _) => "no cost",
+            (false, true) => "no tokens",
+        };
+        Some(format!("harness {} reports {reported}, so {caps} {verb} on it", self.name))
+    }
+
+    /// What to change for the caps of an ant to trip on the harness.
+    pub fn uncounted_fix(&self) -> String {
+        format!(
+            "set caps of what harness {} reports, or run the ant and its fallbacks on harnesses reporting what its caps \
+             count (docs/config.md#prompt-limits-and-spending-caps)",
+            self.name
+        )
     }
 
     /// The harness a review session runs: its `Self::review` variant, else itself when it asks before running tools.

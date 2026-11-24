@@ -374,6 +374,18 @@ impl Ant {
         }
     }
 
+    /// Why its caps, its own and its template's pool's, never trip on its harness or a fallback of it, with the harness
+    /// ([`crate::limits::caps::uncounted`]); none where these do not resolve.
+    pub fn uncounted_caps(&self, harnesses: &Harnesses) -> Vec<(String, Arc<Harness>)> {
+        let Ok(own) = harnesses.named(self.harness.as_deref()) else { return Vec::new() };
+        let settings = ModelSettings { model: self.model.clone(), ..ModelSettings::default() };
+        let fallbacks = fallbacks(self.template.is_some(), &self.fallback, &own, &settings, harnesses, None);
+        let mut ran = vec![own];
+        ran.extend(fallbacks.unwrap_or_default().into_iter().map(|fallback| fallback.harness));
+        let uncounted = crate::limits::caps::uncounted(&self.caps(), self.pool.as_ref(), ran.iter().map(|h| &**h));
+        uncounted.into_iter().map(|(why, harness)| (why, Arc::new(harness.clone()))).collect()
+    }
+
     /// The escalation chain names other ants, each once, the stand-in is not the ant, and the spend warning comes short
     /// of the caps.
     pub(super) fn validate(&self) -> Result<()> {

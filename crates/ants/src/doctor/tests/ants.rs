@@ -483,6 +483,43 @@ fn ants_whose_harness_runs_tools_unasked_are_warned_of_rules_that_miss_them() {
 }
 
 #[test]
+fn caps_a_harness_or_fallback_cannot_count_are_warned_of() {
+    let dir = ants_test_support::scratch_dir("doctor-uncounted-caps");
+    let config = dir.join("ants.toml");
+    std::fs::write(
+        &config,
+        "messenger = false\nsage = \"none\"\nharness = \"claude\"\n\
+         [harnesses.mine]\ncommand = \"mine-acp\"\n\
+         [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nmax_daily_cost = 5.0\nmax_thread_tokens = 1000\n\
+         fallback = [\"codex\", \"copilot\", \"mine\"]\n\
+         [[ant]]\nname = \"dev-b\"\nworkdir = \".\"\nmax_daily_cost = 5.0\n\
+         [[ant]]\nname = \"dev-c\"\nworkdir = \".\"\nharness = \"copilot\"\n",
+    )
+    .unwrap();
+    let checks = check_caps(&config::load(&config).unwrap());
+    let found: Vec<_> = checks.iter().map(|c| (c.check.as_str(), c.status, c.detail.as_str())).collect();
+    assert_eq!(
+        found,
+        [
+            (
+                "ant dev-a spending caps",
+                Status::Warn,
+                "harness codex reports no cost, so max_daily_cost never trips on it"
+            ),
+            (
+                "ant dev-a spending caps",
+                Status::Warn,
+                "harness copilot reports neither tokens nor cost, so max_thread_tokens and max_daily_cost never trip on \
+                 it"
+            ),
+        ],
+        "claude counts both, mine says nothing of what it reports, and dev-c has no caps"
+    );
+    assert!(checks[0].fix[0].starts_with("set caps of what harness codex reports"), "{}", checks[0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn a_sage_on_a_harness_that_cannot_hold_reviews_is_warned_of_declining_them() {
     let dir = ants_test_support::scratch_dir("doctor-unheld-reviews");
     let config = dir.join("ants.toml");
