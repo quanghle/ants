@@ -131,7 +131,7 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         Command::Leaf(command) => leaf::run(&conn, command).await,
         Command::Bridge(command) => bridge::run(command).await,
         Command::Hook(command) => hook::run(&nats()?, command).await,
-        Command::Web(args) => web::run(args).await,
+        Command::Web(args) => web::run(args, conn.human).await,
         Command::Webhook(command) => webhook::run(&conn, command).await,
     }
 }

@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use ants_client::device::registration::{GITHUB_URL, device_page};
 use ants_client::site::{self, Site};
+use ants_proto::UserId;
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 use http_body_util::Full;
@@ -89,9 +90,9 @@ enum WebCommand {
 
 /// What a binary built without the page says.
 #[cfg(not(feature = "web"))]
-const WITHOUT: &str = "this ants is built without the page of the web client: release binaries have it (`ants update` \
-                       installs the latest), or build one with `scripts/web.sh && cargo build --release --features web` \
-                       in a checkout of ants";
+const WITHOUT: &str = "this ants is built without the page of the web client, as release binaries are until ants-web \
+                       publishes releases: build one with `scripts/web.sh && cargo build --release --features web` in \
+                       a checkout of ants with the ants-web checkout beside it";
 
 /// How long a connection may take to send its request's headers.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -126,23 +127,24 @@ impl Page {
     }
 }
 
-/// Run `ants web`.
-pub(crate) async fn run(args: WebArgs) -> Result<()> {
+/// Run `ants web`, its page connecting without credentials as `human`.
+pub(crate) async fn run(args: WebArgs, human: Option<&UserId>) -> Result<()> {
     let page = Page::embedded()?;
     match args.command {
         Some(WebCommand::Export { dir, server, bootstrap, github_url }) => {
             device_page(&github_url).map_err(|e| anyhow::anyhow!("--github-url {e}"))?;
             let bootstrap = bootstrap.as_deref().map(read_bootstrap).transpose()?;
             let github_url = bootstrap.is_some().then_some(github_url);
-            print!("{}", export(page, &dir, Site { server: websocket(&server)?, bootstrap, github_url })?);
+            print!("{}", export(page, &dir, Site { server: websocket(&server)?, bootstrap, github_url, human: None })?);
             Ok(())
         }
-        None => serve_args(page, args.serve).await,
+        None => serve_args(page, args.serve, human).await,
     }
 }
 
-/// Serve `page` as `args` say until Ctrl-C or SIGTERM, opening the browser on it unless told not to.
-async fn serve_args(page: Page, args: ServeArgs) -> Result<()> {
+/// Serve `page` as `args` say until Ctrl-C or SIGTERM, opening the browser on it unless told not to; the page connects
+/// without credentials as `human`.
+async fn serve_args(page: Page, args: ServeArgs, human: Option<&UserId>) -> Result<()> {
     let ServeArgs { listen, server, no_open } = args;
     if !listen.ip().is_loopback() {
         bail!("{listen}: `ants web` serves the page on a loopback address only; `ants web export` writes it for a hub");
@@ -161,7 +163,11 @@ async fn serve_args(page: Page, args: ServeArgs) -> Result<()> {
         }
     };
     let listener = TcpListener::bind(listen).await.with_context(|| format!("listening on {listen}"))?;
-    let served = Served::new(page, listen, Site { server, bootstrap: None, github_url: None });
+    let served = Served::new(
+        page,
+        listen,
+        Site { server, bootstrap: None, github_url: None, human: human.map(ToString::to_string) },
+    );
     println!(
         "serving the page of ants {} ({}) on {origin}, connecting to {}, until Ctrl-C",
         page.version(),

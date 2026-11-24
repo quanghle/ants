@@ -52,7 +52,7 @@ See [docs/architecture.md](docs/architecture.md) for the store/subject model, de
 
 ## Install a release
 
-Each `v*` tag publishes [release](https://github.com/quanghle/ants/releases) archives of the `ants` binary for Linux x86_64 and arm64 (glibc 2.43+), macOS arm64 and Windows x86_64, with `SHA256SUMS` and build provenance attestations. Each archive also holds the [nats-server](https://github.com/nats-io/nats-server) release ants is tested with (pinned in [`crates/ants/nats-server.sha256`](crates/ants/nats-server.sha256)) and its license, `LICENSE-nats-server`; the `ants` binary embeds the page of the web client pinned in [`crates/ants/web.sha256`](crates/ants/web.sha256), which `ants web` serves:
+Each `v*` tag publishes [release](https://github.com/quanghle/ants/releases) archives of the `ants` binary for Linux x86_64 and arm64 (glibc 2.43+), macOS arm64 and Windows x86_64, with `SHA256SUMS` and build provenance attestations. Each archive also holds the [nats-server](https://github.com/nats-io/nats-server) release ants is tested with (pinned in [`crates/ants/nats-server.sha256`](crates/ants/nats-server.sha256)) and its license, `LICENSE-nats-server`. Until the repo ants-web publishes releases, release binaries are built without the page of the web client that `ants web` serves (see below to build one with it):
 
 ```sh
 tag=v0.3.0 target=aarch64-apple-darwin   # or x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu

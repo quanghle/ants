@@ -2,8 +2,9 @@ name: Release
 
 # A tag vX.Y.Z (X.Y.Z the workspace version in Cargo.toml) builds the `ants` binary for each target and publishes a
 # GitHub Release with the archives, SHA256SUMS and build provenance attestations, once the checks of ci.yml pass. Each
-# archive holds the nats-server pinned in crates/ants/nats-server.sha256 beside ants, with its license; ants embeds
-# the page of the web client pinned in crates/ants/web.sha256 (scripts/web.sh, the `web` feature). The checks of ci.yml
+# archive holds the nats-server pinned in crates/ants/nats-server.sha256 beside ants, with its license. Until the repo
+# ants-web publishes its releases (ants-g47k4), ants is built without the page of the web client (the `web` feature):
+# a runner has no ants-web checkout to build it from. The checks of ci.yml
 # rerun here unless CI already passed on the same commit pushed to main. A tag with a pre-release suffix (v0.2.0-rc.1)
 # makes a pre-release. The notes come from bd (scripts/release-notes.sh): the
 # work closed and requirements added since the previous release, per the committed .bd/issues.jsonl; notes over
@@ -118,15 +119,8 @@ jobs:
           toolchain: "1.100"
           targets: ${{ matrix.target }}
 
-      # The page of the web client pinned in crates/ants/web.sha256, embedded by the `web` feature. Until the repo
-      # ants-web publishes its releases, the page is built only from its checkout beside ants, which a runner has
-      # not: scripts/web.sh fails here, and with it the release.
-      - name: Web page
-        shell: bash
-        run: scripts/web.sh
-
       # No build cache: a release builds from the lock file alone.
-      - run: cargo build --release --locked -p ants --features web --target ${{ matrix.target }}
+      - run: cargo build --release --locked -p ants --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -138,7 +132,6 @@ jobs:
           exe=ants nats=nats-server
           [ "$RUNNER_OS" != Windows ] || exe=ants.exe nats=nats-server.exe
           "target/$TARGET/release/$exe" --version
-          "target/$TARGET/release/$exe" web export "$RUNNER_TEMP/web" --server wss://hub.example/nats
           dir=ants-$NAME-$TARGET
           mkdir -p "dist/$dir"
           cp "target/$TARGET/release/$exe" LICENSE README.md "dist/$dir/"
