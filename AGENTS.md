@@ -20,9 +20,9 @@ keep TODO lists in markdown.
 - A spec for a new feature says, for each surface (CLI, `ants chat`, the web client, MCP tools, admin orders,
   `ants doctor`, docs, `contrib/skills/`), what the feature offers there or why nothing: a feature lands with its
   surfaces, or with issues for the ones still missing.
-- The database is the server's; refresh the committed snapshot with `bd export -o .bd/issues.jsonl` in each commit that
-  changes issues or specs. Release notes (`scripts/release-notes.sh`) are built from that snapshot, so the commit a
-  release tag points at must carry an up-to-date export.
+- The database is the server's: commits that change issues or specs need no export. Release notes
+  (`scripts/release-notes.sh`) are built from the snapshot `.bd/issues.jsonl`, so only the commit a release tag points
+  at refreshes it with `bd export -o .bd/issues.jsonl`.
 
 ## Code
 
