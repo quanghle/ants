@@ -288,6 +288,10 @@ async fn a_github_user_under_the_policy_registers_a_device_and_holds_the_name() 
 
         let reason = refusal(&Device::new("bob").ask(&client, WAIT).await);
         assert!(reason.contains("octocat is bound to alice"), "{reason}");
+        let (_, h_js) = server.connect_as(&ants_test_support::human(), Role::Human).await;
+        crate::test_support::put_team(&h_js, "crew").await;
+        let reason = refusal(&Device::new("crew").ask(&client, WAIT).await);
+        assert!(reason.contains("the name crew is taken by a team"), "{reason}");
 
         let mut forged = Device::new("dave");
         forged.request.label = Some("other".into());

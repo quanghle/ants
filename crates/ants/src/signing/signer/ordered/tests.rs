@@ -1,5 +1,5 @@
-//! Tests of enrollment requests carrying an order: the signer signs for the machine an order names only, and on a
-//! leaf's machine renews the uplink to carry the ant.
+//! Tests of enrollment requests carrying an order: the signer signs for the machine an order names only, under no
+//! team's name, and on a leaf's machine renews the uplink to carry the ant.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -136,7 +136,7 @@ fn refusal(reply: Option<EnrollReply>) -> String {
 
 /// The signer signs a key on an admin's order to add the ant, or clone one as it, on the machine asking, with its live
 /// host credentials, and that one key only; it refuses an order no admin signed, one altered after signing, one for another machine or
-/// ant, and ignores a request not from a machine.
+/// ant, and one under the name of a team, and ignores a request not from a machine.
 #[tokio::test]
 async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
     let Some(server) = Server::start() else { return };
@@ -212,6 +212,16 @@ async fn the_signer_signs_on_an_admin_s_order_for_the_machine_asking_only() {
 
         let by_human = order("alice", &admin_creds, "m1", "dev-d", add());
         assert_eq!(ask(&client, &bob_creds, "dev-d", &second, &by_human, IGNORED).await, None, "no machine asks");
+
+        let (_, h_js) = server.connect_as(&bob, Role::Human).await;
+        crate::test_support::put_team(&h_js, "crew").await;
+        let named = order("alice", &admin_creds, "m1", "crew", add());
+        let refused = refusal(ask(&client, &host_creds, "crew", &second, &named, WAIT).await);
+        assert!(refused.contains("the name crew is taken by a team"), "an add order: {refused}");
+        let clone = AdminOp::Clone { new: p("crew"), settings: serde_json::Map::new() };
+        let clone = order("alice", &admin_creds, "m1", "dev-c", clone);
+        let refused = refusal(ask(&client, &host_creds, "crew", &second, &clone, WAIT).await);
+        assert!(refused.contains("the name crew is taken by a team"), "a clone order: {refused}");
     };
     tokio::select! {
         r = serving => panic!("the signer stopped: {r:?}"),

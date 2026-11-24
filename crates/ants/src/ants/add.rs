@@ -85,8 +85,20 @@ async fn check_name_free(conn: &Connection<'_>, name: &UserId) -> Result<()> {
             return Ok(());
         }
     };
-    crate::teams::check_no_team(&js, conn.js_domain, name).await?;
-    if let Ok(Ok(humans)) = tokio::time::timeout(WAIT, crate::people::humans::read(&js)).await
+    check_name_free_on(&js, conn.js_domain, name).await
+}
+
+/// Refuse `name` for a new ant when a team or a human of the bus of `js` holds it, as [`add`] does, `ants ant import`
+/// too: a team's name when the directory is read within a few seconds ([`crate::teams::check_no_team`]), a human's
+/// when the humans are.
+pub(crate) async fn check_name_free_on(
+    js: &async_nats::jetstream::Context,
+    js_domain: Option<&JsDomain>,
+    name: &UserId,
+) -> Result<()> {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+    crate::teams::check_no_team(js, js_domain, name).await?;
+    if let Ok(Ok(humans)) = tokio::time::timeout(WAIT, crate::people::humans::read(js)).await
         && humans.contains(name)
     {
         bail!("{name} is a human of the bus: an ant takes a name no human, ant or team holds");

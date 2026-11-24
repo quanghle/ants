@@ -331,7 +331,8 @@ impl Signer<'_> {
         if request.retire {
             return self.retire(approver, &request, report).await;
         }
-        let judgement = match self.judge(&request) {
+        let free = crate::teams::check_no_team(approver.hub(), approver.js_domain(), &request.name).await;
+        let judgement = match free.and_then(|()| self.judge(&request)) {
             Ok(judgement) => judgement,
             Err(e) => Judgement::Refuse(format!("{e:#}")),
         };
@@ -821,6 +822,13 @@ mod tests {
         let (taken, _) = signing(&server, &config, lead.ask("lead-a", "{}", &other)).await;
         let err = format!("{:#}", taken.unwrap_err());
         assert!(err.contains("the signer refused lead-a") && err.contains("holds credentials named lead-a"), "{err}");
+
+        // Nor under the name of a team.
+        let (_, h_js) = server.connect_as(&ants_test_support::human(), Role::Human).await;
+        crate::test_support::put_team(&h_js, "crew").await;
+        let (named, _) = signing(&server, &config, lead.ask("crew", "{}", &KeyPair::new_user())).await;
+        let err = format!("{:#}", named.unwrap_err());
+        assert!(err.contains("the name crew is taken by a team"), "{err}");
 
         // An ant added from a template never adds ants, whatever the signer's templates say.
         auth::sign_added(&team, &p("lead"), None, &KeyPair::new_user().public_key(), "worker", &p("boss")).unwrap();
