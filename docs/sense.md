@@ -575,8 +575,12 @@ interval to thirty minutes. An ant holds at most fifty active triggers, includin
 `sense_remind` or `sense_promise` call that would make more active is refused with `too_many`.
 Ordinary reminders expire after thirty days unless renewed; automatic commitment reminders remain valid until thirty
 days after the later of creation or renewal and the commitment's due time, so a distant due date cannot expire before
-firing. Command conditions run only under the ant's tool allow rules, in its workdir and environment, with a
-thirty-second timeout; stdout and stderr are discarded, and no approval request is raised for a disallowed one.
+firing. A command condition runs as the ant's harness would run it, in its workdir and environment, with a
+thirty-second timeout; stdout and stderr are discarded. On a harness that runs its tools unasked (a built-in harness or
+one of a native protocol, unless `tools = "ask"`, see [config.md](config.md#harnesses)) it runs unasked too, but for a trigger made on a thread narrowed
+to other tool rules or otherwise untrusted, where the ant's tool allow rules decide as under `tools = "ask"`: a command
+outside them is refused, with no approval request raised. A `sense_remind` call creating a command trigger or watcher
+whose command would be refused so is refused itself, naming the `execute:` rule in the ant's `allow` that lets it run.
 Untrusted threads (webhooks, sage reviews and unknown origins) cannot create or change command triggers. Outside checks
 use only `gh`, `bd` and `git`.
 

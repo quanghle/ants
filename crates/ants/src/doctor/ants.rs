@@ -423,8 +423,8 @@ fn check_ant_watchers(ant: &Ant) -> Option<Check> {
     let mut fix = Vec::new();
     if failing.iter().any(|w| w.error.as_deref().is_some_and(|e| e.contains("allow rules"))) {
         fix.push(format!(
-            "allow the watcher's command in the `allow` of ant {} in the config, as an `execute:` rule, or drop the \
-             watcher",
+            "allow the watcher's command in the `allow` of ant {} in the config, as an `execute:` rule, run the ant's \
+             tools unasked, or drop the watcher",
             ant.name
         ));
     }

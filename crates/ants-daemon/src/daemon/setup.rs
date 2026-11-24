@@ -306,6 +306,7 @@ pub(super) async fn services(bus: Bus<'_>, allow: Allowlist, machine: &str) -> R
     connect_mcp(&mut mcp, bus, &redactor).await?;
     if let Some(sense) = sense {
         mcp.with_dreams(sense.dreams());
+        mcp.with_triggers(crate::sense::TriggerCommands::of(config));
     }
     mcp.with_origins(crate::provider::origins::OriginStore::kv(sessions_kv.clone(), config.ant.clone()));
     if let Some(identity) = &identity {

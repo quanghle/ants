@@ -38,7 +38,7 @@ async fn changed_files_need_a_baseline_and_disappearance_counts_as_a_change() {
     let root = ants_test_support::scratch_dir("sense-file-baseline");
     let items = items().await;
     let env = BTreeMap::new();
-    let context = Context { workdir: &root, env: &env, allow: &[], items: &items, now: Utc::now() };
+    let context = Context { workdir: &root, env: &env, allow: &[], unasked: false, items: &items, now: Utc::now() };
     let condition = parse(json!({"kind":"file","path":"flag","event":"changed"}));
     let first = evaluate(&condition, None, &context).await.unwrap();
     assert!(!first.fired);
@@ -57,7 +57,7 @@ async fn command_checks_obey_allow_rules_and_use_the_workdir_and_environment() {
     let root = ants_test_support::scratch_dir("sense-command-condition");
     let items = items().await;
     let env = BTreeMap::from([("SENSE_TEST_FLAG".into(), "ready".into())]);
-    let mut context = Context { workdir: &root, env: &env, allow: &[], items: &items, now: Utc::now() };
+    let mut context = Context { workdir: &root, env: &env, allow: &[], unasked: false, items: &items, now: Utc::now() };
     let command = parse(json!({"kind":"command","command":"test \"$SENSE_TEST_FLAG\" = ready"}));
     assert!(evaluate(&command, None, &context).await.is_err());
     let allow = vec!["execute:test *".into()];
@@ -83,7 +83,7 @@ async fn a_command_timeout_does_not_leave_the_check_running() {
     let items = items().await;
     let env = BTreeMap::new();
     let allow = vec!["execute:sleep *".into()];
-    let context = Context { workdir: &root, env: &env, allow: &allow, items: &items, now: Utc::now() };
+    let context = Context { workdir: &root, env: &env, allow: &allow, unasked: false, items: &items, now: Utc::now() };
     let before = tokio::time::Instant::now();
     assert!(evaluate(&parse(json!({"kind":"command","command":"sleep 300"})), None, &context).await.is_err());
     assert_eq!(before.elapsed(), TIMEOUT);
@@ -96,7 +96,7 @@ async fn github_and_bd_checks_interpret_structured_results_without_saving_output
     let root = ants_test_support::scratch_dir("sense-external-condition");
     let items = items().await;
     let env = BTreeMap::from([("PATH".into(), root.to_str().unwrap().into())]);
-    let context = Context { workdir: &root, env: &env, allow: &[], items: &items, now: Utc::now() };
+    let context = Context { workdir: &root, env: &env, allow: &[], unasked: false, items: &items, now: Utc::now() };
     let stub = |name: &str, body: &str| {
         let path = root.join(name);
         ants_test_support::executable(&path, &format!("#!/bin/sh\n{body}\n"));
@@ -146,7 +146,7 @@ async fn git_checks_wait_until_the_commit_reaches_the_named_reference() {
     let commit = git(&["rev-parse", "HEAD"]);
     let items = items().await;
     let env = BTreeMap::new();
-    let context = Context { workdir: &root, env: &env, allow: &[], items: &items, now: Utc::now() };
+    let context = Context { workdir: &root, env: &env, allow: &[], unasked: false, items: &items, now: Utc::now() };
     let condition = parse(json!({"kind":"git","commit":commit,"reference":"waiting"}));
     assert!(!evaluate(&condition, None, &context).await.unwrap().fired);
     git(&["branch", "--force", "waiting", "HEAD"]);

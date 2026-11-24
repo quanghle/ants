@@ -21,8 +21,17 @@ pub(super) struct Context<'a> {
     pub workdir: &'a Path,
     pub env: &'a BTreeMap<String, String>,
     pub allow: &'a [String],
+    /// Whether a command runs unasked, as the ant's harness runs its tools, its allow rules not deciding.
+    pub unasked: bool,
     pub items: &'a dyn Items,
     pub now: DateTime<Utc>,
+}
+
+impl Context<'_> {
+    /// Whether a check may run `command`: unasked, or as the ant's tool allow rules permit.
+    pub(super) fn runs(&self, command: &str) -> bool {
+        self.unasked || allowed(command, self.allow)
+    }
 }
 
 pub(super) struct Observation {
@@ -104,7 +113,7 @@ async fn probe(condition: &Condition, previous: Option<&Value>, context: &Contex
         }
         Condition::Command { command } => {
             let command = arg(command, "command")?;
-            if !allowed(command, context.allow) {
+            if !context.runs(command) {
                 bail!("command trigger is outside the ant's tool allow rules");
             }
             let (program, args) = shell(command);

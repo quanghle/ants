@@ -26,7 +26,7 @@ mod workdirs;
 pub use ants_sense::home::DIR;
 pub use ants_sense::{CAPABILITIES, NAME};
 pub use dreams::{Dreams, Grounded, Refusal};
-pub(crate) use scheduler::{Daemon, Dreaming, Serving, TrailChecks, Watching};
+pub(crate) use scheduler::{Daemon, Dreaming, Serving, TrailChecks, TriggerCommands, Watching};
 pub use stores::{Hosting, Link, Retrying};
 
 use crate::daemon::Config;

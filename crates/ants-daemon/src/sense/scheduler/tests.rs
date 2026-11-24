@@ -44,6 +44,7 @@ fn settings() -> Settings {
         machine: "m1".into(),
         env: BTreeMap::new(),
         allow: Vec::new(),
+        unasked: false,
         dreams: None,
         workload: Arc::new(crate::colony::Workload::default()),
         trails: None,
