@@ -5,7 +5,7 @@ use agent_client_protocol::Error;
 use agent_client_protocol::v1::schema::{
     ContentBlock, PromptResponse, StopReason, ToolCall, ToolCallLocation, ToolCallStatus, ToolKind,
 };
-use github_copilot_sdk::{Attachment, MessageOptions};
+use copilot_sdk::{Attachment, MessageOptions};
 use serde_json::Value;
 
 use crate::harness::native::turn::{Reply, Tokens};

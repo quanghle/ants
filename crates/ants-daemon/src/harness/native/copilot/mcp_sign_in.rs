@@ -22,9 +22,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use copilot_sdk as sdk;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
-use github_copilot_sdk as sdk;
 use sdk::SessionEvent;
 use serde_json::{Value, json};
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};

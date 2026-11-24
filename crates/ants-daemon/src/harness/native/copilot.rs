@@ -22,11 +22,11 @@ use agent_client_protocol::v1::schema::{
 };
 use ants_proto::{McpServerState, McpStatus};
 use anyhow::bail;
-use github_copilot_sdk as sdk;
+use copilot_sdk as sdk;
 use sdk::session::Session;
 use sdk::subscription::{EventSubscription, RecvErrorKind};
 use sdk::{
-    DeliveryMode, ErrorKind, ProtocolErrorKind, ResumeSessionConfig, SessionConfig, SessionEvent, SessionId,
+    CreateSessionOptions, DeliveryMode, ErrorKind, ProtocolErrorKind, ResumeSessionOptions, SessionEvent, SessionId,
     SetModelOptions,
 };
 use serde_json::{Map, Value, json};
@@ -49,8 +49,8 @@ mod mcp_sign_in;
 mod permissions;
 mod turn;
 
-/// The release of github-copilot-sdk linked, as pinned in ants-daemon's Cargo.toml: the CLI must speak its protocol.
-const SDK_VERSION: &str = "1.0.29";
+/// The release of copilot-sdk linked, as pinned in ants-daemon's Cargo.toml: the CLI must speak its protocol.
+const SDK_VERSION: &str = "2.0.0";
 
 /// The CLI's own arguments, before the definition's: its JSON-RPC server on stdio, neither updating itself nor sending
 /// its client telemetry.
@@ -107,7 +107,7 @@ impl Shared {
             if let ErrorKind::Protocol(ProtocolErrorKind::VersionMismatch { server, min, max, .. }) = e.kind() {
                 let cli = self.client.get_status().await.map_or_else(|_| "copilot".to_owned(), |s| s.version);
                 return Err(failed(format!(
-                    "Copilot CLI {cli} speaks SDK protocol {server}, github-copilot-sdk {SDK_VERSION} linked into ants \
+                    "Copilot CLI {cli} speaks SDK protocol {server}, copilot-sdk {SDK_VERSION} linked into ants \
                      speaks {min} to {max}: run a Copilot CLI speaking protocol {max}"
                 )));
             }
@@ -146,35 +146,42 @@ macro_rules! settings {
             Value::Object(ants) => ants,
             _ => Map::new(),
         };
+        let (model, effort, args) = (shared.cli.model(), shared.cli.effort(), &shared.args);
         let mut config = $config
-            .with_streaming(true)
             .with_working_directory(open.cwd)
-            .with_enable_session_telemetry(false)
-            .with_permission_handler(shared.permissions($asking, &ants));
-        if let Some(model) = shared.cli.model() {
+            .with_events(|events| events.with_streaming(true))
+            .with_github(|github| github.with_telemetry_enabled(false))
+            .with_permissions(|permissions| permissions.with_on_request(shared.permissions($asking, &ants)))
+            .with_inference(|mut inference| {
+                if let Some(effort) = effort {
+                    inference = inference.with_reasoning_effort(effort);
+                }
+                if let Some(tier) = &args.context {
+                    inference = inference.with_context_tier(tier.clone());
+                }
+                inference
+            })
+            .with_tools(|mut tools| {
+                if let Some(available) = &args.available {
+                    tools = tools.with_available_tools(available.clone());
+                }
+                if let Some(excluded) = &args.excluded {
+                    tools = tools.with_excluded_tools(excluded.clone());
+                }
+                tools
+            });
+        if let Some(model) = model {
             config = config.with_model(model);
         }
-        if let Some(effort) = shared.cli.effort() {
-            config = config.with_reasoning_effort(effort);
-        }
-        if let Some(tier) = &shared.args.context {
-            config = config.with_context_tier(tier.clone());
-        }
-        if let Some(tools) = &shared.args.available {
-            config = config.with_available_tools(tools.clone());
-        }
-        if let Some(tools) = &shared.args.excluded {
-            config = config.with_excluded_tools(tools.clone());
-        }
         if let Some(skills) = open.skills {
-            config = config.with_skill_directories([skills.dir]);
+            config = config.with_skills(|own| own.with_directories([skills.dir]));
         }
         let mut servers = shared.mcp.clone();
         servers.extend(ants);
         if !servers.is_empty() {
             let servers = serde_json::from_value(Value::Object(servers))
                 .map_err(|e| failed(format!("the session's MCP servers: {e}")))?;
-            config = config.with_mcp_servers(servers);
+            config = config.with_mcp(|mcp| mcp.with_servers(servers));
         }
         config
     }};
@@ -209,10 +216,19 @@ impl Native for Copilot {
         let (process, stdin, stdout) = cli.spawn(SERVER_ARGS, None)?;
         let (closing, closed) = watch::channel(false);
         let cwd = std::env::current_dir().unwrap_or_default();
-        let entra =
-            cli.entra_client_id().map(|id| sdk::EntraAuthConfig { client_id: id.to_owned(), mats_app_name: None });
-        let client = sdk::Client::from_streams_with_entra(Output { inner: stdout, closing }, stdin, cwd, entra)
-            .map_err(|e| failed(format!("{}: {e}", cli.name())))?;
+        let entra = cli.entra_client_id().map(|id| sdk::EntraAuthConfig {
+            client_id: id.to_owned(),
+            mats_app_name: None,
+            one_auth_application_id: None,
+        });
+        let client = sdk::Client::from_streams_with_entra(
+            sdk::ClientMode::CodingAgent,
+            Output { inner: stdout, closing },
+            stdin,
+            cwd,
+            entra,
+        )
+        .map_err(|e| failed(format!("{}: {e}", cli.name())))?;
         let shared = Arc::new(Shared { cli, args, mcp, client, process: tokio::sync::Mutex::new(process), closed });
         let version = shared.handshake().await?;
         Ok(Self { shared, version })
@@ -239,7 +255,7 @@ impl Native for Copilot {
         let id = uuid::Uuid::new_v4().to_string();
         let sign_ins = open.sign_ins.clone();
         let asking = Asking::default();
-        let config = settings!(SessionConfig::default().with_session_id(id), shared, open, asking.clone());
+        let config = settings!(CreateSessionOptions::default().with_session_id(id), shared, open, asking.clone());
         let prepared = shared.client.prepare_session(config).map_err(failed)?;
         let events = prepared.subscribe();
         match prepared.start().await {
@@ -276,7 +292,7 @@ impl Copilot {
         let shared = &self.shared;
         let sign_ins = open.sign_ins.clone();
         let asking = Asking::default();
-        let config = settings!(ResumeSessionConfig::new(SessionId::from(id)), shared, open, asking.clone());
+        let config = settings!(ResumeSessionOptions::new(SessionId::from(id)), shared, open, asking.clone());
         let prepared = shared.client.prepare_resume_session(config).map_err(failed)?;
         let events = prepared.subscribe();
         match prepared.start().await {

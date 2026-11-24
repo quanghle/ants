@@ -22,7 +22,7 @@ Environment:
   ANTS_DEMO_NAME             Resource prefix (default: ants-demo)
   ANTS_DEMO_STATE            Dedicated state directory
                             (default: ~/.local/share/ants/container-demo)
-  ANTS_DEMO_COPILOT_VERSION  Copilot npm version for build (default: 1.0.112)
+  ANTS_DEMO_COPILOT_VERSION  Copilot npm version for build (default: 1.0.114)
 EOF
 }
 
@@ -106,7 +106,7 @@ build() (
     if [ -n "$apple" ]; then limits=(--cpus 4 --memory 8g); fi
     rt build ${limits[@]+"${limits[@]}"} --tag "$image" --file "$path/contrib/container-demo/Containerfile" \
         --build-arg "RUST_VERSION=$rust_version" --build-arg "NATS_VERSION=$nats_version" \
-        --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.112}" "$path"
+        --build-arg "COPILOT_VERSION=${ANTS_DEMO_COPILOT_VERSION:-1.0.114}" "$path"
 )
 
 logs() {

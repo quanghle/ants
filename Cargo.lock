@@ -226,10 +226,10 @@ dependencies = [
  "anyhow",
  "async-nats",
  "chrono",
+ "copilot-sdk",
  "crypto_secretbox",
  "data-encoding",
  "futures",
- "github-copilot-sdk",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -938,6 +938,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "copilot-sdk"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09f97498d3dd2efe0a32307da47d09b824a23c009f8afa169ed11e885355a0bc"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "flate2",
+ "futures-util",
+ "getrandom 0.4.3",
+ "http",
+ "indexmap 2.14.2",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tar",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zip",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1627,35 +1656,6 @@ checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
 dependencies = [
  "color_quant",
  "weezl",
-]
-
-[[package]]
-name = "github-copilot-sdk"
-version = "1.0.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96e5a172ad99087db12e4341f03723cd4ac63b9132047c49e8b2b355e58c1971"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "bytes",
- "flate2",
- "futures-util",
- "getrandom 0.4.3",
- "http",
- "indexmap 2.14.2",
- "parking_lot",
- "regex",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "tar",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "uuid",
- "windows-sys 0.61.2",
- "zip",
 ]
 
 [[package]]
