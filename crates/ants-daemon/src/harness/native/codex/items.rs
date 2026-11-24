@@ -1,5 +1,5 @@
 //! A codex turn's items and notifications as session updates: the reply and reasoning, tool calls with their titles,
-//! kinds and outcomes, the plan and the tokens the thread counts.
+//! kinds and outcomes, a compaction of the context, the plan and the tokens the thread counts.
 
 use std::path::Path;
 
@@ -67,11 +67,14 @@ pub(super) struct Turn {
     /// The thread's token totals before the turn, and the latest.
     before: Option<Tokens>,
     pub(super) latest: Option<Tokens>,
+    /// The context window's use and size, as last reported.
+    pub(super) context: Option<(u64, u64)>,
 }
 
 impl Turn {
     pub(super) fn new(id: &str, updates: Updates, before: Option<Tokens>) -> Self {
-        Self { id: id.to_owned(), updates, reply: Reply::default(), tools: ToolCalls::default(), before, latest: None }
+        let (reply, tools) = (Reply::default(), ToolCalls::default());
+        Self { id: id.to_owned(), updates, reply, tools, before, latest: None, context: None }
     }
 
     /// Handle a notification of the thread: the turn, once `turn/completed` ends it.
@@ -138,6 +141,7 @@ impl Turn {
         self.before.get_or_insert_with(|| total.minus(last));
         self.latest = Some(total);
         if let Some(window) = usage["modelContextWindow"].as_u64() {
+            self.context = Some((last.total, window));
             self.updates.usage(last.total, window, None);
         }
     }
@@ -170,7 +174,7 @@ fn location(cwd: Option<&str>, path: &str) -> ToolCallLocation {
 }
 
 /// The tool call an item of the thread is, if it is one: commands, file changes, MCP and dynamic tool calls, web
-/// searches, images and sub-agents.
+/// searches, images, sub-agents and compactions of the context.
 fn tool_call(item: &Value) -> Option<ToolCall> {
     let id = item["id"].as_str().unwrap_or_default().to_owned();
     let text = |key: &str| item[key].as_str().unwrap_or_default();
@@ -216,6 +220,7 @@ fn tool_call(item: &Value) -> Option<ToolCall> {
             .locations(vec![ToolCallLocation::new(text("path"))]),
         "imageGeneration" => ToolCall::new(id, "Image generation"),
         "collabAgentToolCall" => ToolCall::new(id, format!("Agent: {}", text("tool"))),
+        "contextCompaction" => ToolCall::new(id, "Compact the context"),
         _ => return None,
     };
     Some(call)

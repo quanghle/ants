@@ -247,9 +247,9 @@ ants spend dev-a --days 30     # one ant over 30 days
 ants spend --thread <thread>   # what each ant spent on one thread since a human's last message there, and in all
 ```
 
-Harnesses report differently: Claude and `copilot-sdk` report tokens and USD cost, Codex and native `antigravity`
-tokens only, and ACP `copilot` and `antigravity` neither, so a zero may mean nothing was reported rather than nothing
-spent.
+Harnesses report differently: Claude, `copilot-sdk` and native `codex` signed in with ChatGPT (codex's estimate)
+report tokens and USD cost, other Codex and native `antigravity` tokens only, and ACP `copilot` and `antigravity`
+neither, so a zero may mean nothing was reported rather than nothing spent.
 
 ## An ant's memories
 
