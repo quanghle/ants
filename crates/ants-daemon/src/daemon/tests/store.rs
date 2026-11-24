@@ -74,6 +74,10 @@ async fn a_reply_refused_by_a_full_store_is_sent_once_there_is_room_unprompted_a
         fill(&bus.js).await;
         gate.add_permits(1);
         until("the answer", || log.locked().answered.len() == 1).await;
+        eventually_every(Duration::from_millis(20), WAIT, "the reply is kept on the machine", async || {
+            bus.marks.answered.unsent(&held).await.is_some()
+        })
+        .await;
         // Several retries of the store pass.
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(stored().await.is_empty(), "no reply stored while full");
@@ -275,6 +279,15 @@ async fn a_joined_prompt_a_full_store_refuses_the_outcome_of_is_settled_once_the
         fill(&bus.js).await;
         gate.add_permits(1);
         until("the prompt to be cancelled", || log.locked().cancelled == 1).await;
+        eventually_every(
+            Duration::from_millis(20),
+            WAIT,
+            "the notice and the answer are kept on the machine",
+            async || {
+                bus.marks.answered.unsent(&first).await.is_some() && bus.marks.answered.given(&joining).await.is_some()
+            },
+        )
+        .await;
         // Several retries of the store pass.
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(stored_on(&bus, &to_human).await.is_empty(), "no escalation stored while full");
@@ -359,6 +372,10 @@ async fn reply_from_a_kept_answer_with_a_file(attached: Attached) -> Option<(Bus
         fill(&bus.js).await;
         gate.add_permits(1);
         until("the prompt to be cancelled", || log.locked().cancelled == 1).await;
+        eventually_every(Duration::from_millis(20), WAIT, "the answer is kept on the machine", async || {
+            bus.marks.answered.given(&held).await.is_some()
+        })
+        .await;
         // Several retries of the store pass.
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(stored_on(&bus, &to_dev_b).await.is_empty(), "no reply stored while full");

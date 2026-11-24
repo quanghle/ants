@@ -18,6 +18,8 @@ struct Uplinked {
     hub_js: jetstream::Context,
     /// The hub's JetStream through the leaf.
     through_leaf: jetstream::Context,
+    /// The human on the leaf.
+    local: async_nats::Client,
     outbox: jetstream::stream::Stream,
 }
 
@@ -53,9 +55,9 @@ impl Uplinked {
             })
             .await
             .unwrap();
-        let mut through_leaf = bus::jetstream(local, Some(&"hub".parse().unwrap()));
+        let mut through_leaf = bus::jetstream(local.clone(), Some(&"hub".parse().unwrap()));
         through_leaf.set_timeout(Duration::from_secs(1));
-        let uplinked = Self { leaf, uplink_port, dead_port, hub_js, through_leaf, outbox };
+        let uplinked = Self { leaf, uplink_port, dead_port, hub_js, through_leaf, local, outbox };
         uplinked.until(Link::Up).await;
         Some((hub, uplinked))
     }
@@ -81,15 +83,20 @@ impl Uplinked {
         self.until(link).await;
     }
 
+    /// Until the hub's JetStream answers through the leaf, or nobody does: an answer that is only late, as on a
+    /// loaded machine, tells neither.
     async fn until(&self, link: Link) {
-        let up = link == Link::Up;
-        timeout(WAIT * 2, async {
-            while bus::ensure_stream(&self.through_leaf).await.is_ok() != up {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+        use async_nats::RequestErrorKind::NoResponders;
+        let what = format!("the uplink is not {}", if link == Link::Up { "up" } else { "down" });
+        eventually_every(Duration::from_millis(100), WAIT * 2, &what, async || {
+            let info = self.local.request("$JS.hub.API.INFO", "".into());
+            match timeout(Duration::from_secs(1), info).await {
+                Ok(Ok(_)) => link == Link::Up && bus::ensure_stream(&self.through_leaf).await.is_ok(),
+                Ok(Err(e)) => link == Link::Down && e.kind() == NoResponders,
+                Err(_) => false,
             }
         })
-        .await
-        .unwrap_or_else(|_| panic!("the uplink is not {}", if up { "up" } else { "down" }));
+        .await;
     }
 
     async fn kept(&self) -> u64 {
@@ -103,6 +110,9 @@ impl Uplinked {
         self.hub_js.update_stream(&config).await.unwrap();
     }
 }
+
+/// An ack wait no test outlasts, however slow the machine: no message comes again for want of an ack.
+const NO_REDELIVERY: Duration = Duration::from_secs(3600);
 
 /// A duplicate window a test outwaits in three times as long.
 const SHORT_WINDOW: Duration = Duration::from_millis(300);
@@ -176,7 +186,9 @@ async fn dead_letter_kept_in_the_outbox(past_window: bool) {
     let t1 = ThreadId::generate();
     let ask = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "doomed a");
     let seq = bus::publish_json(&uplinked.hub_js, ask.subject(), &ask, None).await.unwrap();
-    let (progress_every, ack_wait) = (Duration::from_millis(200), ack_wait(Duration::from_millis(200)));
+    // Seconds, not tenths: a progress ack late on a slow machine would have the hub deliver the message in hand
+    // again, its last delivery, leaving none for the restarted daemon.
+    let (progress_every, ack_wait) = (Duration::from_secs(1), ack_wait(Duration::from_secs(1)));
     let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
 
     let pool = Pool::new(launch.clone(), SessionStore::memory(), 2, IDLE);
@@ -282,9 +294,6 @@ enum UplinkBack {
 async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     let Some((hub, uplinked)) = Uplinked::start().await else { return };
     let past_window = matches!(back, UplinkBack::Restarted { past_window: true, .. });
-    if past_window {
-        uplinked.shorten_duplicate_window().await;
-    }
     let (bus, _) = Bus::connect(hub, &uplinked.url(), Some(&"hub".parse().unwrap())).await;
     let (launch, log, gate) = fake::launch();
     let t1 = ThreadId::generate();
@@ -294,7 +303,7 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
     let seq = bus::publish_json(&uplinked.hub_js, doomed.subject(), &doomed, None).await.unwrap();
     let progress_every = Duration::from_millis(200);
     // Live, the hub still waits for the ack of the extra delivery when the uplink is back.
-    let ack_wait = if back == UplinkBack::Live { WAIT * 3 } else { ack_wait(progress_every) };
+    let ack_wait = if back == UplinkBack::Live { NO_REDELIVERY } else { ack_wait(progress_every) };
     let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
 
     // The doomed message's five attempts never finished; the held one, ahead of it on the thread, had one.
@@ -401,6 +410,8 @@ async fn dead_letter_kept_on_the_extra_delivery(back: UplinkBack) {
             assert!(notices().await.is_empty(), "the watcher sends no notice for the outbox copy");
         }
         if past_window {
+            // Only now: until here the window is what drops the second of the two copies, however slow the machine.
+            uplinked.shorten_duplicate_window().await;
             tokio::time::sleep(SHORT_WINDOW * 3).await;
         }
 
@@ -440,7 +451,7 @@ async fn a_message_in_hand_waits_out_the_hub_out_of_reach_spending_no_attempt() 
     bus::publish_json(&uplinked.hub_js, hold.subject(), &hold, None).await.unwrap();
     bus::publish_json(&uplinked.hub_js, next.subject(), &next, None).await.unwrap();
     // No redelivery for want of an ack within the test: any is the daemon's own.
-    let (progress_every, ack_wait) = (Duration::from_millis(200), WAIT * 3);
+    let (progress_every, ack_wait) = (Duration::from_millis(200), NO_REDELIVERY);
     let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
 
     let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
@@ -450,6 +461,11 @@ async fn a_message_in_hand_waits_out_the_hub_out_of_reach_spending_no_attempt() 
         uplinked.switch(Link::Down).await;
         gate.add_permits(1);
         until("the answer", || log.locked().answered.len() == 1).await;
+        // Noted right before its ack, which fails while the uplink is down, however long the note took to write.
+        eventually_every(Duration::from_millis(20), WAIT, "the reply is not noted as stored", async || {
+            bus.marks.answered.has(&hold).await
+        })
+        .await;
         // Longer than MAX_ATTEMPTS retries of the store, 300 ms apart in the tests.
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(log.locked().prompted, 1, "the next message is not prompted while the hub is out of reach");
@@ -581,7 +597,7 @@ async fn junk_whose_dead_letter_is_kept_in_the_outbox_is_terminated_once_the_upl
     let seq = uplinked.hub_js.publish(junk, "not an envelope".into()).await.unwrap().await.unwrap().sequence;
     store::fill(&uplinked.hub_js).await;
     // No redelivery for want of an ack within the test: any spends a delivery.
-    let (progress_every, ack_wait) = (Duration::from_millis(200), WAIT * 3);
+    let (progress_every, ack_wait) = (Duration::from_millis(200), NO_REDELIVERY);
     let stream = uplinked.hub_js.get_stream(ants_proto::STREAM).await.unwrap();
 
     let ctrl_c = Arc::new(Semaphore::new(0));
