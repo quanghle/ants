@@ -25,21 +25,35 @@ pub struct Registration {
     held: Option<watch::Receiver<Option<u64>>>,
 }
 
-/// List `entry` in the colony and keep it fresh, with its `workload`, until the registration ends.
+/// List `entry` in the colony and keep it fresh, with its `workload`, until the registration ends. With `open`, a
+/// server taking no credentials, a failed heartbeat creates the buckets held in memory again ([`Recreate`]).
 pub async fn register(
     js: &jetstream::Context,
     mut entry: ColonyEntry,
     workload: Arc<Workload>,
+    open: bool,
 ) -> Result<Registration> {
     let kv = bus::ensure_colony(js, COLONY_TTL).await?;
     entry.heartbeat_at = Utc::now();
-    Registration::start_with(kv, entry, COLONY_HEARTBEAT, Some(workload)).await
+    Registration::start_with(kv, entry, COLONY_HEARTBEAT, Some(workload), recreate_when(open, js)).await
+}
+
+/// Over a server taking no credentials, where a daemon may create buckets: the JetStream to create the buckets held in
+/// memory over ([`crate::hub::ensure_in_memory`]) when a heartbeat fails, as after a restart of nats-server drops them,
+/// before putting the entry again. Ant credentials may not create them, so a daemon holding some has none.
+pub type Recreate = Option<jetstream::Context>;
+
+/// What a daemon connected over `js` recreates the buckets held in memory with ([`Recreate`]): only with `open`.
+fn recreate_when(open: bool, js: &jetstream::Context) -> Recreate {
+    open.then(|| js.clone())
 }
 
 /// Keep `entry`, of an ant whose serving failed ([`ColonyEntry::unserved`]), in the colony: put it now and again every
 /// `every`, so it neither turns stale nor expires while the daemon waits to serve the ant again. Never returns; a put
-/// that fails is warned of and tried at the next beat.
-pub async fn stand_unserved(js: &jetstream::Context, mut entry: ColonyEntry, every: Duration) {
+/// that fails is warned of and tried at the next beat, after creating the buckets held in memory again with `open`
+/// ([`Recreate`]).
+pub async fn stand_unserved(js: &jetstream::Context, mut entry: ColonyEntry, every: Duration, open: bool) {
+    let recreate = recreate_when(open, js);
     let mut ticks = ticker(every);
     let mut kv = None;
     loop {
@@ -52,7 +66,7 @@ pub async fn stand_unserved(js: &jetstream::Context, mut entry: ColonyEntry, eve
         }
         if let Some(kv) = &kv {
             entry.heartbeat_at = Utc::now();
-            if let Err(e) = put(kv, &entry).await {
+            if let Err(e) = beat(kv, &entry, recreate.as_ref()).await {
                 beat_failed(&entry, e);
             }
         }
@@ -194,9 +208,10 @@ pub async fn hold(
     entry: ColonyEntry,
     revision: u64,
     workload: Arc<Workload>,
+    open: bool,
 ) -> Result<Registration> {
     let kv = bus::ensure_colony(js, COLONY_TTL).await?;
-    Registration::hold(kv, entry, revision, COLONY_HEARTBEAT, Some(workload)).await
+    Registration::hold(kv, entry, revision, COLONY_HEARTBEAT, Some(workload), recreate_when(open, js)).await
 }
 
 /// Put `entry` over `revision`. When another write came in between: put it again if it is gone or ours, and give the
@@ -251,6 +266,7 @@ async fn keep_held(
     workload: Option<Arc<Workload>>,
     held: watch::Sender<Option<u64>>,
     mut changes: Option<relayed::Watch>,
+    recreate: Recreate,
 ) {
     let Some(mut revision) = *held.borrow() else { return };
     let mut ticks = ticker(every);
@@ -274,7 +290,10 @@ async fn keep_held(
                 entry.heartbeat_at = Utc::now();
             }
         }
-        match renew(&kv, &entry, revision).await {
+        match match renew(&kv, &entry, revision).await {
+            Err(e) if recreated(recreate.as_ref(), &e).await => renew(&kv, &entry, revision).await,
+            renewed => renewed,
+        } {
             Ok(Some(put)) => {
                 revision = put;
                 held.send_replace(Some(put));
@@ -308,16 +327,18 @@ impl Registration {
     /// Put `entry` now, then again every `every`. The first put must succeed; later failures are logged and retried
     /// on the next beat, so a brief outage costs nothing as long as it is shorter than the bucket's max age.
     pub async fn start(kv: kv::Store, entry: ColonyEntry, every: Duration) -> Result<Self> {
-        Self::start_with(kv, entry, every, None).await
+        Self::start_with(kv, entry, every, None, None).await
     }
 
     /// Like [`Registration::start`], with `workload` stamped on every put, and an extra put as soon as the ant
-    /// turns idle or working.
+    /// turns idle or working. A failed put creates the buckets held in memory again with `recreate` and is tried
+    /// once more.
     pub async fn start_with(
         kv: kv::Store,
         mut entry: ColonyEntry,
         every: Duration,
         workload: Option<Arc<Workload>>,
+        recreate: Recreate,
     ) -> Result<Self> {
         let key = entry.key().to_owned();
         if let Some(workload) = &workload {
@@ -330,7 +351,7 @@ impl Registration {
             ticks.tick().await;
             loop {
                 due(&mut ticks, workload.as_deref(), &mut entry).await;
-                if let Err(e) = put(&beat_kv, &entry).await {
+                if let Err(e) = beat(&beat_kv, &entry, recreate.as_ref()).await {
                     beat_failed(&entry, e);
                 }
             }
@@ -340,13 +361,15 @@ impl Registration {
 
     /// Like [`Registration::start_with`], but every put expects the revision put before, starting at `revision`, and
     /// the registration is lost as soon as another daemon puts the entry: on its watch of the entry, or at the next
-    /// heartbeat. An entry deleted or expired under it is put again if no other daemon got there first.
+    /// heartbeat. An entry deleted or expired under it is put again if no other daemon got there first, also in a
+    /// bucket that `recreate` created again.
     pub async fn hold(
         kv: kv::Store,
         mut entry: ColonyEntry,
         revision: u64,
         every: Duration,
         workload: Option<Arc<Workload>>,
+        recreate: Recreate,
     ) -> Result<Self> {
         let key = entry.key().to_owned();
         let changes = match kv.guarded_watch(&key).await {
@@ -362,7 +385,7 @@ impl Registration {
         entry.heartbeat_at = Utc::now();
         let first = renew(&kv, &entry, revision).await.with_context(|| format!("registering {key} in the colony"))?;
         let (held, watching) = watch::channel(first);
-        let heartbeat = tokio::spawn(keep_held(kv.clone(), entry, every, workload, held, changes));
+        let heartbeat = tokio::spawn(keep_held(kv.clone(), entry, every, workload, held, changes, recreate));
         Ok(Self { kv, key, heartbeat, held: Some(watching) })
     }
 
@@ -416,6 +439,28 @@ fn ticker(every: Duration) -> tokio::time::Interval {
 fn beat_failed(entry: &ColonyEntry, e: anyhow::Error) {
     let e = bus::explain_full(e, &ants_proto::subject::kv(ants_proto::COLONY_BUCKET, entry.key()));
     tracing::warn!(ant = %entry.ant, error = format!("{e:#}"), "colony heartbeat");
+}
+
+/// After a write failed with `e`: when `recreate` is given ([`Recreate`]), create the buckets held in memory, and
+/// whether that worked, so the write is worth trying once more. A failed create is logged quietly.
+async fn recreated(recreate: Option<&jetstream::Context>, e: &anyhow::Error) -> bool {
+    let Some(js) = recreate else { return false };
+    tracing::debug!(error = format!("{e:#}"), "colony heartbeat; creating the buckets held in memory");
+    match Box::pin(crate::hub::ensure_in_memory(js)).await {
+        Ok(()) => true,
+        Err(created) => {
+            tracing::debug!(error = format!("{created:#}"), "creating the buckets held in memory");
+            false
+        }
+    }
+}
+
+/// Put `entry`, once more after [`recreated`] when the put fails.
+async fn beat(kv: &kv::Store, entry: &ColonyEntry, recreate: Option<&jetstream::Context>) -> Result<()> {
+    match put(kv, entry).await {
+        Err(e) if recreated(recreate, &e).await => put(kv, entry).await,
+        put => put,
+    }
 }
 
 async fn put(kv: &kv::Store, entry: &ColonyEntry) -> Result<()> {

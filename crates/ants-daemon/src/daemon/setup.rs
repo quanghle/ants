@@ -647,19 +647,21 @@ async fn open_messages(
 }
 
 /// Put the ant on the colony, holding its entry from the revision claimed, if any, its first entry showing the profile
-/// `sense`, its provider if sense, holds of it.
+/// `sense`, its provider if sense, holds of it. With `open`, a server taking no credentials, its heartbeats create the
+/// buckets held in memory again when nats-server lost them ([`colony::Recreate`]).
 pub(super) async fn enter_colony(
     js: &jetstream::Context,
     entry: ants_proto::ColonyEntry,
     claimed: Option<u64>,
     workload: &std::sync::Arc<colony::Workload>,
     sense: Option<&crate::sense::Sense>,
+    open: bool,
 ) -> Result<colony::Registration> {
     if let Some(sense) = sense {
         sense.first_profile(&entry.ant, workload).await;
     }
     Ok(match claimed {
-        Some(revision) => colony::hold(js, entry, revision, workload.clone()).await?,
-        None => colony::register(js, entry, workload.clone()).await?,
+        Some(revision) => colony::hold(js, entry, revision, workload.clone(), open).await?,
+        None => colony::register(js, entry, workload.clone(), open).await?,
     })
 }
