@@ -1,5 +1,5 @@
 //! Tests of providers' wake requests: messages on the ant's threads or a new one, repeats sent once, retries under the
-//! same id, refusals, the hourly cap, and only ants served here woken.
+//! same id, refusals, the hourly cap, only ants served here woken, and a wake replacing another withdrawing it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -70,7 +70,13 @@ impl Setup {
 }
 
 fn request(ant: &UserId, thread: Option<&ThreadId>, id: &str) -> WakeRequest {
-    WakeRequest { ant: ant.clone(), thread: thread.cloned(), text: "standup in 5".to_owned(), id: id.to_owned() }
+    WakeRequest {
+        ant: ant.clone(),
+        thread: thread.cloned(),
+        text: "standup in 5".to_owned(),
+        id: id.to_owned(),
+        replaces: None,
+    }
 }
 
 #[tokio::test]
@@ -200,4 +206,20 @@ async fn a_provider_wakes_only_the_ants_served_here() {
     assert_eq!(setup.sent()[0].thread_id, woken.thread);
     drop(serving);
     assert_eq!(host.wake(request(&ant, None, "r2")).await.unwrap_err().code, RpcError::UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn a_wake_replacing_another_withdraws_its_message_while_it_waits() {
+    let Some(setup) = Setup::start().await else { return };
+    let ant = p("wake-replaces");
+    let waker = setup.waker(&ant).await;
+    waker.wake("clock", request(&ant, None, "w:1")).await.unwrap();
+    let replacing = WakeRequest { replaces: Some("w:1".to_owned()), ..request(&ant, None, "w:2") };
+    waker.wake("clock", replacing).await.unwrap();
+    let [first, second] = setup.sent().try_into().unwrap();
+    let marks = bus::ensure_attempts(&setup.js, None, &ant).await.unwrap();
+    let found = crate::delivery::attempts::withdraw(&marks, &ant, &first.id, &p("someone"), None).await.unwrap();
+    assert!(matches!(&found, Some(ants_proto::MessageMark::Withdrawn { by, .. }) if by == &ant), "{found:?}");
+    let found = crate::delivery::attempts::withdraw(&marks, &ant, &second.id, &ant, None).await.unwrap();
+    assert_eq!(found, None, "the replacing wake waits on");
 }

@@ -107,7 +107,7 @@ fn positive(name: &str, number: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn text(name: &str, value: &str) -> Result<(), String> {
+pub(super) fn text(name: &str, value: &str) -> Result<(), String> {
     if value.trim().is_empty() || value.len() > MAX_CONDITION_BYTES || value.chars().any(char::is_control) {
         return Err(format!(
             "condition.{name} must be a nonempty single-line string up to {MAX_CONDITION_BYTES} bytes."

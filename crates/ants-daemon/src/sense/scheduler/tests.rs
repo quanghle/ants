@@ -1,5 +1,5 @@
 //! Tests of sense's durable schedule in the daemon: sleeping and waking, dormant ants, retried deliveries, takeovers,
-//! source threads, maintenance runs and the published profile.
+//! source threads, maintenance runs, the published profile and watchers.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -19,6 +19,7 @@ use crate::sync::MutexExt as _;
 
 mod dreaming;
 mod probes;
+mod watchers;
 
 const DAY: Duration = Duration::from_hours(24);
 
@@ -45,6 +46,10 @@ fn settings() -> Settings {
         allow: Vec::new(),
         dreams: None,
         workload: Arc::new(crate::colony::Workload::default()),
+        trails: None,
+        redactor: crate::secrets::redact::Redactor::off(),
+        home: None,
+        outputs: Mutex::default(),
     }
 }
 

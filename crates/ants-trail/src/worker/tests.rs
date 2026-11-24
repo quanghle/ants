@@ -10,6 +10,11 @@ use crate::protocol::{Call, Event, Limits, Request, Response};
 const META: &str = "meta = {\"name\": \"t\", \"description\": \"a test\", \"phases\": []}\n";
 
 fn start(script: &str, limits: Limits) -> Response {
+    start_as(script, limits, false)
+}
+
+/// Starts `script`, as a watcher's with `watcher`.
+fn start_as(script: &str, limits: Limits, watcher: bool) -> Response {
     let request = Request::Start {
         script: format!("{META}{script}"),
         entry: None,
@@ -17,6 +22,7 @@ fn start(script: &str, limits: Limits) -> Response {
         limits,
         clock: 1_700_000_000,
         seed: 7,
+        watcher,
     };
     serve(&serde_json::to_string(&request).unwrap())
 }
@@ -30,13 +36,16 @@ fn enter(script: &str, entry: &str, state: Value) -> Response {
         limits: Limits::default(),
         clock: 1_700_000_000,
         seed: 7,
+        watcher: false,
     };
     serve(&serde_json::to_string(&request).unwrap())
 }
 
 fn resume_with(response: &Response, answers: &[(u32, CallAnswer)], limits: Limits, steps: u32) -> Response {
     let Response::Suspended { snapshot, .. } = response else { panic!("not suspended: {response:?}") };
-    let request = Request::Resume { snapshot: snapshot.clone(), answers: answers.to_vec(), limits, seed: 7, steps };
+    let (snapshot, answers) = (snapshot.clone(), answers.to_vec());
+    let watcher = calls(response).iter().any(|call| call.function.watches());
+    let request = Request::Resume { snapshot, answers, limits, seed: 7, steps, watcher };
     serve(&serde_json::to_string(&request).unwrap())
 }
 
@@ -401,6 +410,62 @@ fn an_entry_the_meta_does_not_list_is_refused() {
         assert!(
             matches!(&response, Response::Refused { error } if error.contains(&format!("no waypoint {entry:?}"))),
             "{response:?}"
+        );
+    }
+}
+
+#[test]
+fn a_watchers_reads_suspend_it_and_their_answers_resume_it() {
+    let script = r#"
+async def main():
+    ran = await command("pr-blocked 7")
+    text = await read_file("STATUS")
+    issue = await bd("show", "ants-1")
+    kept = await thread()
+    return {"output": ran["stdout"] + text + issue["status"] + kept["register"], "done": ran["status"] == 3}
+
+await main()
+"#;
+    let first = start_as(script, Limits::default(), true);
+    let made = calls(&first);
+    assert_eq!(made.len(), 1);
+    assert_eq!((made[0].function, &made[0].args), (TrailFunction::Command, &json!({"command": "pr-blocked 7"})));
+    let answer = |value| [(made[0].call, CallAnswer::Ok(value))];
+    let second = resume(&first, &answer(json!({"status": 3, "stdout": "ready\n"})), 0);
+    let made = calls(&second);
+    assert_eq!((made[0].function, &made[0].args), (TrailFunction::ReadFile, &json!({"path": "STATUS"})));
+    let third = resume(&second, &[(made[0].call, CallAnswer::Ok(json!("green ")))], 0);
+    let made = calls(&third);
+    assert_eq!((made[0].function, &made[0].args), (TrailFunction::Bd, &json!({"args": ["show", "ants-1"]})));
+    let fourth = resume(&third, &[(made[0].call, CallAnswer::Ok(json!({"status": "open"})))], 0);
+    let made = calls(&fourth);
+    assert_eq!((made[0].function, &made[0].args), (TrailFunction::Thread, &json!({})));
+    let done = resume(&fourth, &[(made[0].call, CallAnswer::Ok(json!({"register": " goal"})))], 0);
+    assert_eq!(result(done), json!({"output": "ready\ngreen open goal", "done": true}));
+}
+
+#[test]
+fn a_watcher_prompts_no_ant_and_writes_no_note_and_a_run_reads_nothing() {
+    let refused = |script: &str, watcher: bool| match start_as(script, Limits::default(), watcher) {
+        Response::Failed { error, .. } => error,
+        other => panic!("not refused: {other:?}"),
+    };
+    for (call, why) in [
+        ("await agent('look')", "agent() would prompt an ant or start a run, which a watcher may not"),
+        ("await human('ok?')", "human() would prompt an ant or start a run"),
+        ("await trail('other')", "trail() would prompt an ant or start a run"),
+        ("await goto(at='b')", "goto() would prompt an ant or start a run"),
+        ("phase('one')", "phase() writes a note of the thread, which a watcher may not"),
+        ("log('two')", "log() writes a note of the thread"),
+    ] {
+        let error = refused(call, true);
+        assert!(error.contains(why), "{call}: {error}");
+    }
+    for call in ["await command('true')", "await read_file('a')", "await bd('ready')", "await thread()"] {
+        let error = refused(call, false);
+        assert!(
+            error.contains("is a watcher's call: only a watcher's script reads the ant's state"),
+            "{call}: {error}"
         );
     }
 }

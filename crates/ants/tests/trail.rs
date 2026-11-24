@@ -399,6 +399,7 @@ async fn a_worker_past_its_allocator_s_cap_is_told_out_of_memory() {
         limits,
         clock: 0,
         seed: 0,
+        watcher: false,
     };
     let response = worker().call(&request, std::time::Duration::from_secs(30)).await;
     assert_eq!(response.unwrap_err(), ants_trail::WorkerError::OutOfMemory, "the worker's exit status tells it");
@@ -604,4 +605,35 @@ async fn a_runs_args_nest_at_most_max_depth_deep() {
 
     let refused = Run::new(&format!("{META}args\n"), None, nested(MAX_DEPTH + 1), Limits::default());
     assert!(matches!(&refused, Err(RunError::Args(why)) if why == TOO_DEEP), "{refused:?}");
+}
+
+#[tokio::test]
+async fn a_watcher_s_check_answers_its_reads_to_the_script_s_result() {
+    let script = format!(
+        "{META}{}",
+        r#"
+checks = await parallel(command("gh pr checks 7"), bd("show", args["issue"]))
+note = await read_file("NOTES.md")
+{"output": f"{checks[0]['stdout']} {checks[1]['status']} {note}", "done": checks[1]["status"] == "closed"}
+"#
+    );
+    let reads = std::sync::Mutex::new(Vec::new());
+    let read = async |function: TrailFunction, args: Value| {
+        reads.lock().unwrap().push((function, args));
+        CallAnswer::Ok(match function {
+            TrailFunction::Command => json!({"status": 0, "stdout": "pass"}),
+            TrailFunction::Bd => json!({"status": "closed"}),
+            _ => json!("notes"),
+        })
+    };
+    let result = ants_trail::watch::check(&worker(), &script, json!({"issue": "ants-1"}), read, async || ()).await;
+    assert_eq!(result.unwrap(), json!({"output": "pass closed notes", "done": true}));
+    let reads = reads.into_inner().unwrap();
+    assert_eq!(reads.len(), 3, "{reads:?}");
+    assert_eq!(reads[1], (TrailFunction::Bd, json!({"args": ["show", "ants-1"]})));
+
+    let prompting = format!("{META}await agent(\"go\")\n");
+    let read = async |_: TrailFunction, _: Value| CallAnswer::Ok(json!(null));
+    let refused = ants_trail::watch::check(&worker(), &prompting, json!(null), read, async || ()).await;
+    assert!(refused.unwrap_err().contains("agent() would prompt an ant or start a run, which a watcher may not"));
 }

@@ -228,7 +228,9 @@ Calls and events:
   - `session_lost`;
   - `session_rebuilt` (`reason`: `lost` or `overflow`).
 - Events are sent in order per ant and at least once; a repeat carries the same `id`. A provider acks a kind it does not know.
-- A wake request's `id` makes it idempotent; it names a thread, or none for a new one.
+- A wake request's `id` makes it idempotent; it names a thread, or none for a new one. Its optional `replaces` names
+  the `id` of an earlier request of the provider's, whose message is withdrawn from the ant's queue unless taken up
+  already.
 
 | Error code | Meaning |
 |---|---|
@@ -300,6 +302,7 @@ A provider's `wake` becomes a message to the ant, as a scheduled reminder or a t
 - **Who:** the ant's daemon serves the request only for an ant it serves whose provider is the caller. An ant this process does not serve (a standby, another machine's, or none) is `-32003`; a `thread` with no session of the ant is `-32004`; another provider's ant, an empty `id`, and blank text or text over 256 KiB are `-32602`.
 - **The message:** sent as the ant to its own inbox (`ants.inbox.<ant>.<ant>`, which the ant's credentials publish already) with `provider` set to the provider's name, on the named thread or a new one, carrying the thread's recorded owner. Like a `handoff` it waits its turn rather than steering a running prompt, and the answer goes to the thread's owner, else to the default human. `provider` holds only on a message from the ant to itself: the CLI and the thread's `origin` ([calls and events](#provider-protocol)) ignore it on any other. `ants thread show` and `ants chat` mark it `wake from <provider>`.
 - **Idempotency:** the daemon records `<ant>.wake.<hash>` in `ants_attempts`, the hash a SHA-256 of provider and `id`, holding the thread and message id, before sending; a repeat within 7 days returns the same `{thread}` without sending again. A record not yet marked sent is sent again under the same message id, which the stream's 24 h duplicate window drops if it was stored. The record lives on the hub, so it outlasts restarts and a standby's takeover.
+- **Replacing:** a request with `replaces`, the `id` of an earlier request of the provider's, withdraws that request's message once its own is sent, as `ants withdraw` would, unless the ant took it up already: a watcher's wake replaces its previous one ([sense.md](sense.md#watchers)).
 - **Turns:** a wake carries a fresh turn budget and spends none of the thread's: it is prompted on a thread out of turns without an escalation, and its answer goes to a human, spending nothing. Spending caps, narrowed tools and holds still apply, and the daemon takes at most 60 new wakes per ant per hour (`-32003` past that; repeats are free).
 
 ### External providers

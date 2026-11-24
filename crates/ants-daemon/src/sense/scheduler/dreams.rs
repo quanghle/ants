@@ -281,7 +281,7 @@ async fn wake(items: &dyn Items, host: &dyn Host, ant: &UserId, dream: &Dream, t
     let text = dream::packet(items, dream, &Reader::Ant(ant.clone()), threads, &ColonyTrails::UNREAD).await?;
     // The beginning names the dream apart from a dream of the same number of another sense identity of the ant.
     let id = format!("dream-{}-{}", dream.number, dream.at.timestamp());
-    let woken = host.wake(WakeRequest { ant: ant.clone(), thread: None, text, id }).await?;
+    let woken = host.wake(WakeRequest { ant: ant.clone(), thread: None, text, id, replaces: None }).await?;
     dream::woken(items, dream.number, &woken.thread).await?;
     Ok(())
 }

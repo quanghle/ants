@@ -14,7 +14,8 @@ const MAX_WAYPOINTS: usize = 32;
 const PRELUDE_NAME: &str = "<prelude>";
 
 /// The trail API, defined before the script runs. The `__ants_*` externals are answered by the worker: agent, human,
-/// trail and goto suspend the run on a future, phase and log return at once.
+/// trail and goto suspend the run on a future, phase and log return at once; a watcher's command, read_file, bd and
+/// thread suspend it too, and only a watcher's script may call them ([`ants_proto::TrailFunction::watches`]).
 const PRELUDE: &str = r#"import asyncio
 
 async def agent(prompt, ant=None, capability=None, team=None, schema=None, label=None, tips=None):
@@ -31,6 +32,19 @@ async def trail(name, args=None):
 async def goto(trail=None, at=None, state=None):
     request = {"trail": trail, "at": at, "state": state}
     return await __ants_goto({k: v for k, v in request.items() if v is not None})
+
+async def command(command):
+    return await __ants_command({"command": command})
+
+async def read_file(path):
+    return await __ants_read_file({"path": path})
+
+async def bd(*args):
+    return await __ants_bd({"args": [str(arg) for arg in args]})
+
+async def thread(id=None):
+    request = {"id": id}
+    return await __ants_thread({k: v for k, v in request.items() if v is not None})
 
 def phase(title):
     __ants_phase(str(title))
@@ -52,8 +66,19 @@ def pipeline(items, *stages):
 "#;
 
 /// The script's inputs, in this order.
-pub(crate) const INPUTS: [&str; 7] =
-    ["args", "__ants_agent", "__ants_human", "__ants_trail", "__ants_goto", "__ants_phase", "__ants_log"];
+pub(crate) const INPUTS: [&str; 11] = [
+    "args",
+    "__ants_agent",
+    "__ants_human",
+    "__ants_trail",
+    "__ants_goto",
+    "__ants_phase",
+    "__ants_log",
+    "__ants_command",
+    "__ants_read_file",
+    "__ants_bd",
+    "__ants_thread",
+];
 
 /// A trail's description, the literal `meta = {"name": …, "description": …, "phases": […], "waypoints": […]}` it
 /// starts with, `"waypoints"` optional.

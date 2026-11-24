@@ -383,6 +383,59 @@ fn check_sense_chain(ant: &Ant, status: &ChainStatus) -> Check {
     Check::fail(check, detail, vec![fix])
 }
 
+/// The checks in a row a watcher fails before `ants doctor` warns of it.
+const FAILING_CHECKS: u64 = 3;
+
+/// The watchers of each ant, as the daemon serving it last checked them ([`ants_sense::remind::watch::WatcherStatus`]),
+/// kept in the ant's home: warns of those whose checks keep failing. Nothing for an ant that never had a watcher
+/// checked.
+pub(super) fn check_watchers(ants: &[Ant]) -> Vec<Check> {
+    ants.iter().filter_map(check_ant_watchers).collect()
+}
+
+fn check_ant_watchers(ant: &Ant) -> Option<Check> {
+    let home = ant_home(ant)?;
+    let check = format!("ant {} watchers", ant.name);
+    let status = match ants_sense::remind::watch::read_status(&home) {
+        Ok(status) => status?,
+        Err(e) => {
+            let file = ants_sense::home::Home::new(&home).watchers();
+            return Some(Check::warn(check, format!("{}: {e}", file.display()), Vec::new()));
+        }
+    };
+    let checked = status.checked_at.format("%Y-%m-%d %H:%M:%S UTC");
+    let failing: Vec<_> = status.watchers.iter().filter(|w| w.failed_checks >= FAILING_CHECKS).collect();
+    if failing.is_empty() {
+        let detail = format!("{} active, none failing its checks, as checked at {checked}", status.watchers.len());
+        return Some(Check::ok(check, detail));
+    }
+    let listed = failing
+        .iter()
+        .map(|w| {
+            let why = w.error.as_deref().unwrap_or("unknown");
+            format!(
+                "{} ({}, running {}) failed {} checks in a row, the latest because {why}",
+                w.id, w.title, w.runs, w.failed_checks
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut fix = Vec::new();
+    if failing.iter().any(|w| w.error.as_deref().is_some_and(|e| e.contains("allow rules"))) {
+        fix.push(format!(
+            "allow the watcher's command in the `allow` of ant {} in the config, as an `execute:` rule, or drop the \
+             watcher",
+            ant.name
+        ));
+    }
+    fix.push(format!(
+        "`ants ant memories {}` lists the ant's watchers; ask the ant to fix or drop a failing one (sense_remind \
+         action=drop)",
+        ant.name
+    ));
+    Some(Check::warn(check, format!("{listed}, as checked at {checked}"), fix))
+}
+
 /// The bytes of the ant's sense log, warning over [`SIZE_LIMIT`].
 fn check_sense_size(ant: &Ant, status: &ChainStatus) -> Check {
     let check = format!("ant {} sense size", ant.name);

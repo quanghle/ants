@@ -128,8 +128,11 @@ fn mutation(mut reminder: Reminder, call: &ToolCall, request: &Request, action: 
             if !matches!(reminder.status, Status::Active | Status::Exhausted | Status::Expired) {
                 return Err(Answer::invalid("Only an undropped reminder can be acknowledged."));
             }
-            reminder.pending = None;
             reminder.acknowledged_at = Some(now);
+            if reminder.trigger.watch().is_some() {
+                return Ok(reminder);
+            }
+            reminder.pending = None;
             reminder.occurrence_firings = 0;
             let next = if expired { None } else { reminder.trigger.next(now).map_err(refused)? };
             reminder.next_due = next;
@@ -158,7 +161,7 @@ fn mutation(mut reminder: Reminder, call: &ToolCall, request: &Request, action: 
             reminder.pending = None;
             reminder.next_due = Some(at);
             reminder.occurrence_firings = 0;
-            reminder.snoozed = true;
+            reminder.snoozed = reminder.trigger.watch().is_none();
         }
         Action::Renew => {
             if !matches!(reminder.status, Status::Active | Status::Expired) {
@@ -176,6 +179,8 @@ fn mutation(mut reminder: Reminder, call: &ToolCall, request: &Request, action: 
                 reminder.occurrence_firings = 0;
                 reminder.snoozed = false;
                 reminder.check_started = None;
+                reminder.failed_checks = None;
+                reminder.check_error = None;
             }
         }
         Action::Create | Action::List | Action::Show => return Err(Answer::invalid("No change of a reminder.")),
@@ -201,6 +206,9 @@ fn answer(item: Item) -> Result<Answer, Answer> {
 fn deny_untrusted_command(call: &ToolCall, trigger: &Trigger) -> Result<(), Answer> {
     if matches!(trigger.condition(), Some(Condition::Command { .. })) && !call.context.origin.trusted() {
         return Err(Answer::error("untrusted", "Untrusted threads cannot create or change command triggers.".into()));
+    }
+    if trigger.watch().is_some() && !call.context.origin.trusted() {
+        return Err(Answer::error("untrusted", "Untrusted threads cannot create or change watchers.".into()));
     }
     Ok(())
 }

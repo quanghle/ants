@@ -5,7 +5,7 @@
 //! are kept in sense data, so a replacement daemon runs them no sooner either. Each read of the ant's items also
 //! publishes the profile of its confirmed persona ([`super::published::profile`]), dormant or not.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,7 @@ use ants_proto::UserId;
 use ants_proto::provider::{Host, RpcError, WakeRequest};
 use ants_sense::Sense;
 use ants_sense::memory;
-use ants_sense::remind::{self, ConditionCheck, Firing};
+use ants_sense::remind::{self, ConditionCheck, Firing, WatchCheck};
 use ants_sense::store::{Items, StoreError};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -23,8 +23,10 @@ use tokio::task::JoinHandle;
 
 mod conditions;
 mod dreams;
+mod watchers;
 
 pub(crate) use dreams::{Daemon, Dreaming, review_answer, review_given, review_received};
+pub(crate) use watchers::TrailChecks;
 
 const RETRY: Duration = Duration::from_secs(60);
 
@@ -38,6 +40,20 @@ struct Settings {
     dreams: Option<dreams::Dreams>,
     /// What the ant's colony entry shows, its profile among it.
     workload: Arc<crate::colony::Workload>,
+    /// What runs trail watchers; none where the bus keeps no runs.
+    trails: Option<Arc<dyn TrailChecks>>,
+    /// Hides secrets in a check's output before a wake carries it.
+    redactor: crate::secrets::redact::Redactor,
+    /// The ant's home, where the watchers' status is kept for `ants doctor`; none in tests leaving it out.
+    home: Option<PathBuf>,
+    /// The output of each watcher firing prepared and not delivered yet, by firing id, redacted and cut.
+    outputs: std::sync::Mutex<HashMap<String, String>>,
+}
+
+/// What a watcher's check takes beside the ant's config.
+pub(crate) struct Watching {
+    pub trails: Option<Arc<dyn TrailChecks>>,
+    pub redactor: crate::secrets::redact::Redactor,
 }
 
 /// Dropping the active daemon's guard cancels its scheduler, including an in-flight probe.
@@ -70,6 +86,7 @@ pub(super) fn serve(
     machine: &str,
     dreaming: Arc<dyn Dreaming>,
     workload: Arc<crate::colony::Workload>,
+    watching: Watching,
 ) -> Serving {
     let host = crate::provider::wake::Ants::new(wakers);
     host.named(ants_sense::NAME);
@@ -81,6 +98,10 @@ pub(super) fn serve(
         allow: config.policy.allow.clone(),
         dreams: Some(dreams::Dreams::new(dreaming)),
         workload,
+        trails: watching.trails,
+        redactor: watching.redactor,
+        home: Some(config.storage.home.clone()),
+        outputs: std::sync::Mutex::default(),
     };
     start(sense, Arc::new(host), settings)
 }
@@ -135,15 +156,22 @@ async fn cycle(
     // A failed wake ends the firings but holds back neither maintenance nor dreams, the cycle ending in its error.
     let mut undelivered = None;
     for firing in remind::pending_work(items).await? {
-        if let Err(error) = deliver(items, host, &settings.ant, &firing).await {
+        if let Err(error) = deliver(items, host, settings, &firing).await {
             undelivered = Some(error);
             break;
         }
     }
     let due = if undelivered.is_none() { remind::due(items, now).await? } else { Vec::new() };
+    let mut watched = false;
     for due in due {
         let at = since(now, started);
-        let firing = if due.condition.is_some() {
+        let firing = if due.watch.is_some() {
+            watched = true;
+            match remind::reserve_watch(items, &due.id, at).await? {
+                Some(check) => watch(sense, items, settings, &check).await?,
+                None => None,
+            }
+        } else if due.condition.is_some() {
             match remind::reserve_condition(items, &due.id, at).await? {
                 Some(check) => probe(sense, items, settings, &check).await?,
                 None => None,
@@ -152,13 +180,19 @@ async fn cycle(
             remind::prepare_firing(items, &due.id, at, "reminder time reached").await?
         };
         if let Some(firing) = firing
-            && let Err(error) = deliver(items, host, &settings.ant, &firing).await
+            && let Err(error) = deliver(items, host, settings, &firing).await
         {
             undelivered = Some(error);
             break;
         }
     }
     let now = since(now, started);
+    if watched && let Some(home) = &settings.home {
+        let status = remind::watcher_status(items, now).await?;
+        if let Err(error) = remind::watch::write_status(home, &status) {
+            tracing::warn!(ant = %settings.ant, error = %error, "the watchers' status for `ants doctor` is not kept");
+        }
+    }
     if let Some(run) = memory::maintain(items, Some(&settings.workdir), now).await? {
         let changes = run.changes.len();
         tracing::info!(ant = %settings.ant, changes, clusters = run.duplicates.len(), "sense maintenance ran");
@@ -189,24 +223,8 @@ async fn probe(
     if items.get(&check.id).await?.is_none_or(|item| item.revision != check.revision) {
         return Ok(None);
     }
-    let source = check.source.clone().map(|mut context| {
-        context.ant = settings.ant.clone();
-        context.machine.clone_from(&settings.machine);
-        context
-    });
-    let workdir = source
-        .as_ref()
-        .and_then(|context| sense.workdir(context))
-        .or_else(|| {
-            check
-                .workdir
-                .as_ref()
-                .filter(|workdir| {
-                    workdir.is_absolute() && check.workdir_machine.as_deref() == Some(settings.machine.as_str())
-                })
-                .cloned()
-        })
-        .unwrap_or_else(|| settings.workdir.clone());
+    let workdir =
+        workdir(sense, settings, check.source.clone(), check.workdir.as_ref(), check.workdir_machine.as_ref());
     let context =
         conditions::Context { workdir: &workdir, env: &settings.env, allow: &settings.allow, items, now: check.at };
     let started = tokio::time::Instant::now();
@@ -222,17 +240,74 @@ async fn probe(
     Ok(remind::complete_condition(items, check, now, matched, reason, observation).await?)
 }
 
+/// Run a reserved watcher check and apply what it found, keeping the output of a firing for its wake.
+async fn watch(sense: &Sense, items: &dyn Items, settings: &Settings, check: &WatchCheck) -> Result<Option<Firing>> {
+    if items.get(&check.id).await?.is_none_or(|item| item.revision != check.revision) {
+        return Ok(None);
+    }
+    let workdir =
+        workdir(sense, settings, check.source.clone(), check.workdir.as_ref(), check.workdir_machine.as_ref());
+    let context =
+        conditions::Context { workdir: &workdir, env: &settings.env, allow: &settings.allow, items, now: check.at };
+    let reads = watchers::Reads { context, thread: check.source.as_ref().map(|source| source.thread.clone()) };
+    let started = tokio::time::Instant::now();
+    let seen = watchers::run(check, &reads, settings.trails.as_deref()).await;
+    if let remind::Checked::Failed(error) = &seen.checked {
+        tracing::warn!(ant = %settings.ant, watcher = %check.id, error, "a watcher's check failed");
+    }
+    let now = since(check.at, started);
+    let firing = remind::complete_watch(items, check, now, seen.checked).await?;
+    if let (Some(firing), Some(output)) = (&firing, seen.output) {
+        let output = watchers::wake_output(&settings.redactor.redact(&output));
+        settings.outputs.lock().expect("unpoisoned").insert(firing.id.clone(), output);
+    }
+    Ok(firing)
+}
+
+/// The workdir a check of the reminder from `source` runs in: the source thread's, else the one it was set in on this
+/// machine, else the ant's.
+fn workdir(
+    sense: &Sense,
+    settings: &Settings,
+    source: Option<ants_proto::provider::CallContext>,
+    workdir: Option<&PathBuf>,
+    machine: Option<&String>,
+) -> PathBuf {
+    let source = source.map(|mut context| {
+        context.ant = settings.ant.clone();
+        context.machine.clone_from(&settings.machine);
+        context
+    });
+    source
+        .as_ref()
+        .and_then(|context| sense.workdir(context))
+        .or_else(|| {
+            workdir
+                .filter(|workdir| {
+                    workdir.is_absolute() && machine.map(String::as_str) == Some(settings.machine.as_str())
+                })
+                .cloned()
+        })
+        .unwrap_or_else(|| settings.workdir.clone())
+}
+
 /// `at`, moved on by the time elapsed since `started`.
 fn since(at: DateTime<Utc>, started: tokio::time::Instant) -> DateTime<Utc> {
     at + chrono::Duration::from_std(started.elapsed()).expect("a bounded check")
 }
 
-async fn deliver(items: &dyn Items, host: &dyn Host, ant: &UserId, firing: &Firing) -> Result<()> {
+async fn deliver(items: &dyn Items, host: &dyn Host, settings: &Settings, firing: &Firing) -> Result<()> {
+    let mut text = format!("{}\n\n{}", firing.text, firing.reason);
+    if firing.watched() {
+        let output = settings.outputs.lock().expect("unpoisoned").get(&firing.id).cloned();
+        text.push_str(output.as_deref().unwrap_or(watchers::OUTPUT_LOST));
+    }
     let mut request = WakeRequest {
-        ant: ant.clone(),
+        ant: settings.ant.clone(),
         thread: firing.thread.clone(),
-        text: format!("{}\n\n{}", firing.text, firing.reason),
+        text,
         id: firing.id.clone(),
+        replaces: firing.replaces.clone(),
     };
     match host.wake(request.clone()).await {
         Err(error) if request.thread.is_some() && error.code == RpcError::UNKNOWN_THREAD => {
@@ -245,6 +320,7 @@ async fn deliver(items: &dyn Items, host: &dyn Host, ant: &UserId, firing: &Firi
         }
     }
     remind::confirm_delivered(items, &firing.reminder, &firing.id, Utc::now()).await?;
+    settings.outputs.lock().expect("unpoisoned").remove(&firing.id);
     Ok(())
 }
 

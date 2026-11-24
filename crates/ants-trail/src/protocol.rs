@@ -112,6 +112,10 @@ pub enum Request {
         clock: i64,
         /// Seeds `random` and `os.urandom`.
         seed: u64,
+        /// Whether the script is a watcher's: it may call command(), read_file(), bd() and thread() alone, every other
+        /// call raising, and the others none of them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        watcher: bool,
     },
     /// Restores a suspended session and resolves its pending calls, one answer after the other in the given order,
     /// each followed by the script running until it waits again.
@@ -122,6 +126,9 @@ pub enum Request {
         seed: u64,
         /// Steps the leg made so far, against `limits.steps`.
         steps: u32,
+        /// As for [`Request::Start`].
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        watcher: bool,
     },
 }
 

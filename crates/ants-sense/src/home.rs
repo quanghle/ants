@@ -1,7 +1,7 @@
 //! The layout of an ant's sense files in its home, all in its `.sense` directory ([`DIR`]) and named here alone
 //! ([`Home`]): the ant's sense id and earlier names, the only ones an export of the home carries
-//! ([`Home::left_out`]); the cache of its log and the marker of writes pending in it; the chain status; the skill files;
-//! and the marker of an import awaited. The files written whole are written through `write()`.
+//! ([`Home::left_out`]); the cache of its log and the marker of writes pending in it; the chain status; the watchers'
+//! status; the skill files; and the marker of an import awaited. The files written whole are written through `write()`.
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ const NAMES: &str = "names";
 const CACHE: &str = "cache.db";
 const PENDING: &str = "cache.pending";
 const CHAIN: &str = "chain.json";
+const WATCHERS: &str = "watchers.json";
 const SKILLS: &str = "skills";
 const IMPORTING: &str = "importing";
 
@@ -56,6 +57,11 @@ impl Home {
     /// The file holding the [`crate::log::ChainStatus`].
     pub fn status(&self) -> PathBuf {
         self.dir.join(CHAIN)
+    }
+
+    /// The file holding the [`crate::remind::watch::WatcherStatus`].
+    pub fn watchers(&self) -> PathBuf {
+        self.dir.join(WATCHERS)
     }
 
     /// The directory of the ant's skill files, one directory a skill ([`crate::skill`]).

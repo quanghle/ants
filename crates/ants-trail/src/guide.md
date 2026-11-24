@@ -20,6 +20,10 @@ the result; the top level then holds only meta, imports, definitions and constan
   run enters each (trail, waypoint) once: a goto to one entered before, or to one missing, raises RuntimeError, to
   catch and take another exit. Loops belong inside one waypoint.
 - `phase(title)`, `log(text)`, `print()`: notes on the run's thread; they never wait. `args`: the leg's JSON input.
+- A watcher's trail (sense_remind's `watch` trigger) prompts no ant and writes no note: it reads with
+  `await command(cmd)` (`{"status", "stdout"}`, under the ant's allow rules), `await read_file(path)` (workdir text or
+  None), `await bd(*args)` (a reading subcommand's JSON) and `await thread(id=None)` (`{"register", "record"}`), and
+  returns `{"output": str, "done": bool}`; a run outside a watcher may not call these.
 - `await parallel(*coroutines)`: every result in argument order once all finish (a barrier).
 - `await pipeline(items, *stages)`: each item through the async stages on its own, no barrier; results in item order.
 - A failed step raises RuntimeError where awaited; an uncaught exception fails the run with its traceback.

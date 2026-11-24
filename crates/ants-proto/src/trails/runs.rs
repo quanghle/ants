@@ -345,6 +345,18 @@ pub enum TrailFunction {
     /// `goto(trail=None, at=None, state=None)`: args `{"trail"?, "at"?, "state"?}`. No step: the conductor ends the
     /// run's leg there and goes on in a run of the next leg, or answers the call with an error naming why not.
     Goto,
+    /// `command(command)` of a watcher: args `{"command"}`, answered with `{"status", "stdout"}` by the daemon running
+    /// it as a command watcher's check runs, under the ant's tool allow rules.
+    Command,
+    /// `read_file(path)` of a watcher: args `{"path"}`, answered with the text of the file at `path` within the ant's
+    /// working directory, None when there is none.
+    ReadFile,
+    /// `bd(*args)` of a watcher: args `{"args"}`, answered with what `bd <args> --json` prints, read: a read-only
+    /// subcommand of bd alone.
+    Bd,
+    /// `thread(id=None)` of a watcher: args `{"id"?}`, answered with what the ant's sense keeps of the thread, the
+    /// watcher's own without `id`: its resume register and its record.
+    Thread,
 }
 
 impl TrailFunction {
@@ -355,12 +367,22 @@ impl TrailFunction {
             Self::Human => "human",
             Self::Trail => "trail",
             Self::Goto => "goto",
+            Self::Command => "command",
+            Self::ReadFile => "read_file",
+            Self::Bd => "bd",
+            Self::Thread => "thread",
         }
     }
 
     /// Whether a call of the function is a step, counted against the step and concurrency limits.
     pub fn is_step(self) -> bool {
-        self != Self::Goto
+        matches!(self, Self::Agent | Self::Human | Self::Trail)
+    }
+
+    /// Whether only a watcher's script may call the function: a read of the ant's state, which no run of a trail
+    /// makes; a watcher's script may call no other.
+    pub fn watches(self) -> bool {
+        matches!(self, Self::Command | Self::ReadFile | Self::Bd | Self::Thread)
     }
 }
 

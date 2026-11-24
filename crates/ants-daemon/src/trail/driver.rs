@@ -588,6 +588,7 @@ fn turn_budget_for(function: TrailFunction, turns: u32) -> u32 {
         TrailFunction::Agent => DEFAULT_TURN_BUDGET.min(turns),
         TrailFunction::Human => DEFAULT_TURN_BUDGET,
         TrailFunction::Trail | TrailFunction::Goto => 0,
+        TrailFunction::Command | TrailFunction::ReadFile | TrailFunction::Bd | TrailFunction::Thread => 0,
     }
 }
 
@@ -644,6 +645,7 @@ pub(super) fn reserved(call: &PendingCall) -> u32 {
     match call.function {
         TrailFunction::Agent => call.turn_budget,
         TrailFunction::Human | TrailFunction::Trail | TrailFunction::Goto => 0,
+        TrailFunction::Command | TrailFunction::ReadFile | TrailFunction::Bd | TrailFunction::Thread => 0,
     }
 }
 

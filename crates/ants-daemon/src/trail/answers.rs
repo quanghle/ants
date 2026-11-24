@@ -55,6 +55,7 @@ impl Trails {
         let spent = match pending.function {
             TrailFunction::Agent => pending.turn_budget.saturating_sub(message.turn_budget),
             TrailFunction::Human | TrailFunction::Trail | TrailFunction::Goto => 0,
+            TrailFunction::Command | TrailFunction::ReadFile | TrailFunction::Bd | TrailFunction::Thread => 0,
         };
         let answer = match steps::taken(&pending, message) {
             Taken::Answer(answer) => answer,

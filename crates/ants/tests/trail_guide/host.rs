@@ -131,6 +131,11 @@ pub fn answer(example: &str, call: &Call) -> CallAnswer {
                 lines => lines.iter().map(|(title, label)| format!("{title}: {label}")).collect::<Vec<_>>().join("\n"),
             }))
         }
-        TrailFunction::Trail | TrailFunction::Goto => unreachable!("{example}: the route answers {:?}", call.function),
+        TrailFunction::Trail
+        | TrailFunction::Goto
+        | TrailFunction::Command
+        | TrailFunction::ReadFile
+        | TrailFunction::Bd
+        | TrailFunction::Thread => unreachable!("{example}: the route answers {:?}", call.function),
     }
 }

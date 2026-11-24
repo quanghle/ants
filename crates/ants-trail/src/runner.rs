@@ -161,6 +161,7 @@ pub(crate) mod tests {
             limits: crate::Limits::default(),
             clock: 0,
             seed: 0,
+            watcher: false,
         }
     }
 

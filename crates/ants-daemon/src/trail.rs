@@ -329,6 +329,25 @@ impl Trails {
         &self.inner.ant
     }
 
+    /// Run the saved trail `name` with `args` as a watcher's check, answering its reads with `read`: the script's
+    /// result ([`ants_trail::watch::check`]).
+    pub(crate) async fn check_watcher<'r>(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        read: impl Fn(
+            ants_proto::TrailFunction,
+            serde_json::Value,
+        ) -> futures::future::BoxFuture<'r, ants_proto::CallAnswer>
+        + Send
+        + Sync,
+    ) -> Result<serde_json::Value, String> {
+        let name: ants_proto::TrailName = name.parse().map_err(|e| format!("no trail is named {name:?}: {e}"))?;
+        let script = self.inner.saved.script(&name).await?.script;
+        let computing = || async { computing().acquire().await.ok() };
+        ants_trail::watch::check(&self.inner.worker, &script, args, read, computing).await
+    }
+
     /// The tips of the colony's trails, read, left and voted on under the ant's credentials.
     pub fn tips(&self) -> &Tips {
         &self.inner.tips

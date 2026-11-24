@@ -361,6 +361,12 @@ fn dreaming(inbox: &Inbox<'_>, config: &Config) -> std::sync::Arc<dyn crate::sen
     })
 }
 
+fn watching(inbox: &Inbox<'_>) -> crate::sense::Watching {
+    let trails =
+        inbox.trails.clone().map(|trails| std::sync::Arc::new(trails) as std::sync::Arc<dyn crate::sense::TrailChecks>);
+    crate::sense::Watching { trails, redactor: inbox.redactor.clone() }
+}
+
 /// What the ant's inbox is served beside, as [`serve`] has it.
 #[derive(Clone, Copy)]
 struct Beside<'a> {
@@ -392,10 +398,9 @@ where
     .reading(inbox.reading);
     let _sense_workdirs =
         inbox.provider.sense.zip(inbox.mcp).map(|(sense, mcp)| sense.workdirs(&config.ant, mcp.workdirs()));
-    let scheduler = inbox
-        .provider
-        .sense
-        .map(|sense| sense.schedule(config, inbox.machine, dreaming(inbox, config), inbox.workload.clone()));
+    let scheduler = inbox.provider.sense.map(|sense| {
+        sense.schedule(config, inbox.machine, dreaming(inbox, config), inbox.workload.clone(), watching(inbox))
+    });
     let (stopping, moving, mut asked) = (std::cell::Cell::new(false), std::cell::Cell::new(false), 0);
     // The first stop is Ctrl-C, a stop request, the hand-over or the move, after which the prompts in flight finish;
     // the second only Ctrl-C or a stop request.

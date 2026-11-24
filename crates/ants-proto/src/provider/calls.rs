@@ -287,6 +287,10 @@ pub struct WakeRequest {
     pub text: String,
     /// The request's idempotency id: a repeat within [`super::WAKE_DEDUP`] wakes the ant once.
     pub id: String,
+    /// The id of an earlier request this one replaces: its message is withdrawn while it still waits in the ant's
+    /// queue, as a watcher's newer firing replaces its last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
 }
 
 /// The result of [`super::method::WAKE`].

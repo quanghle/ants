@@ -230,11 +230,35 @@ impl Waker {
         let envelope = Envelope { id: mark.message, ..envelope };
         (self.outbox)(envelope).await.map_err(|e| unavailable(&format!("sending the wake: {e:#}")))?;
         tracing::info!(%thread, provider = self.provider, id = request.id, "woke the ant");
+        if let Some(replaced) = &request.replaces {
+            self.withdraw(replaced).await;
+        }
         let sent = serde_json::to_vec(&Mark { sent: true, ..mark }).map_err(|e| RpcError::internal(&e.to_string()))?;
         if let Err(e) = self.marks.put(key, sent).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "recording the wake sent");
         }
         Ok(Woken { thread })
+    }
+}
+
+impl Waker {
+    /// Withdraw the message of the provider's wake request `id` while it waits in the ant's queue, as a later wake
+    /// replacing it is sent: one taken up already goes on.
+    async fn withdraw(&self, id: &str) {
+        let key = mark_key(&self.ant, &self.provider, id);
+        let earlier = match self.mark(&key).await {
+            Ok((Some(mark), _)) if mark.sent => mark,
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!(id, error = e.message, "reading the replaced wake");
+                return;
+            }
+        };
+        match crate::delivery::attempts::withdraw(&self.marks, &self.ant, &earlier.message, &self.ant, None).await {
+            Ok(None) => tracing::info!(thread = %earlier.thread, id, "withdrew the replaced wake"),
+            Ok(Some(_)) => {}
+            Err(e) => tracing::warn!(id, error = format!("{e:#}"), "withdrawing the replaced wake"),
+        }
     }
 }
 

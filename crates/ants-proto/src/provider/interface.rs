@@ -207,7 +207,13 @@ mod tests {
     impl Waking {
         fn wake(&self) -> Result<Woken, RpcError> {
             let host = self.host.lock().unwrap().clone().expect("initialized");
-            let request = WakeRequest { ant: "dev-a".parse().unwrap(), thread: None, text: "x".into(), id: "1".into() };
+            let request = WakeRequest {
+                ant: "dev-a".parse().unwrap(),
+                thread: None,
+                text: "x".into(),
+                id: "1".into(),
+                replaces: None,
+            };
             ready(host.wake(request))
         }
     }

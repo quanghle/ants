@@ -128,7 +128,7 @@ fn respond(input: &str) -> Response {
         Err(e) => return Response::Refused { error: format!("unreadable request: {e}") },
     };
     match request {
-        Request::Start { script, entry, args, limits, clock, seed } => {
+        Request::Start { script, entry, args, limits, clock, seed, watcher } => {
             if let Err(error) = limits.check() {
                 return Response::Refused { error };
             }
@@ -140,14 +140,14 @@ fn respond(input: &str) -> Response {
                 None => script,
             };
             arm(&limits);
-            start(&script, &args, limits, clock, seed)
+            start(&script, &args, limits, (clock, seed), watcher)
         }
-        Request::Resume { snapshot, answers, limits, seed, steps } => {
+        Request::Resume { snapshot, answers, limits, seed, steps, watcher } => {
             if let Err(error) = limits.check() {
                 return Response::Refused { error };
             }
             arm(&limits);
-            resume(&snapshot, answers, limits, seed, steps)
+            resume(&snapshot, answers, limits, (seed, steps), watcher)
         }
     }
 }
@@ -159,8 +159,10 @@ fn arm(limits: &Limits) {
     let _ = monty_alloc::set_hard_limit(monty_types::memory_limit_with_headroom(Some(limits.memory_bytes), false));
 }
 
-fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, seed: u64) -> Response {
-    let mut session = Session::new(limits, seed, 0);
+/// Starts `script` with `args`, its clock and seed fixed by `fixed`.
+fn start(script: &str, args: &serde_json::Value, limits: Limits, fixed: (i64, u64), watcher: bool) -> Response {
+    let (clock, seed) = fixed;
+    let mut session = Session::new(limits, seed, 0, watcher);
     let run = match trail::compile(script) {
         Ok(run) => run.with_os_policy(policy(clock, seed)),
         Err(e) => return session.failed(e),
@@ -174,14 +176,26 @@ fn start(script: &str, args: &serde_json::Value, limits: Limits, clock: i64, see
         MontyObject::function("__ants_goto", None),
         MontyObject::function("__ants_phase", None),
         MontyObject::function("__ants_log", None),
+        MontyObject::function("__ants_command", None),
+        MontyObject::function("__ants_read_file", None),
+        MontyObject::function("__ants_bd", None),
+        MontyObject::function("__ants_thread", None),
     ];
     session.next_resume();
     let progress = run.start(inputs, tracker, session.writer());
     session.drive(progress).respond(session)
 }
 
-fn resume(snapshot: &RawValue, answers: Vec<(u32, CallAnswer)>, limits: Limits, seed: u64, steps: u32) -> Response {
-    let mut session = Session::new(limits, seed, steps);
+/// Resumes `snapshot` with `answers`, its seed and the steps made so far given by `made`.
+fn resume(
+    snapshot: &RawValue,
+    answers: Vec<(u32, CallAnswer)>,
+    limits: Limits,
+    made: (u64, u32),
+    watcher: bool,
+) -> Response {
+    let (seed, steps) = made;
+    let mut session = Session::new(limits, seed, steps, watcher);
     let limited = with_limits(snapshot, &resource_limits(&limits));
     let snapshot = limited.as_deref().unwrap_or(snapshot);
     let mut waiting = match serde_json::from_str(snapshot.get()) {
@@ -310,6 +324,8 @@ struct Session {
     /// The limit the script broke, should it fail: one of time or memory it failed on, else the steps once a call
     /// past them raised.
     limit: Option<RunLimit>,
+    /// Whether the script is a watcher's ([`Request::Start`]).
+    watcher: bool,
 }
 
 /// The notes of the current resume: what `print()` wrote not yet turned into events, and the bytes of notes written.
@@ -349,7 +365,7 @@ impl PrintWriterCallback for Notes {
 }
 
 impl Session {
-    fn new(limits: Limits, seed: u64, steps: u32) -> Self {
+    fn new(limits: Limits, seed: u64, steps: u32, watcher: bool) -> Self {
         Self {
             limits,
             seed,
@@ -360,6 +376,7 @@ impl Session {
             notes: Notes::default(),
             resumed: Instant::now(),
             limit: None,
+            watcher,
         }
     }
 
@@ -430,8 +447,18 @@ impl Session {
             "__ants_human" => Some(TrailFunction::Human),
             "__ants_trail" => Some(TrailFunction::Trail),
             "__ants_goto" => Some(TrailFunction::Goto),
+            "__ants_command" => Some(TrailFunction::Command),
+            "__ants_read_file" => Some(TrailFunction::ReadFile),
+            "__ants_bd" => Some(TrailFunction::Bd),
+            "__ants_thread" => Some(TrailFunction::Thread),
             "__ants_phase" | "__ants_log" => {
                 let phase = call.function_name == "__ants_phase";
+                if self.watcher {
+                    let name = if phase { "phase" } else { "log" };
+                    let error = format!("{name}() writes a note of the thread, which a watcher may not");
+                    let error = MontyException::new(ExcType::RuntimeError, Some(error));
+                    return call.resume(ExtFunctionResult::Error(error), self.writer());
+                }
                 let text = call.args.arg(0).and_then(|a| a.as_str()).unwrap_or_default().to_owned();
                 let text = cut(text, MAX_NOTE);
                 let by = if phase { "phase()" } else { "log()" };
@@ -446,6 +473,14 @@ impl Session {
         };
         let result = match function {
             None => ExtFunctionResult::NotFound(call.function_name.clone()),
+            Some(function) if function.watches() != self.watcher => {
+                let error = if self.watcher {
+                    format!("{}() would prompt an ant or start a run, which a watcher may not", function.name())
+                } else {
+                    format!("{}() is a watcher's call: only a watcher's script reads the ant's state", function.name())
+                };
+                ExtFunctionResult::Error(MontyException::new(ExcType::RuntimeError, Some(error)))
+            }
             Some(function) if function.is_step() && self.steps >= self.limits.steps => {
                 self.limit = Some(RunLimit::Steps);
                 ExtFunctionResult::Error(MontyException::new(

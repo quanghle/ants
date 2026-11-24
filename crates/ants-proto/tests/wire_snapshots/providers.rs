@@ -109,15 +109,6 @@ fn provider_protocol() {
     snap("provider_event_variants", &events);
     snap("provider_ack", &Ack {});
 
-    snap(
-        "provider_wake_request",
-        &WakeRequest {
-            ant: user("dev-a"),
-            thread: Some(thread()),
-            text: "The reminder is due.".into(),
-            id: "rem-1".into(),
-        },
-    );
     snap("provider_woken", &Woken { thread: other_thread() });
     snap("provider_ant_ref", &ant);
     let memories =
@@ -126,6 +117,32 @@ fn provider_protocol() {
     let export = Export { provider: "sense".into(), data: json!({"memories": 1}) };
     snap("provider_export", &export);
     snap("provider_import_request", &ImportRequest { ant: ant.ant, identity: ant.identity, export });
+}
+
+#[test]
+fn provider_wake_requests() {
+    use provider::WakeRequest;
+
+    snap(
+        "provider_wake_request",
+        &WakeRequest {
+            ant: user("dev-a"),
+            thread: Some(thread()),
+            text: "The reminder is due.".into(),
+            id: "rem-1".into(),
+            replaces: None,
+        },
+    );
+    snap(
+        "provider_wake_request_replacing",
+        &WakeRequest {
+            ant: user("dev-a"),
+            thread: Some(thread()),
+            text: "The watcher's result changed.".into(),
+            id: "rem-2:3".into(),
+            replaces: Some("rem-2:2".into()),
+        },
+    );
 }
 
 #[test]

@@ -112,6 +112,9 @@ fn sent(call: &PendingCall) -> String {
             None => format!("step {} runs {}", call.call, gist(call.function, &call.args)),
         },
         TrailFunction::Goto => format!("call {} goes to {}", call.call, destination(&call.args)),
+        TrailFunction::Command | TrailFunction::ReadFile | TrailFunction::Bd | TrailFunction::Thread => {
+            format!("call {} reads with {}()", call.call, call.function.name())
+        }
     }
 }
 

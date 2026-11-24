@@ -81,6 +81,12 @@ on every call and `random` is seeded once per leg, so the same answers make the 
 covers the API, the sandbox, the bundled modules, patterns and complete example trails, each run by the repository's
 tests (`crates/ants/tests/trail_guide.rs`); the `run_trail` tool's description carries a short version of it.
 
+A saved trail can also be a watcher's check ([sense.md](sense.md#watchers)): the ant's daemon runs it on an interval in
+a one-shot worker, outside any run, for at most the watcher's `limit_seconds`. Such a script makes no step and writes
+no note: `agent()`, `human()`, `trail()`, `goto()`, `phase()` and `log()` raise `RuntimeError`. It reads instead
+through `command(cmd)`, `read_file(path)`, `bd(*args)` and `thread(id=None)`, which raise in any other run, and returns
+`{"output": str, "done": bool}`.
+
 ## Waypoints
 
 A trail's meta may list up to 32 `waypoints`, the places a run enters it: each names a top-level

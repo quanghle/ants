@@ -79,6 +79,9 @@ impl<'a> Drive<'a> {
                         answer(&leg, &call)
                     }
                 }
+                TrailFunction::Command | TrailFunction::ReadFile | TrailFunction::Bd | TrailFunction::Thread => {
+                    unreachable!("{leg}: a watcher's read in a run")
+                }
             };
             let progress = run.resolve(self.worker, call.call, answer).await.unwrap();
             self.take(&run, progress, &mut calls);

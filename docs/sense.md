@@ -30,7 +30,7 @@ scheduling reminders, maintenance and dreams, and making a review's checkouts.
     | `sense_handoff` | Record what the thread did and leaves, as its last write. | [Resume registers and handoffs](#resume-registers-and-handoffs) |
     | `sense_task` | Keep personal tasks; claim one under a fenced lease. | [Work and reminders](#work-and-reminders) |
     | `sense_promise` | Record a commitment; keep, break, release or renegotiate it. | [Work and reminders](#work-and-reminders) |
-    | `sense_remind` | Set a time or condition reminder; acknowledge, postpone, renew or drop it. | [Work and reminders](#work-and-reminders) |
+    | `sense_remind` | Set a time or condition reminder, or a watcher; acknowledge, postpone, renew or drop it. | [Work and reminders](#work-and-reminders) |
     | `sense_identity` | Show who the ant is, and the versions of the persona and of each record; replace the self-model or a relationship record; propose a change of the persona. | [Identity](#identity), [Self-model and relationships](#self-model-and-relationships), [Persona and skills](#persona-and-skills) |
     | `sense_skill` | Read the skills; propose a new, changed or removed one. | [Persona and skills](#persona-and-skills) |
     | `sense_dream` | Answer a dream's findings and finish the dream. | [Dreams](#dreams) |
@@ -533,7 +533,8 @@ commitment with an automatic reminder. Empty arguments or `{"action":"list"}` li
 terms, and returns a replacement commitment. A positive `revision` supplies an optional compare-and-set guard; a
 conflict returns the current item.
 
-`sense_remind` records a time or condition trigger and supports acknowledgment, postponement, renewal and dropping.
+`sense_remind` records a time, condition or watch trigger and supports acknowledgment, postponement, renewal and
+dropping.
 Time triggers accept an absolute time, a relative delay, or a recurring daily or weekly UTC time. An unacknowledged
 firing fires again at most three times, an hour apart; a retried delivery or a daemon taking over never fires it twice.
 
@@ -575,6 +576,39 @@ firing. Command conditions run only under the ant's tool allow rules, in its wor
 thirty-second timeout; stdout and stderr are discarded, and no approval request is raised for a disallowed one.
 Untrusted threads (webhooks, sage reviews and unknown origins) cannot create or change command triggers. Outside checks
 use only `gh`, `bd` and `git`.
+
+### Watchers
+
+A watch trigger stays armed and checks something on an interval, waking the ant each time the check's result changes:
+
+```json
+{"kind":"watch","run":{"kind":"command","command":"gh pr checks 7"},"interval_seconds":120}
+{"kind":"watch","run":{"kind":"trail","name":"pr-blocked","args":{"pr":7},"limit_seconds":60},"first":true}
+```
+
+| Field | Meaning |
+|---|---|
+| `run` | A `command`, run as a command condition is, its exit status and stdout the result; or the saved trail `name`, run with `args` as a watcher for at most `limit_seconds` (default 30, at most 300), its returned `output` the result |
+| `interval_seconds` | Seconds between checks, 60 (the default) through 86,400 |
+| `max_interval_seconds` | Seconds between checks once ten in a row saw no change or failed, from the interval through 86,400; default 1,800 or the interval when longer |
+| `first` | Whether the first check wakes the ant; otherwise it only sets the result later checks are compared with |
+
+Only the digest of each check's result is kept, never the result. A changed result wakes the ant with the watcher's
+title and the check's output, redacted and cut to its first 4 KiB with a note, as data and not instructions; the
+output stays in the daemon's memory alone, so a wake delivered after a restart says it was not kept. The wake replaces
+the watcher's previous wake: one still waiting in the ant's queue is withdrawn, one taken up goes on. A command exiting
+with status 3, or a trail returning `"done": true`, reports the watcher done: it wakes the ant a last time, whatever
+the result, and retires as `done`. A check that cannot run, fails, or passes its time wakes no one; the failures count
+toward the backoff, and the memories view and `ants doctor` show a watcher failing its checks.
+
+A trail watcher's script prompts no ant, starts no run and writes no note of its thread: it reads alone, through
+`command(cmd)` (run as a command watcher's), `read_file(path)` (a workdir file of at most 64 KiB, or None),
+`bd(*args)` (`show`, `list`, `ready`, `blocked`, `search`, `count`, `stale` or `comments`, with `--json`) and
+`thread(id=None)` (the resume register and record of the thread named, the watcher's own by default), and returns
+`{"output": str, "done": bool}`.
+
+Watchers count within the fifty active triggers and expire after thirty days unless renewed. Acknowledging one keeps it
+armed; postponing one moves its next check. Untrusted threads cannot create or change any watcher.
 
 ## Dreams
 

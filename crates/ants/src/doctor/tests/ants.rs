@@ -1,5 +1,5 @@
 //! Tests of the doctor's checks of the ants: look-alike avatars, harnesses and their versions, shared settings,
-//! who answers their requests, workdirs, homes, file limits, sense, tool rules and sages.
+//! who answers their requests, workdirs, homes, file limits, sense, watchers, tool rules and sages.
 
 use super::*;
 
@@ -332,6 +332,58 @@ fn a_break_in_an_ant_s_sense_chain_fails_and_a_log_over_its_size_limit_warns() {
         "nothing for an ant whose log was never read"
     );
     assert!(checks[3].fix[0].contains("`ants ant memories dev-b`"), "{}", checks[3]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_watcher_failing_its_checks_warns_naming_why() {
+    use ants_sense::remind::watch::{WatcherState, WatcherStatus, write_status};
+
+    let dir = ants_test_support::scratch_dir("doctor-watchers").canonicalize().unwrap();
+    let config = dir.join("config.toml");
+    let ants = ["dev-a", "dev-b", "dev-c"]
+        .map(|name| format!("[[ant]]\nname = \"{name}\"\nworkdir = \".\"\nhome = \"{name}\"\n"));
+    std::fs::write(
+        &config,
+        format!("messenger = false\nsage = \"none\"\nharness = \"copilot\"\nhuman = \"human\"\n{}", ants.concat()),
+    )
+    .unwrap();
+    let loaded = config::load(&config).unwrap();
+    let watcher = WatcherState {
+        id: "01M876XB7HEVCSRA95C0ACNJPH".parse().unwrap(),
+        title: "PR 7".into(),
+        runs: "gh pr checks 7".into(),
+        failed_checks: 2,
+        error: None,
+    };
+    let status = WatcherStatus { checked_at: "2026-01-02T03:04:05Z".parse().unwrap(), watchers: vec![watcher.clone()] };
+    write_status(&dir.join("dev-a"), &status).unwrap();
+    let failing = WatcherState {
+        failed_checks: 3,
+        error: Some("the command is outside the ant's tool allow rules".into()),
+        ..watcher
+    };
+    write_status(&dir.join("dev-b"), &WatcherStatus { watchers: vec![failing], ..status }).unwrap();
+
+    let checks = check_watchers(&loaded.ants);
+    assert_eq!(
+        checks.iter().map(|c| (c.check.as_str(), c.status, c.detail.as_str())).collect::<Vec<_>>(),
+        [
+            (
+                "ant dev-a watchers",
+                Status::Ok,
+                "1 active, none failing its checks, as checked at 2026-01-02 03:04:05 UTC"
+            ),
+            (
+                "ant dev-b watchers",
+                Status::Warn,
+                "01M876XB7HEVCSRA95C0ACNJPH (PR 7, running gh pr checks 7) failed 3 checks in a row, the latest because \
+                 the command is outside the ant's tool allow rules, as checked at 2026-01-02 03:04:05 UTC"
+            ),
+        ],
+        "nothing for an ant without watchers checked"
+    );
+    assert!(checks[1].fix[0].contains("`execute:` rule"), "{}", checks[1]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

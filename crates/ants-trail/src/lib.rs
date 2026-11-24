@@ -11,6 +11,7 @@ mod run;
 mod runner;
 mod trail;
 mod value;
+pub mod watch;
 pub mod worker;
 
 pub use protocol::{Call, Event, Limits, Request, Response};

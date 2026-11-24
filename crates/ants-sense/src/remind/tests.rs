@@ -6,6 +6,7 @@ use std::sync::Arc;
 use ants_proto::provider::{CallContext, Starter};
 use ants_proto::{SenseId, UserId};
 
+use super::watch::UNCHANGED_BEFORE_BACKOFF;
 use super::*;
 use crate::items::Values;
 use crate::testing::{self, One, SharedLog, context, fixture, human, store};
@@ -426,4 +427,122 @@ async fn captured_workdir_provenance_and_source_context_survive_mutations() {
     assert_eq!(reminder.text("workdir"), "trusted-repo");
     assert_eq!(reminder.values["source_context"], json!(source));
     assert_eq!(reminder.values["writer"], json!(source));
+}
+
+fn watcher(first: bool) -> Value {
+    json!({"kind":"watch","run":{"kind":"command","command":"gh pr checks 7"},"interval_seconds":60,"first":first})
+}
+
+async fn check(items: &dyn Items, id: &ItemId, at: DateTime<Utc>, checked: Checked) -> Option<Firing> {
+    let check = reserve_watch(items, id, at).await.unwrap().expect("due");
+    complete_watch(items, &check, at, checked).await.unwrap()
+}
+
+fn seen(digest: &str, done: bool) -> Checked {
+    Checked::Seen { digest: digest.into(), done }
+}
+
+#[tokio::test]
+async fn a_watcher_fires_on_each_change_replacing_its_last_firing_and_retires_once_done() {
+    let (sense, items) = fixture(SharedLog::default()).await;
+    let id = create(&sense, watcher(false)).await;
+    let due = due(&*items, now()).await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].watch.as_ref().map(Watch::interval), Some(60));
+    assert!(prepare_firing(&*items, &id, now(), "time due").await.unwrap().is_none(), "a watcher fires on checks");
+
+    assert!(check(&*items, &id, now(), seen("a", false)).await.is_none(), "the first check sets the baseline");
+    assert!(reserve_watch(&*items, &id, now() + Duration::seconds(59)).await.unwrap().is_none());
+    let at = now() + Duration::seconds(60);
+    assert!(check(&*items, &id, at, seen("a", false)).await.is_none(), "unchanged");
+    assert_eq!(Reminder::of(&get(&*items, &id).await.unwrap()).unwrap().unchanged_checks, Some(1));
+
+    let at = at + Duration::seconds(60);
+    let first = check(&*items, &id, at, seen("b", false)).await.expect("changed");
+    assert!(first.watched() && !first.last && first.replaces.is_none(), "{first:?}");
+    assert!(reserve_watch(&*items, &id, at + Duration::hours(1)).await.unwrap().is_none(), "pending");
+    confirm_delivered(&*items, &id, &first.id, at).await.unwrap();
+    let reminder = Reminder::of(&get(&*items, &id).await.unwrap()).unwrap();
+    assert_eq!((reminder.status, reminder.next_due), (Status::Active, Some(at + Duration::seconds(60))));
+    let [fired, upcoming] = brief(&*items, at).await.unwrap();
+    assert!(fired.lines.is_empty(), "{:?}", fired.lines);
+    assert!(upcoming.lines[0].contains("; last fired "), "{}", upcoming.lines[0]);
+    assert!(!remind(&sense, &call(at, json!({"action":"ack","id":id}))).await.is_error);
+    assert_eq!(Reminder::of(&get(&*items, &id).await.unwrap()).unwrap().status, Status::Active, "ack keeps it");
+
+    let at = at + Duration::seconds(60);
+    let second = check(&*items, &id, at, seen("c", false)).await.expect("changed");
+    assert_eq!(second.replaces.as_deref(), Some(first.id.as_str()));
+    confirm_delivered(&*items, &id, &second.id, at).await.unwrap();
+
+    let at = at + Duration::seconds(60);
+    let last = check(&*items, &id, at, seen("c", true)).await.expect("done fires whatever its digest");
+    assert!(last.last, "{last:?}");
+    assert_eq!(last.replaces.as_deref(), Some(second.id.as_str()));
+    confirm_delivered(&*items, &id, &last.id, at).await.unwrap();
+    let reminder = Reminder::of(&get(&*items, &id).await.unwrap()).unwrap();
+    assert_eq!((reminder.status, reminder.next_due), (Status::Done, None));
+    assert!(active(&*items, at).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_watcher_s_first_check_fires_when_asked_and_failed_checks_back_off_without_firing() {
+    let (sense, items) = fixture(SharedLog::default()).await;
+    let id = create(&sense, watcher(true)).await;
+    let firing = check(&*items, &id, now(), seen("a", false)).await.expect("first");
+    confirm_delivered(&*items, &id, &firing.id, now()).await.unwrap();
+    let mut at = now();
+    for n in 1..=UNCHANGED_BEFORE_BACKOFF {
+        at += Duration::seconds(60);
+        assert!(check(&*items, &id, at, Checked::Failed("exit 127: gh: not found".into())).await.is_none());
+        assert_eq!(Reminder::of(&get(&*items, &id).await.unwrap()).unwrap().failed_checks, Some(n));
+    }
+    let reminder = Reminder::of(&get(&*items, &id).await.unwrap()).unwrap();
+    assert_eq!(reminder.next_due, Some(at + Duration::seconds(watch::DEFAULT_MAX_INTERVAL_SECONDS as i64)));
+    let [_, upcoming] = brief(&*items, at).await.unwrap();
+    assert!(
+        upcoming.lines[0].contains("10 checks failed in a row, the latest because exit 127"),
+        "{:?}",
+        upcoming.lines
+    );
+    let at = reminder.next_due.unwrap();
+    assert!(check(&*items, &id, at, seen("a", false)).await.is_none(), "the digest of before the failures");
+    let reminder = Reminder::of(&get(&*items, &id).await.unwrap()).unwrap();
+    assert_eq!((reminder.failed_checks, reminder.check_error), (None, None));
+}
+
+#[tokio::test]
+async fn watchers_count_within_the_active_limit_and_only_trusted_origins_set_them() {
+    let (sense, _) = fixture(SharedLog::default()).await;
+    for _ in 0..MAX_ACTIVE {
+        create(&sense, watcher(false)).await;
+    }
+    let too_many = remind(&sense, &call(now(), json!({"title":"overflow","trigger":watcher(false)}))).await;
+    assert_eq!(too_many.json["error"], "too_many", "{too_many:?}");
+
+    let (sense, _) = fixture(SharedLog::default()).await;
+    let trail = json!({"kind":"watch","run":{"kind":"trail","name":"pr-blocked","args":{"pr":7},"limit_seconds":60}});
+    let id = create(&sense, trail.clone()).await;
+    for arguments in [
+        json!({"title":"watch","trigger":trail}),
+        json!({"action":"postpone","id":id,"after_seconds":60}),
+        json!({"action":"drop","id":id}),
+    ] {
+        let mut request = call(now(), arguments);
+        request.context.origin.by = Starter::Unknown;
+        let answer = remind(&sense, &request).await;
+        assert_eq!(answer.json["error"], "untrusted", "{answer:?}");
+    }
+    for (bad, why) in [
+        (json!({"kind":"watch","run":{"kind":"command","command":"true"},"interval_seconds":10}), "interval_seconds"),
+        (json!({"kind":"watch","run":{"kind":"trail","name":"t","limit_seconds":301}}), "run.limit_seconds"),
+        (
+            json!({"kind":"watch","run":{"kind":"command","command":"true"},"interval_seconds":600,
+                   "max_interval_seconds":120}),
+            "max_interval_seconds",
+        ),
+    ] {
+        let answer = remind(&sense, &call(now(), json!({"title":"bad","trigger":bad}))).await;
+        assert!(answer.is_error && answer.text.contains(why), "{answer:?}");
+    }
 }

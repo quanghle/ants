@@ -42,6 +42,7 @@ pub(super) async fn check_worker(program: &Path, deadline: Duration) -> Check {
         limits: Limits { steps: 0, ..Limits::default() },
         clock: 0,
         seed: 0,
+        watcher: false,
     };
     let fix = || {
         vec![format!(

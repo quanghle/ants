@@ -104,19 +104,11 @@ async fn probe(condition: &Condition, previous: Option<&Value>, context: &Contex
         }
         Condition::Command { command } => {
             let command = arg(command, "command")?;
-            let tool = ToolCall {
-                kind: "execute".into(),
-                title: command.into(),
-                locations: Vec::new(),
-                input: Some(json!({"command": command}).to_string()),
-            };
-            if !context.allow.iter().any(|rule| crate::permission::covers(rule, &tool)) {
+            if !allowed(command, context.allow) {
                 bail!("command trigger is outside the ant's tool allow rules");
             }
-            #[cfg(unix)]
-            let fired = status("sh", &["-c", command], context).await?;
-            #[cfg(windows)]
-            let fired = status("cmd.exe", &["/D", "/S", "/C", command], context).await?;
+            let (program, args) = shell(command);
+            let fired = status(program, &args, context).await?;
             (fired, json!(fired), "command exited successfully")
         }
         Condition::Sense { event, id } => {
@@ -139,6 +131,25 @@ fn positive(number: u64, field: &str) -> Result<u64> {
         bail!("condition needs {field}");
     }
     Ok(number)
+}
+
+/// Whether the ant's tool allow rules `allow` cover running `command`.
+pub(super) fn allowed(command: &str, allow: &[String]) -> bool {
+    let tool = ToolCall {
+        kind: "execute".into(),
+        title: command.into(),
+        locations: Vec::new(),
+        input: Some(json!({"command": command}).to_string()),
+    };
+    allow.iter().any(|rule| crate::permission::covers(rule, &tool))
+}
+
+/// The program and arguments running `command` in the platform's shell.
+pub(super) fn shell(command: &str) -> (&'static str, Vec<&str>) {
+    #[cfg(unix)]
+    return ("sh", vec!["-c", command]);
+    #[cfg(windows)]
+    return ("cmd.exe", vec!["/D", "/S", "/C", command]);
 }
 
 fn command(program: &str, args: &[&str], context: &Context<'_>, capture: bool) -> Command {
@@ -173,6 +184,29 @@ impl Drop for Running {
 async fn status(program: &str, args: &[&str], context: &Context<'_>) -> Result<bool> {
     let mut child = Running(command(program, args, context, false).spawn().context("starting a condition check")?);
     Ok(child.0.wait().await.context("waiting for a condition check")?.success())
+}
+
+/// The exit status of `program` run with `args` and its stdout, failing past [`MAX_OUTPUT`]; no status when a signal
+/// ended it. Takes at most 30 seconds.
+pub(super) async fn captured(program: &str, args: &[&str], context: &Context<'_>) -> Result<(Option<i32>, Vec<u8>)> {
+    tokio::time::timeout(TIMEOUT, async {
+        let mut child = Running(command(program, args, context, true).spawn().context("starting the command")?);
+        let mut bytes = Vec::new();
+        child
+            .0
+            .stdout
+            .take()
+            .context("the command's stdout is missing")?
+            .take(MAX_OUTPUT + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() as u64 > MAX_OUTPUT {
+            bail!("the command wrote over 64 KiB");
+        }
+        Ok((child.0.wait().await.context("waiting for the command")?.code(), bytes))
+    })
+    .await
+    .context("the command took over 30 seconds")?
 }
 
 async fn output(program: &str, args: &[&str], context: &Context<'_>) -> Result<Vec<u8>> {

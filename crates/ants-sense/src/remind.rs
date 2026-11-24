@@ -21,9 +21,11 @@ use crate::{Answer, Sense};
 mod condition;
 mod tool;
 mod trigger;
+pub mod watch;
 
 pub use condition::{Condition, FileEvent, IssueState, PrState, SenseEvent};
 pub use trigger::Trigger;
+pub use watch::{Watch, Watched};
 
 /// Whether sense `event` holds at `now` among `items`, of item `id` alone when given: the observation of a
 /// [`Condition::Sense`].
@@ -40,7 +42,7 @@ pub async fn sense_condition(
 }
 
 pub const KIND: &str = "reminder";
-/// The most reminders active at once, commitments' included.
+/// The most reminders active at once, watchers and commitments' included.
 pub const MAX_ACTIVE: usize = 50;
 pub const CONDITION_DAYS: i64 = 30;
 const SCHEDULER: &str = "sense:scheduler";
@@ -51,7 +53,7 @@ const LIST: &str = "sense_remind action=list";
 /// its store.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RemindError {
-    #[error("at most {MAX_ACTIVE} reminders may be active")]
+    #[error("at most {MAX_ACTIVE} reminders and watchers may be active")]
     TooMany,
     #[error("{0}")]
     Trigger(String),
@@ -65,8 +67,8 @@ impl From<RemindError> for Answer {
         match error {
             RemindError::TooMany => {
                 let message = format!(
-                    "At most {MAX_ACTIVE} reminders may be active, commitments' included: drop one or resolve a \
-                     commitment first."
+                    "At most {MAX_ACTIVE} reminders may be active, watchers and commitments' included: drop one or \
+                     resolve a commitment first."
                 );
                 Self::error("too_many", message)
             }
@@ -127,6 +129,10 @@ pub struct Reminder {
     pub observation: Option<Value>,
     /// When the latest condition check was reserved.
     pub check_started: Option<DateTime<Utc>>,
+    /// A watcher's checks in a row that failed, its command refused or past its time among them.
+    pub failed_checks: Option<u64>,
+    /// Why a watcher's latest check failed, while its checks keep failing.
+    pub check_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +144,8 @@ pub enum Status {
     Acknowledged,
     Dropped,
     Expired,
+    /// A watcher whose check reported it done, retired after its last firing.
+    Done,
 }
 
 impl Status {
@@ -148,6 +156,7 @@ impl Status {
             Self::Acknowledged => "acknowledged",
             Self::Dropped => "dropped",
             Self::Expired => "expired",
+            Self::Done => "done",
         }
     }
 }
@@ -178,7 +187,7 @@ impl Reminder {
         Self {
             title,
             thread: Some(thread),
-            unchanged_checks: trigger.condition().map(|_| 0),
+            unchanged_checks: (trigger.condition().is_some() || trigger.watch().is_some()).then_some(0),
             trigger,
             status: Status::Active,
             next_due: Some(first_due),
@@ -197,6 +206,8 @@ impl Reminder {
             snoozed: false,
             observation: None,
             check_started: None,
+            failed_checks: None,
+            check_error: None,
         }
     }
 
@@ -209,6 +220,16 @@ impl Reminder {
     pub fn condition(&self) -> Option<&Condition> {
         let unfired = self.pending.is_none() && self.occurrence_firings == 0 && !self.snoozed;
         self.trigger.condition().filter(|_| unfired)
+    }
+
+    /// The watcher to check: none for another trigger, while a firing of it is pending, or once it is not active.
+    pub fn watch(&self) -> Option<&Watch> {
+        self.trigger.watch().filter(|_| self.pending.is_none() && self.status == Status::Active)
+    }
+
+    /// The digest of a watcher's latest successful check.
+    pub fn digest(&self) -> Option<&str> {
+        self.observation.as_ref()?.get("digest")?.as_str()
     }
 
     /// The context its condition is checked in: that of its creation, in the thread it wakes.
@@ -250,8 +271,36 @@ pub struct Due {
     pub id: ItemId,
     pub at: DateTime<Utc>,
     pub condition: Option<Condition>,
+    /// The watcher to check; none for another trigger or a pending delivery.
+    pub watch: Option<Watch>,
     pub observation: Option<Value>,
     pub workdir: Option<PathBuf>,
+}
+
+/// A watcher's check reserved before it runs, as a [`ConditionCheck`] is. Its result applies only to this revision
+/// ([`complete_watch`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatchCheck {
+    pub id: ItemId,
+    pub revision: u64,
+    pub at: DateTime<Utc>,
+    pub watch: Watch,
+    /// The digest of the latest successful check; none before the first.
+    pub digest: Option<String>,
+    /// The context to check in ([`Reminder::source`]).
+    pub source: Option<CallContext>,
+    pub workdir: Option<PathBuf>,
+    /// The machine whose `workdir` it is.
+    pub workdir_machine: Option<String>,
+}
+
+/// What a watcher's check found ([`complete_watch`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    /// It ran: the digest of its result, and whether it reported the watcher done.
+    Seen { digest: String, done: bool },
+    /// It could not run or failed, for this reason.
+    Failed(String),
 }
 
 /// A condition probe reserved before running external commands. Results apply only to this revision.
@@ -278,7 +327,23 @@ pub struct Firing {
     pub thread: Option<ThreadId>,
     pub reason: String,
     pub at: DateTime<Utc>,
+    /// The firing it replaces: the same watcher's last, whose wake is withdrawn while it still waits in the queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
+    /// Whether it is a watcher's last, its check having reported it done: its delivery retires the watcher.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub last: bool,
 }
+
+impl Firing {
+    /// Whether it is a watcher's.
+    pub fn watched(&self) -> bool {
+        self.replaces.is_some() || self.last || self.reason.starts_with(WATCH_REASON)
+    }
+}
+
+/// How the reason of a watcher's firing starts.
+pub const WATCH_REASON: &str = "the watcher";
 
 pub fn schema() -> Value {
     tool::schema()
@@ -325,6 +390,15 @@ pub(crate) async fn brief(items: &dyn Items, now: DateTime<Utc>) -> Result<[List
         if !is_fired {
             let _ = write!(line, "; trigger {}", json!(reminder.trigger));
         }
+        if reminder.trigger.watch().is_some() {
+            if let Some(delivered) = &reminder.delivered {
+                let _ = write!(line, "; last fired {}", stamp(delivered.at));
+            }
+            if let Some(failed) = reminder.failed_checks {
+                let why = reminder.check_error.as_deref().unwrap_or("unknown");
+                let _ = write!(line, "; {failed} checks failed in a row, the latest because {why}");
+            }
+        }
         let _ = write!(line, "; thread {}", reminder.thread.as_ref().map_or("", ThreadId::as_str));
         if let Some(promise) = &reminder.promise {
             let _ = write!(line, "; commitment {promise}");
@@ -336,6 +410,25 @@ pub(crate) async fn brief(items: &dyn Items, now: DateTime<Utc>) -> Result<[List
         }
     }
     Ok([Listing { lines: fired, more: LIST }, Listing { lines: upcoming, more: LIST }])
+}
+
+/// The ant's active watchers, as `ants doctor` reads them ([`watch::WatcherStatus`]).
+pub async fn watcher_status(items: &dyn Items, now: DateTime<Utc>) -> Result<watch::WatcherStatus, StoreError> {
+    let watchers = active(items, now)
+        .await?
+        .into_iter()
+        .filter_map(|(item, reminder)| {
+            let runs = reminder.trigger.watch()?.run.runs();
+            Some(watch::WatcherState {
+                id: item.id,
+                title: reminder.title,
+                runs,
+                failed_checks: reminder.failed_checks.unwrap_or_default(),
+                error: reminder.check_error,
+            })
+        })
+        .collect();
+    Ok(watch::WatcherStatus { checked_at: now, watchers })
 }
 
 /// The next scheduler deadline, including condition expiry and a pending delivery left by a previous daemon.
@@ -372,6 +465,7 @@ async fn schedule(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<Due>, Sto
             id: item.id,
             at,
             condition: reminder.condition().cloned(),
+            watch: reminder.watch().cloned(),
             observation: reminder.observation,
             workdir: reminder.workdir,
         });
@@ -401,7 +495,7 @@ pub async fn prepare_firing(
             expire(items, &item, reminder).await?;
             return Ok(None);
         }
-        if reminder.next_due.is_none_or(|at| at > now) || reminder.condition().is_some() {
+        if reminder.next_due.is_none_or(|at| at > now) || reminder.condition().is_some() || reminder.watch().is_some() {
             return Ok(None);
         }
         prepare(items, &item, reminder, now, reason).await.map(Some)
@@ -425,7 +519,15 @@ pub async fn confirm_delivered(
             return Err(StoreError::Unavailable(format!("firing {firing_id} is not pending for reminder {id}")));
         }
         reminder.delivered = Some(Delivered { id: firing.id, at: now });
-        if reminder.occurrence_firings < 4 {
+        if let Some(watch) = reminder.trigger.watch() {
+            reminder.occurrence_firings = 0;
+            if firing.last {
+                reminder.next_due = None;
+                reminder.status = Status::Done;
+            } else {
+                reminder.next_due = Some(add(now, watch.next_check(0))?);
+            }
+        } else if reminder.occurrence_firings < 4 {
             reminder.next_due = Some(add(now, Duration::hours(1))?);
         } else {
             reminder.finish_occurrence(now)?;
@@ -550,6 +652,104 @@ pub async fn complete_condition(
     }
 }
 
+/// Fence and reserve a watcher's check, persisting its next allowed check before it runs, as
+/// [`reserve_condition`] does for a condition.
+pub async fn reserve_watch(
+    items: &dyn Items,
+    id: &ItemId,
+    now: DateTime<Utc>,
+) -> Result<Option<WatchCheck>, StoreError> {
+    read_modify_write(|| async move {
+        let item = get(items, id).await?;
+        let mut reminder = Reminder::of(&item)?;
+        if reminder.expired(now) && reminder.status == Status::Active {
+            expire(items, &item, reminder).await?;
+            return Ok(None);
+        }
+        let Some(watch) = reminder.watch().cloned() else { return Ok(None) };
+        if reminder.next_due.is_none_or(|at| at > now) {
+            return Ok(None);
+        }
+        reminder.next_due = Some(add(now, watch.next_check(reminder.unchanged_checks.unwrap_or_default()))?);
+        reminder.check_started = Some(now);
+        let reserved = change(items, &item, &reminder).await?;
+        Ok(Some(WatchCheck {
+            id: reserved.id,
+            revision: reserved.revision,
+            at: now,
+            watch,
+            digest: reminder.digest().map(str::to_owned),
+            source: reminder.source(),
+            workdir: reminder.workdir,
+            workdir_machine: reminder.workdir_machine,
+        }))
+    })
+    .await
+}
+
+/// Apply a reserved watcher check's result: a result whose digest differs from the last check's fires, but on the
+/// first check unless the watcher asks for it ([`Watch::first`]); one reporting the watcher done fires a last time
+/// whatever its digest. A failed check fires nothing. A change since the reservation invalidates the check.
+pub async fn complete_watch(
+    items: &dyn Items,
+    check: &WatchCheck,
+    now: DateTime<Utc>,
+    checked: Checked,
+) -> Result<Option<Firing>, StoreError> {
+    let item = get(items, &check.id).await?;
+    if item.revision != check.revision {
+        return Ok(None);
+    }
+    let mut reminder = Reminder::of(&item)?;
+    if reminder.status != Status::Active {
+        return Ok(None);
+    }
+    if reminder.expired(now) {
+        return match expire(items, &item, reminder).await {
+            Err(StoreError::Conflict { .. }) => Ok(None),
+            result => result.map(|_| None),
+        };
+    }
+    reminder.check_started = None;
+    let (fire, changed) = match checked {
+        Checked::Seen { digest, done } => {
+            reminder.failed_checks = None;
+            reminder.check_error = None;
+            let changed = check.digest.as_deref() != Some(digest.as_str());
+            let fire = done || (changed && (check.digest.is_some() || check.watch.first));
+            reminder.observation = Some(json!({"digest": digest}));
+            (fire.then_some(done), changed)
+        }
+        Checked::Failed(why) => {
+            reminder.failed_checks = Some(reminder.failed_checks.unwrap_or_default().saturating_add(1));
+            let why =
+                crate::sanitize::sanitize(&why, crate::sanitize::Lines::Single, crate::sanitize::Limit::Chars(500))
+                    .map_or_else(|_| "the check failed".to_owned(), |clean| clean.text);
+            reminder.check_error = Some(why);
+            (None, false)
+        }
+    };
+    let checks = if changed { 0 } else { reminder.unchanged_checks.unwrap_or_default().saturating_add(1) };
+    reminder.unchanged_checks = Some(checks);
+    if let Some(done) = fire {
+        let reason = if done {
+            format!("{WATCH_REASON} reported it is done: this is its last firing")
+        } else {
+            format!("{WATCH_REASON}'s result changed")
+        };
+        let replaces = reminder.delivered.as_ref().map(|delivered| delivered.id.clone());
+        return match prepare_as(items, &item, reminder, now, &reason, replaces, done).await {
+            Err(StoreError::Conflict { .. }) => Ok(None),
+            result => result.map(Some),
+        };
+    }
+    reminder.next_due = Some(add(check.at, check.watch.next_check(checks))?);
+    match change(items, &item, &reminder).await {
+        Err(StoreError::Conflict { .. }) => Ok(None),
+        result => result.map(|_| None),
+    }
+}
+
 fn interval(condition: &Condition, unchanged: u64) -> Duration {
     Duration::minutes(if unchanged >= 10 {
         30
@@ -563,9 +763,22 @@ fn interval(condition: &Condition, unchanged: u64) -> Duration {
 async fn prepare(
     items: &dyn Items,
     item: &Item,
+    reminder: Reminder,
+    now: DateTime<Utc>,
+    reason: &str,
+) -> Result<Firing, StoreError> {
+    prepare_as(items, item, reminder, now, reason, None, false).await
+}
+
+/// [`prepare`] a firing replacing the firing `replaces`, the last of its watcher with `last`.
+async fn prepare_as(
+    items: &dyn Items,
+    item: &Item,
     mut reminder: Reminder,
     now: DateTime<Utc>,
     reason: &str,
+    replaces: Option<String>,
+    last: bool,
 ) -> Result<Firing, StoreError> {
     let number = reminder
         .number
@@ -581,6 +794,8 @@ async fn prepare(
         thread: reminder.thread.clone(),
         reason,
         at: now,
+        replaces,
+        last,
     };
     reminder.number = number;
     reminder.occurrence_firings += 1;

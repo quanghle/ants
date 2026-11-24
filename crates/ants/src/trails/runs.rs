@@ -409,7 +409,12 @@ fn answered(run: &TrailRun, journal: &[JournalEntry]) -> Vec<[String; 5]> {
             let whom = match e.function {
                 TrailFunction::Agent => whom(&e.args),
                 TrailFunction::Human => run.owner.as_ref().map_or_else(|| "-".to_owned(), ToString::to_string),
-                TrailFunction::Trail | TrailFunction::Goto => run.conductor.to_string(),
+                TrailFunction::Trail
+                | TrailFunction::Goto
+                | TrailFunction::Command
+                | TrailFunction::ReadFile
+                | TrailFunction::Bd
+                | TrailFunction::Thread => run.conductor.to_string(),
             };
             let gist = if e.function == TrailFunction::Goto { destination(&e.args) } else { gist(e.function, &e.args) };
             [e.call.to_string(), e.function.name().to_owned(), whom, gist, answer]

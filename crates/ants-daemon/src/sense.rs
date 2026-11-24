@@ -26,7 +26,7 @@ mod workdirs;
 pub use ants_sense::home::DIR;
 pub use ants_sense::{CAPABILITIES, NAME};
 pub use dreams::{Dreams, Grounded, Refusal};
-pub(crate) use scheduler::{Daemon, Dreaming, Serving};
+pub(crate) use scheduler::{Daemon, Dreaming, Serving, TrailChecks, Watching};
 pub use stores::{Hosting, Link, Retrying};
 
 use crate::daemon::Config;
@@ -104,7 +104,7 @@ impl Sense {
 
     /// Run the schedule of the ant `config` serves on `machine` until the guard drops, its dreams taking from the
     /// daemon what `dreaming` gives, and each of its reads of the ant's items putting the profile of the ant's
-    /// confirmed persona in `workload` ([`published::profile`]). Start only after the ant holds its colony registration
+    /// confirmed persona in `workload` ([`published::profile`]), its watchers' checks taking what `watching` gives. Start only after the ant holds its colony registration
     /// and its wake service is installed.
     pub(crate) fn schedule(
         &self,
@@ -112,8 +112,9 @@ impl Sense {
         machine: &str,
         dreaming: Arc<dyn Dreaming>,
         workload: Arc<crate::colony::Workload>,
+        watching: Watching,
     ) -> Serving {
-        scheduler::serve(self.provider.clone(), self.wakers.clone(), config, machine, dreaming, workload)
+        scheduler::serve(self.provider.clone(), self.wakers.clone(), config, machine, dreaming, workload, watching)
     }
 
     /// Put in `workload` the profile of `ant`'s confirmed persona before the ant's first colony entry, which then

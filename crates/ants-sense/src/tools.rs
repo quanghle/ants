@@ -199,7 +199,8 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "remind",
-        description: "Set a timed or conditional reminder; acknowledge, postpone, renew or drop it.",
+        description: "Set a timed or conditional reminder, or a watcher checking a command or trail on an interval; acknowledge, \
+                      postpone, renew or drop it.",
         schema: crate::remind::schema,
         handler: crate::remind::remind,
         dream: None,

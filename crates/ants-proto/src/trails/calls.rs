@@ -81,7 +81,7 @@ impl TrailFunction {
         match self {
             Self::Agent => args.get("label")?.as_str().map(str::to_owned),
             Self::Trail => args.get("name")?.as_str().map(|name| format!("trail {name}")),
-            Self::Human | Self::Goto => None,
+            Self::Human | Self::Goto | Self::Command | Self::ReadFile | Self::Bd | Self::Thread => None,
         }
     }
 }

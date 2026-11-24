@@ -1,11 +1,11 @@
-//! When a reminder fires ([`Trigger`]): at a time, after a delay, daily or weekly at a UTC clock time, or on a
-//! condition; its validation, its schema in the `sense_remind` tool, and its first and next firing times.
+//! When a reminder fires ([`Trigger`]): at a time, after a delay, daily or weekly at a UTC clock time, on a
+//! condition, or, a watcher, on each change of what it watches; its validation, its schema in the `sense_remind` tool, and its first and next firing times.
 
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Condition, RemindError};
+use super::{Condition, RemindError, Watch};
 
 /// The most seconds of an `after` trigger: a year.
 pub const MAX_AFTER_SECONDS: u64 = 365 * 24 * 60 * 60;
@@ -14,17 +14,39 @@ pub const MAX_AFTER_SECONDS: u64 = 365 * 24 * 60 * 60;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Trigger {
-    At { at: DateTime<Utc> },
-    After { seconds: u64 },
-    Daily { time: String, timezone: String },
-    Weekly { weekday: String, time: String, timezone: String },
-    Condition { condition: Condition },
+    At {
+        at: DateTime<Utc>,
+    },
+    After {
+        seconds: u64,
+    },
+    Daily {
+        time: String,
+        timezone: String,
+    },
+    Weekly {
+        weekday: String,
+        time: String,
+        timezone: String,
+    },
+    Condition {
+        condition: Condition,
+    },
+    /// A watcher: armed until dropped, expired or done, firing on each change of its check's result.
+    Watch(Watch),
 }
 
 impl Trigger {
     pub fn condition(&self) -> Option<&Condition> {
         match self {
             Self::Condition { condition } => Some(condition),
+            _ => None,
+        }
+    }
+
+    pub fn watch(&self) -> Option<&Watch> {
+        match self {
+            Self::Watch(watch) => Some(watch),
             _ => None,
         }
     }
@@ -49,6 +71,7 @@ impl Trigger {
                 Ok(())
             }
             Self::Condition { condition } => condition.validate(),
+            Self::Watch(watch) => watch.validate(),
         }
     }
 
@@ -56,7 +79,7 @@ impl Trigger {
         match self {
             Self::At { at } => Ok(*at),
             Self::After { seconds } => super::add(now, Duration::seconds(*seconds as i64)),
-            Self::Condition { .. } => Ok(now),
+            Self::Condition { .. } | Self::Watch(_) => Ok(now),
             _ => self.next(now)?.ok_or_else(no_time),
         }
     }
@@ -103,6 +126,7 @@ fn weekday_number(day: &str) -> Result<u32, String> {
 
 pub(super) fn schema() -> Value {
     let condition = super::condition::schema();
+    let watch = super::watch::schema();
     json!({"oneOf":[
         {"type":"object","additionalProperties":false,"required":["kind","at"],
          "properties":{"kind":{"const":"at"},"at":{"type":"string","format":"date-time"}}},
@@ -115,6 +139,7 @@ pub(super) fn schema() -> Value {
          "properties":{"kind":{"const":"weekly"},"weekday":{"enum":["mon","tue","wed","thu","fri","sat","sun"]},
                        "time":{"type":"string","pattern":"^([01][0-9]|2[0-3]):[0-5][0-9]$"},"timezone":{"const":"UTC"}}},
         {"type":"object","additionalProperties":false,"required":["kind","condition"],
-         "properties":{"kind":{"const":"condition"},"condition":condition}}
+         "properties":{"kind":{"const":"condition"},"condition":condition}},
+        watch
     ]})
 }

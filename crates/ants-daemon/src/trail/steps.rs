@@ -168,6 +168,9 @@ pub(super) fn envelope(run: &TrailRun, pending: &PendingCall, tips: Option<&TipB
         TrailFunction::Human => Envelope::asking(thread, from, to, crate::mcp::asked_questions(pending.args.clone())?),
         TrailFunction::Trail => return Err("a trail() call sends no message".to_owned()),
         TrailFunction::Goto => return Err("a goto() call sends no message".to_owned()),
+        TrailFunction::Command | TrailFunction::ReadFile | TrailFunction::Bd | TrailFunction::Thread => {
+            return Err(format!("{}() is a watcher's call and sends no message", pending.function.name()));
+        }
     };
     let allow = (!run.origin.trusted()).then(|| WEBHOOK_ALLOW.map(str::to_owned).to_vec());
     let origin_thread = run.parent.as_ref().map_or(&run.thread, |parent| &parent.origin_thread);

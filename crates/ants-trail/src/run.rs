@@ -107,6 +107,9 @@ pub struct Session {
     /// The call id past every call made.
     next_call: u32,
     status: Status,
+    /// Whether the run is a watcher's check ([`Run::watching`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    watcher: bool,
 }
 
 impl Session {
@@ -147,6 +150,12 @@ impl Session {
     #[must_use]
     pub fn next_call(&self) -> u32 {
         self.next_call
+    }
+
+    /// Whether the run is a watcher's check ([`Run::watching`]).
+    #[must_use]
+    pub fn watcher(&self) -> bool {
+        self.watcher
     }
 
     /// The state under `limits` instead, as when a run that failed on a limit continues under raised ones.
@@ -207,8 +216,17 @@ impl Run {
             first_call: 0,
             next_call: 0,
             status: Status::Running,
+            watcher: false,
         };
         Ok(Self { state, journal: Vec::new() })
+    }
+
+    /// The run as a watcher's check: its script may call command(), read_file(), bd() and thread() alone, which the
+    /// host answers, and no step; every other call raises in the script.
+    #[must_use]
+    pub fn watching(mut self) -> Self {
+        self.state.watcher = true;
+        self
     }
 
     /// The run, not started, with its call ids from `first` on: a leg following another, numbered from that one's
@@ -255,6 +273,7 @@ impl Run {
             limits,
             clock: run.state.clock,
             seed,
+            watcher: run.state.watcher,
         };
         let mut response = worker.call(&start, runner::deadline(limits.compute(), 0)).await?;
         run.number(&mut response);
@@ -268,6 +287,7 @@ impl Run {
                 limits,
                 seed,
                 steps: steps(calls),
+                watcher: run.state.watcher,
             };
             response = worker.call(&resume, runner::deadline(limits.compute(), run.journal.len())).await?;
             run.number(&mut response);
@@ -303,6 +323,7 @@ impl Run {
             limits: state.limits,
             clock: state.clock,
             seed: state.seed,
+            watcher: state.watcher,
         };
         let response = worker.call(&request, runner::deadline(state.limits.compute(), 0)).await;
         self.respond(response)
@@ -350,7 +371,8 @@ impl Run {
             return Err(RunError::Unrestorable("the run has no stored session".to_owned()));
         };
         let deadline = runner::deadline(state.limits.compute(), answers.len());
-        let request = Request::Resume { snapshot, answers, limits: state.limits, seed: state.seed, steps: state.steps };
+        let (limits, seed, steps, watcher) = (state.limits, state.seed, state.steps, state.watcher);
+        let request = Request::Resume { snapshot, answers, limits, seed, steps, watcher };
         let response = worker.call(&request, deadline).await;
         self.respond(response)
     }

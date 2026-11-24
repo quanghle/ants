@@ -123,8 +123,34 @@ Nothing else of the host is reachable: these names are defined before the script
   moving on to its next stage as soon as its own step is answered, with no barrier between stages; returns the last
   stage's results in item order.
 
-Only `agent()`, `human()`, `trail()` and `goto()` suspend a run. They are coroutine functions: await them, or hand
-their coroutines to `parallel`. Their arguments must be JSON: anything else raises TypeError.
+Only `agent()`, `human()`, `trail()` and `goto()` suspend a run, and a watcher's reads below. They are coroutine
+functions: await them, or hand their coroutines to `parallel`. Their arguments must be JSON: anything else raises
+TypeError.
+
+### A watcher's reads
+
+A saved trail can be a watcher's check (`sense_remind`'s `watch` trigger, `{"kind":"trail","name":...}`): the ant's
+daemon runs it on the watcher's interval, for at most its `limit_seconds` (30 s by default), and wakes the ant when its
+result's `output` changes. Such a run prompts no ant: `agent()`, `human()`, `trail()`, `goto()`, `phase()` and `log()`
+raise `RuntimeError`. It reads instead, and only it may:
+
+- `await command(cmd)`: runs `cmd` in the ant's workdir under the ant's tool allow rules, for at most 30 s; returns
+  `{"status": exit status, "stdout": text}`.
+- `await read_file(path)`: a workdir-relative file of at most 64 KiB as text; None when there is none.
+- `await bd(*args)`: the JSON of `bd <args> --json` for a subcommand that only reads (`show`, `list`, `ready`,
+  `blocked`, `search`, `count`, `stale`, `comments`).
+- `await thread(id=None)`: `{"register", "record"}`, the resume register and the record of thread `id`, the watcher's
+  own thread without it.
+
+A read that fails raises `RuntimeError`. The script returns `{"output": str, "done": bool}`: `done` true wakes the ant
+a last time and retires the watcher.
+
+```python
+# Saved as pr-checks, watched with {"kind":"trail","name":"pr-checks","args":{"pr":7}}.
+meta = {"name": "pr-checks", "description": "Watch a pull request's checks", "phases": ["check"]}
+checks = await command(f"gh pr checks {args['pr']}")
+{"output": checks["stdout"], "done": checks["status"] == 0}
+```
 
 ### Errors
 
