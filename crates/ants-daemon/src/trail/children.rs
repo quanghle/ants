@@ -93,6 +93,7 @@ impl Trails {
             spends_from: None,
             grants: Vec::new(),
             origin: parent.origin.clone(),
+            work_branch: parent.work_branch.clone(),
             limits,
             state: RunState::Running,
             phase: None,

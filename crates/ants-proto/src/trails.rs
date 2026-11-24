@@ -34,7 +34,7 @@ pub use ratings::{
 };
 pub use runs::{
     CallAnswer, JournalEntry, PendingCall, QueuedCall, RunLimit, RunState, TrailFunction, TrailLeg, TrailLimits,
-    TrailParent, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, Unresumable, leg_entry,
+    TrailParent, TrailRun, TrailRunIndex, TrailSession, TrailStepThread, Unresumable, WorkBranch, leg_entry,
 };
 pub use saved::{SavedTrail, Saver};
 pub use saving::{SAVE_TRAIL_REPEAT, SAVE_TRAIL_WAIT, SaveTrailOutcome, SaveTrailReply, SaveTrailRequest, TrailChange};

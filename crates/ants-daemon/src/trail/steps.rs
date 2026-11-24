@@ -165,7 +165,11 @@ pub(super) fn envelope(run: &TrailRun, pending: &PendingCall, tips: Option<&TipB
             let args = AgentArgs::of(&pending.args)?;
             let tips = tips.and_then(|board| tips_block(board, &step, &args.prompt, run.origin.trusted(), Utc::now()));
             let team = args.team.as_deref().and_then(|team| team.parse().ok());
-            Envelope { team, ..Envelope::on_thread(thread, from, to, prompt(&args, tips.as_deref())) }
+            let text = match super::work::work_line(run) {
+                Some(work) => format!("{}\n\n{work}", prompt(&args, tips.as_deref())),
+                None => prompt(&args, tips.as_deref()),
+            };
+            Envelope { team, ..Envelope::on_thread(thread, from, to, text) }
         }
         TrailFunction::Human => Envelope::asking(thread, from, to, crate::mcp::asked_questions(pending.args.clone())?),
         TrailFunction::Trail => return Err("a trail() call sends no message".to_owned()),

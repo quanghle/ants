@@ -54,6 +54,7 @@ impl Trails {
         // Charged in memory alone: what a message tells is charged once however often it is taken, and stored with the
         // answer, or the re-ask, it brings.
         self.take_told(&slot, pending.call, &pending.to, message);
+        self.note_work_branch(&slot, &pending, message);
         let header = slot.header();
         let spent = match pending.function {
             TrailFunction::Agent => pending.turn_budget.saturating_sub(message.turn_budget),

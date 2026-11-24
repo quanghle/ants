@@ -83,6 +83,7 @@ impl Trails {
             spends_from,
             grants: Vec::new(),
             origin,
+            work_branch: None,
             limits,
             state: RunState::Running,
             phase: None,

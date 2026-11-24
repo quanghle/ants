@@ -1,4 +1,4 @@
-//! Attaching files to messages and reading attachments.
+//! Attaching files to messages and reading attachments, and a handoff naming the branch its work is on.
 
 use super::*;
 
@@ -327,4 +327,46 @@ async fn a_message_over_max_payload_is_refused_before_its_files_are_stored() {
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "x".repeat(2048)})).await;
     assert!(ok, "{text}");
     assert_eq!(sent.try_recv().unwrap().text.len(), 2048, "one under the limit goes");
+}
+
+#[tokio::test]
+async fn handoff_carries_attachments_and_names_the_branch_holding_the_threads_commits() {
+    let Some(repo) = crate::test_support::repo("handoff-branch") else { return };
+    let home = home("handoff-branch");
+    let (mcp, mut sent) = start(&home).await;
+    let stored = MemoryFiles::default();
+    mcp.with_files(memory_files(stored.clone()), home.to_path_buf());
+    let (ant, trees) = (user("dev-a"), repo.parent().unwrap().join("home"));
+    let worktrees = Arc::new(crate::worktrees::Worktrees::find(&ant, &repo, &trees).await.unwrap());
+    mcp.with_worktrees(worktrees.clone());
+    let current = from_human();
+    let thread = &current.thread_id;
+    let work = worktrees.checkout(thread).await.unwrap();
+    std::fs::write(work.join("plan.md"), "the plan").unwrap();
+    let _turn = mcp.begin(&current);
+    let client = client_in(&mcp, thread, &work).await;
+
+    let (ok, text) = call(&client, "handoff", serde_json::json!({"text": "carry on", "attach": ["plan.md"]})).await;
+    assert!(ok, "{text}");
+    let out = sent.try_recv().unwrap();
+    assert_eq!(out.text, "carry on", "no commits: no branch named");
+    let got: Vec<_> = out.attachments.iter().map(|a| (a.name.as_str(), a.size)).collect();
+    assert_eq!(got, [("plan.md", 8)]);
+    assert!(stored.locked().contains_key(&out.attachment_handle(out.attachments[0].id)), "stored under its handle");
+    let (ok, text) = call(&client, "handoff", serde_json::json!({"text": "x", "attach": ["../secret.txt"]})).await;
+    assert!(!ok && text.contains("nothing sent"), "{text}");
+    assert!(sent.try_recv().is_err());
+
+    crate::test_support::commit(&work, "the work so far");
+    let (ok, text) = call(&client, "handoff", serde_json::json!({"text": "carry on"})).await;
+    assert!(ok, "{text}");
+    let out = sent.try_recv().unwrap();
+    let branch = format!("ants/dev-a/{thread}");
+    let named = format!(
+        "carry on\n\n[ants] The work so far is on branch {branch}, 1 commit not in the repository's HEAD: this thread \
+         works in a checkout of its own, so merge {branch} to build on it."
+    );
+    assert_eq!(out.text, named);
+    assert!(out.attachments.is_empty());
+    std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
 }

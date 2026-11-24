@@ -44,6 +44,10 @@ struct Handoff {
     /// Thread to hand off to: omitted or `new` for a fresh one, or the id of another thread.
     #[serde(default)]
     thread: Option<String>,
+    /// Files to attach: paths in the working directory, at most 8 files of up to 8 MiB each; secrets in text files are
+    /// redacted.
+    #[serde(default)]
+    attach: Vec<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -217,13 +221,30 @@ impl Hub {
 impl Tools {
     /// Hand `text` to the ant itself on thread `on`, a fresh one unless it names another than `thread`, as `handoff`
     /// does.
-    async fn hand_off(&self, thread: &ThreadId, text: String, on: Option<&str>) -> Result<String, String> {
+    async fn hand_off(
+        &self,
+        thread: &ThreadId,
+        text: String,
+        on: Option<&str>,
+        attach: &[String],
+    ) -> Result<String, String> {
         let on = on.map(str::trim).filter(|on| !on.is_empty()).unwrap_or("new");
         if on != "new" && on.parse::<ThreadId>().is_ok_and(|on| on == *thread) {
             return Err(format!("thread {thread} is the current one; hand off to `new` or another thread"));
         }
-        let envelope = self.hub.follow_on(thread, self.hub.ant.clone(), text, Some(on))?;
+        let branch = match self.hub.worktrees.get() {
+            Some(worktrees) => worktrees.ahead(thread).await,
+            None => None,
+        };
+        let text = match branch {
+            Some(branch) => format!("{text}\n\n{}", branch.work_so_far()),
+            None => text,
+        };
+        let mut envelope = self.hub.follow_on(thread, self.hub.ant.clone(), text, Some(on))?;
+        let loaded = self.hub.load(thread, attach).await?;
+        envelope.attachments = loaded.iter().map(|l| l.attachment.clone()).collect();
         self.hub.check_fits(&envelope)?;
+        envelope.attachments = self.hub.store(loaded, |id| envelope.attachment_handle(id)).await?;
         self.hub.send(&envelope).await?;
         Ok(format!(
             "Handed off on thread {} as message {} ({} turns left). The work runs there as its own prompt, its answer \
@@ -351,14 +372,16 @@ impl Tools {
         while this one goes on, as for a separate task that came up. `thread` is `new` (the default) for a fresh \
         thread, or the id of another thread of this ant; never the current one. The message keeps the thread's owner, \
         spends one turn of the current thread's budget unless it answers a human, and carries the turns left; the \
-        answer goes to the thread's owner. The new thread does not see this one: the text says all the work needs.")]
+        answer goes to the thread's owner. The new thread does not see this one: the text says all the work needs, \
+        and `attach` lists files in the working directory to attach, as send_message's does. The new thread works in a \
+        checkout of its own: when this thread's branch holds commits, the message names it, to merge.")]
     async fn handoff(
         &self,
         Parameters(args): Parameters<Handoff>,
         cx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let thread = self.thread(&cx)?;
-        Ok(text(self.hand_off(&thread, args.text, args.thread.as_deref()).await))
+        Ok(text(self.hand_off(&thread, args.text, args.thread.as_deref(), &args.attach).await))
     }
 
     #[tool(description = "Ask the thread's owner, else the default human, 1-4 questions in one message, each \

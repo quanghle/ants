@@ -24,7 +24,7 @@ use crate::limits::overflow::ContextOverflow;
 use crate::limits::ratelimit::Limited;
 use crate::monitoring::status::{self, Status};
 use crate::sync::MutexExt as _;
-use crate::worktrees::WorktreeFailed;
+use crate::worktrees::{Branch, WorktreeFailed};
 
 use super::control::{Cancel, Why};
 use super::delivery::{fit_to, reply_room};
@@ -140,9 +140,7 @@ impl Inbox<'_> {
             publisher.note_opening(worktrees, thread, &envelope.text).await;
         }
         let branch = self.pool.branch_ahead(thread).await;
-        let branch_notice = branch.as_ref().map(|branch| {
-            format!("[ants] Branch {} holds {} not in {}.", branch.name, branch.commits_text(), branch.outside())
-        });
+        let branch_notice = branch.as_ref().map(Branch::holds_line);
         // What a human cancelled is not published.
         let publish_notice = match (publishing, &branch) {
             (Some((publisher, worktrees)), Some(branch)) if !cancelled => {

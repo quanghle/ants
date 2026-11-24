@@ -71,6 +71,14 @@ reached. A step to an ant no daemon serves waits in that ant's queue, as any mes
 human stops it. An exception the script does not catch fails the run with its traceback, lines numbered as in the
 file (`trail.py`).
 
+With [worktrees](config.md#worktrees) on, each step's thread works in a checkout of its own, from the repository's
+`HEAD`, so a step does not see the commits of the steps before it. A reply whose thread's branch holds commits ends with
+`[ants] Branch NAME holds N commits not in the repository's HEAD.`; the latest such reply to an `agent()` step sets the
+run's work branch, kept in its record (`ants trail show RUN --json`, `work_branch`) and by its child runs, and each
+`agent()` step sent after it ends with `[ants] The work of this run's steps so far is on branch NAME, in the repository
+of ANT: this step works in a checkout of its own, so merge NAME to build on it.` The reply text a script gets keeps the
+`Branch` line.
+
 Each JSON value a run takes or makes nests at most 100 lists and dicts (arrays and objects): a run's args deeper are
 refused at its start, a call's arguments deeper (a goto's `state` among them, one level down) raise `TypeError` where
 the call is made, a deeper result fails the run, a reply to a `schema=` step nested deeper does not match and is asked

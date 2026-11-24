@@ -25,6 +25,7 @@ mod schema;
 mod steps;
 mod store;
 mod tips;
+mod work;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

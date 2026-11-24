@@ -255,6 +255,10 @@ A step's message may carry tips from earlier runs of its trail: hints to verify,
 - **Vote on the tips used.** `vote_tip` with `helpful` when a tip helped, `stale` or `wrong` with a `reason` when it
   misled. Voting again replaces the earlier vote; no ant votes on its own tip. When tips of different writers share an
   id, `writer` names the one meant.
+- **Merge the branch a step names.** With worktrees, each step works in a checkout of its own from the repository's
+  `HEAD`. A step ending `[ants] The work of this run's steps so far is on branch NAME, …` builds on the earlier steps'
+  commits only once `NAME` is merged into its own checkout; commits made answering a step are named to the later steps
+  the same way.
 - **Leave a tip when something non-obvious was learnt** that a later step would otherwise rediscover: `leave_tip`, at
   most 1000 characters, specific and checkable, never the step's result nor what any ant would try first. A tip saying
   what a live tip says is refused (vote that one helpful instead); one much like live tips needs `force`.

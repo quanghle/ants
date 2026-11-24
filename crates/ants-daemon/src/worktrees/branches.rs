@@ -29,6 +29,31 @@ impl Branch {
         }
     }
 
+    /// The `[ants]` line a reply ends with when its thread's branch holds commits ([`Branch::held_in`] reads it).
+    pub fn holds_line(&self) -> String {
+        format!("[ants] Branch {} holds {} not in {}.", self.name, self.commits_text(), self.outside())
+    }
+
+    /// The branch the last [`Branch::holds_line`] of `text` names.
+    pub fn held_in(text: &str) -> Option<&str> {
+        text.lines().rev().find_map(|line| {
+            let (name, _) = line.strip_prefix("[ants] Branch ")?.split_once(" holds ")?;
+            (!name.is_empty() && !name.contains(char::is_whitespace)).then_some(name)
+        })
+    }
+
+    /// The `[ants]` line telling a prompt in another checkout that the work so far is on the branch, to merge.
+    pub fn work_so_far(&self) -> String {
+        format!(
+            "[ants] The work so far is on branch {}, {} not in {}: this thread works in a checkout of its own, so \
+             merge {} to build on it.",
+            self.name,
+            self.commits_text(),
+            self.outside(),
+            self.name
+        )
+    }
+
     /// What the commits are not in, in words.
     pub fn outside(&self) -> String {
         match &self.upstream {

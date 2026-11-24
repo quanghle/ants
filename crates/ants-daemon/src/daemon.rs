@@ -275,6 +275,9 @@ async fn serve(
     let _waking = wake::serve(providers, &config.ant, &js, outbox, sessions.clone(), attempts_kv.clone()).await;
     let marks = delivery_marks(attempts_kv, &config.ant, &config.storage.home).await;
     let pool = harness_pool(config, launch, sessions, &workload).await.with_lifecycle(lifecycle.clone());
+    if let Some(worktrees) = pool.shared_worktrees() {
+        services.mcp.with_worktrees(worktrees);
+    }
     let publisher = publisher(config, &js, redactor, &pool).await;
     let (messages, channels, window) = inbox_messages(&js, &stream, config).await?;
     let provider = services.provider(providers.sense_of(&config.provider));

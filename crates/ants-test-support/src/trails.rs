@@ -35,6 +35,7 @@ pub fn trail_run(conductor: &UserId, trail: Option<&str>, state: RunState, at: D
         spends_from: None,
         grants: Vec::new(),
         origin: Origin { by: Starter::Human { user: crate::human() }, channel: None },
+        work_branch: None,
         limits: TrailLimits::default(),
         state,
         phase: None,
