@@ -2,7 +2,8 @@
 # policy of the [[ant_template]] tables of its config file, on a human's approval otherwise. Run it on the machine
 # holding the auth directory (~/.config/ants/auth), whose account key it signs with.
 # User unit: scripts/install-units.sh --signer fills in the @...@ placeholders and installs it in
-# ~/.config/systemd/user. Until the hub answers, the signer fails and Restart starts it again.
+# ~/.config/systemd/user. Until the hub answers, the signer fails and Restart starts it again; Restart=always also
+# covers a clean exit on a SIGTERM systemd did not send, and only systemctl --user stop ants-signer keeps it stopped.
 
 [Unit]
 Description=ants: signer
@@ -12,7 +13,7 @@ After=ants-nats.service
 [Service]
 ExecStart="@ANTS@" signer --config "@CONFIG@"
 Environment=NO_COLOR=1
-Restart=on-failure
+Restart=always
 RestartSec=10
 # A replaced ants executable (an upgrade) exits with status 75, restarting onto the new one.
 SuccessExitStatus=75

@@ -6,7 +6,8 @@
 # The bearer token is read from its file at each start, so a new token takes effect at the next restart:
 # systemctl --user restart ants-bridge
 # ants-nats starts after it, so the leaf's uplink finds it listening; the leaf retries the uplink otherwise. Each leaf
-# connection retries the hub for 60 s; Restart covers failures of the bridge itself.
+# connection retries the hub for 60 s. Restart=always starts the bridge again after any exit, also a clean one on a
+# SIGTERM systemd did not send; only systemctl --user stop ants-bridge keeps it stopped.
 
 [Unit]
 Description=ants: bridge connect to the hub
@@ -18,7 +19,7 @@ ExecStart="@ANTS@" bridge connect \
     "@BRIDGE_URL@"
 Environment=NO_COLOR=1
 @IF_BRIDGE_CA@Environment="SSL_CERT_FILE=@BRIDGE_CA@"
-Restart=on-failure
+Restart=always
 RestartSec=10
 # A replaced ants executable (an upgrade) exits with status 75, restarting onto the new one.
 SuccessExitStatus=75

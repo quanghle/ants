@@ -2,8 +2,9 @@
 # ants-nats unit's, or, with [nats_server] in the config file (install-units.sh --managed-nats, no ants-nats unit), one
 # the daemon starts and stops itself.
 # User unit: scripts/install-units.sh fills in the @...@ placeholders and installs it in ~/.config/systemd/user.
-# Until ants-nats listens, the daemon waits, retrying the connection; Restart covers other failures. Without the
-# ants-nats unit, Wants and After name nothing.
+# Until ants-nats listens, the daemon waits, retrying the connection. Without the ants-nats unit, Wants and After name
+# nothing. Restart=always starts the daemon again after any exit, also a clean one on a SIGTERM systemd did not
+# send; only systemctl --user stop ants-daemon keeps it stopped.
 # The daemon reloads an edited config file within seconds; to reload at once: systemctl --user reload ants-daemon
 
 [Unit]
@@ -19,7 +20,7 @@ Environment="PATH=@PATH@" NO_COLOR=1
 # Open files: about 4 per ant and 3 per live harness; systemd's default soft limit of 1024 runs out near 250 ants. The
 # daemon raises its soft limit to the hard one at start in any case.
 LimitNOFILE=65536
-Restart=on-failure
+Restart=always
 RestartSec=10
 # A replaced ants executable (an upgrade) exits with status 75, restarting onto the new one.
 SuccessExitStatus=75
