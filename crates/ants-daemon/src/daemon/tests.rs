@@ -341,6 +341,7 @@ impl Bus {
         let (dev, chain, colony, humans) = (&self.dev, &self.chain, &self.colony, &self.humans);
         Escalator::new(dev.clone(), chain.clone(), colony.clone(), humans.clone(), self.ledger.clone(), send)
             .with_notes(escalation::jetstream_notes_sender(self.js.clone()))
+            .with_teams(escalation::jetstream_teams(self.js.clone(), None))
     }
 
     async fn until_acked(&self, seq: u64) {

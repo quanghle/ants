@@ -1,5 +1,5 @@
-//! Caps and turn budgets: spend warnings, escalations up the chain and to the owner, and the leader's answers that
-//! renew a thread.
+//! Caps and turn budgets: spend warnings, escalations up the chain, through the forest of teams, and to the owner, and
+//! the leader's answers that renew a thread.
 
 use super::*;
 
@@ -662,4 +662,88 @@ async fn a_provider_s_wake_is_prompted_on_a_thread_out_of_turns_and_answered_to_
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
     assert_eq!(bus.unacked().await, 0);
     assert_eq!(log.locked().answered, ["standup"]);
+}
+
+/// Store `directory` as the bus's team directory.
+async fn put_teams(bus: &Bus, directory: &ants_proto::TeamDirectory) {
+    bus.js.create_stream(crate::hub::teams_config()).await.unwrap();
+    let kv = crate::teams::open(&bus.js, None).await.unwrap();
+    assert!(crate::teams::write(&kv, directory, 0).await.unwrap());
+}
+
+/// A team in escalate_to stands for its lead; the lead, with no escalate_to, climbs to the lead above it, whose chain,
+/// the top of the forest, goes to the owner.
+#[tokio::test]
+async fn a_team_in_escalate_to_reaches_its_lead_who_climbs_to_the_lead_above_then_the_owner() {
+    let Some((mut bus, mut to_human)) = Bus::start().await else { return };
+    let [lead, boss, carol, backend, eng] = ants(["lead", "boss", "carol", "backend", "eng"]);
+    let mut directory = ants_proto::TeamDirectory::default();
+    let by = ants_test_support::human();
+    directory.create(ants_proto::Team::new(eng.clone(), boss.clone(), by.clone()), None).unwrap();
+    directory.create(ants_proto::Team::new(backend.clone(), lead.clone(), by), Some(&eng)).unwrap();
+    put_teams(&bus, &directory).await;
+    bus.chain = Chain { escalate_to: vec![backend], after: None, ..Chain::default() };
+    bus.put_colony(&lead, &[]).await;
+    let [mut to_lead, mut to_boss] = inboxes(&bus, &[lead.clone(), boss.clone()]).await;
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send_spent(&carol, &t1, "no turns", None).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let first = next_envelope(&mut to_lead).await;
+        let one = first.escalation.as_deref().expect("the escalation").clone();
+        assert_eq!((one.level, &one.leader), (1, &lead), "the team's lead, in the team's stead");
+        assert!(first.text.contains("Sent to lead; lead leads."), "{}", first.text);
+        bus.send_spent(&lead, &t1, "go on", Some(&one)).await;
+        assert!(next_envelope(&mut to_lead).await.text.ends_with(": go on"));
+
+        // The lead has no escalate_to: the next spend goes to the lead above it.
+        bus.send_spent(&lead, &t1, "and on", Some(&one)).await;
+        let up = next_envelope(&mut to_boss).await;
+        let two = up.escalation.as_deref().expect("the escalation").clone();
+        assert_eq!((two.level, &two.leader, &two.stuck), (2, &boss, &bus.dev));
+        bus.send_spent(&boss, &t1, "from boss", Some(&two)).await;
+        assert!(next_envelope(&mut to_boss).await.text.ends_with(": from boss"));
+
+        // boss leads the top team, so its chain goes to the owner.
+        bus.send_spent(&boss, &t1, "again", Some(&two)).await;
+        let notice = next_envelope(&mut to_human).await;
+        assert!(notice.text.ends_with("boss has no escalate_to above it."), "{}", notice.text);
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    assert_eq!(log.locked().answered, ["go on", "from boss"]);
+}
+
+/// An ant on a team with no escalate_to escalates to its team's lead before the owner; a lead, never to itself, to the
+/// lead above it.
+#[tokio::test]
+async fn an_ant_on_a_team_with_no_escalate_to_escalates_to_the_lead_above_it_never_to_itself() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    let [boss, carol, backend, eng] = ants(["boss", "carol", "backend", "eng"]);
+    let mut directory = ants_proto::TeamDirectory::default();
+    let by = ants_test_support::human();
+    directory.create(ants_proto::Team::new(eng.clone(), boss.clone(), by.clone()), None).unwrap();
+    directory.create(ants_proto::Team::new(backend, bus.dev.clone(), by), Some(&eng)).unwrap();
+    put_teams(&bus, &directory).await;
+    let [mut to_boss] = inboxes(&bus, std::slice::from_ref(&boss).try_into().unwrap()).await;
+    let (launch, _, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send_spent(&carol, &t1, "no turns", None).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let first = next_envelope(&mut to_boss).await;
+        let one = first.escalation.as_deref().expect("the escalation").clone();
+        let visited = vec![bus.dev.clone(), boss.clone()];
+        assert_eq!((one.level, &one.leader, &one.visited), (1, &boss, &visited));
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    assert!(timeout(Duration::from_millis(200), to_human.next()).await.is_err(), "nothing went to the human");
 }

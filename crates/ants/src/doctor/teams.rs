@@ -1,7 +1,7 @@
 //! Teams: whether the team directory keeps its rules, each team has a lead, its own or one above it, each lead is live
 //! in the colony, every member is an ant
-//! of the bus or a team and no team takes the name of an ant or a human; and whether `ants signer` answers each ant's
-//! team changes.
+//! of the bus or a team, each owner is a human and no team takes the name of an ant or a human; and whether `ants
+//! signer` answers each ant's team changes.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -59,7 +59,8 @@ pub(super) async fn check_teams(connected: Option<&Connected>, setup: &Setup, no
 }
 
 /// What is wrong with `directory`, which keeps the rules, one check each: a team with no lead, nor any team above it
-/// (warn), a lead not live in `colony` when read (warn, at the team it leads of its own), a member neither a team nor an ant of `known` (fail), a team taking the name of
+/// (warn), a lead not live in `colony` when read (warn, at the team it leads of its own), an owner no human of `humans`
+/// when read (warn), a member neither a team nor an ant of `known` (fail), a team taking the name of
 /// an ant of `known` or a human of `humans` (fail); else one check telling it is sound.
 pub(super) fn findings(
     directory: &TeamDirectory,
@@ -98,6 +99,15 @@ pub(super) fn findings(
                     ));
                 }
             }
+        }
+        if let (Some(owner), Some(humans)) = (&team.owner, humans)
+            && !humans.contains(owner)
+        {
+            checks.push(Check::warn(
+                CHECK,
+                format!("{owner}, the owner of team {id}, is no human of the bus: no human answers for the team"),
+                vec![format!("ants team set {id} --owner HUMAN, or ants team set {id} --no-owner")],
+            ));
         }
         for member in team.members.iter().filter(|m| !directory.is_team(m) && !known.contains(*m)) {
             checks.push(Check::fail(

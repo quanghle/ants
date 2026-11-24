@@ -181,7 +181,8 @@ human credentials). Reshape teams only when the user asks, as a team decides whe
 ## Escalations
 
 An ant's `escalate_to` config lists ants to escalate to, leader first (`ESCALATE_TO` in `ants colony`, `escalate_to` in
-`--json`). Unresolved work on a thread (spent turn budget, time/tool/token/cost limit, dead letter, exhausted notes
+`--json`); a team there stands for its lead, and an ant on a team with no `escalate_to` escalates to its team's lead,
+which climbs to the lead above it. Unresolved work on a thread (spent turn budget, time/tool/token/cost limit, dead letter, exhausted notes
 budget, context window overflow, or `escalate(issue)`) goes to every unvisited member of that chain (or, on a thread
 another ant created, the creator's chain) before any human. Chain members coordinate in `ants notes <thread>` with a
 fresh turn budget per level; only the leader answers the stuck ant on its thread or escalates to the leader's own chain

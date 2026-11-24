@@ -381,6 +381,7 @@ fn approver(bus: Bus<'_>) -> NatsApprover {
     let settings = &config.policy;
     NatsApprover::new(client.clone(), js.clone(), config.ant.clone(), settings.approval_timeout, humans.clone())
         .with_chain(settings.escalation.clone())
+        .with_teams(crate::escalation::jetstream_teams(js.clone(), config.connection.js_domain.clone()))
 }
 
 /// Connect to the bus as the ant's daemon, retrying until it answers: `None` when `stop` comes first.
@@ -443,6 +444,7 @@ fn escalator(
         redacting_sender(escalation::jetstream_sender(js.clone()), redactor.clone()),
     )
     .with_chains(crate::records::chains::jetstream_chains(js.clone()))
+    .with_teams(escalation::jetstream_teams(js.clone(), config.connection.js_domain.clone()))
     .with_notes(redacting_notes_sender(escalation::jetstream_notes_sender(js.clone()), redactor.clone()))
     .with_heed(crate::records::heed::jetstream_heed(js.clone(), config.connection.js_domain.clone()))
     .with_assistants(assistants);
