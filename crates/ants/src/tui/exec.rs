@@ -205,11 +205,13 @@ pub enum Job {
         message: Uuid,
         edit: Option<Box<Edit>>,
     },
-    /// Hand `source` to `to` on a new thread with `note`, as `ants ask --forward` does.
+    /// Hand `source` to `to` on a new thread with `note`, as `ants ask --forward` does; with `team`, the team `to`
+    /// leads, which the message was addressed to, as for [`Job::Ask`].
     Forward {
         to: UserId,
         source: forward::Source,
         note: String,
+        team: Option<UserId>,
     },
     /// Ask of the saved trails and the runs of trails what `ants trail` does.
     Trail(trail::Job),
@@ -412,7 +414,10 @@ impl Job {
             Self::DeadDrop(seq) => {
                 Ok(Done { line: dead::dropped(&ctx.js, seq).await?, dead: Some(seq), ..Done::default() })
             }
-            Self::Forward { to, source, note } => send::forward(ctx, to, &source, &note, &files).await,
+            Self::Forward { to, source, note, team } => {
+                let to = ants_client::sending::Addressed { to, team };
+                send::forward(ctx, to, &source, &note, &files).await
+            }
             Self::Pause { ant, paused } => pause(ctx, &ant, paused).await,
             Self::Attached { .. } => Err(anyhow!("files are attached to one message")),
             Self::Later(_) => Err(anyhow!("a message waits its turn once")),

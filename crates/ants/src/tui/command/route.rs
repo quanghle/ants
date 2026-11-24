@@ -157,7 +157,7 @@ impl Model {
 
     /// Where a message to `to` goes: to its lead when `to` names a team of the directory read, carrying the team;
     /// a team with no lead, nor any above it, refused ([`ants_client::sending::addressed`]).
-    fn addressed(&self, to: UserId) -> Result<Addressed, String> {
+    pub(super) fn addressed(&self, to: UserId) -> Result<Addressed, String> {
         match &self.data.teams {
             Some(teams) => ants_client::sending::addressed(teams, to).map_err(|e| e.to_string()),
             None => Ok(Addressed { to, team: None }),
