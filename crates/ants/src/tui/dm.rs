@@ -312,7 +312,7 @@ mod tests {
             Typed::Key(key) => _ = m.key(key, at(2)),
             Typed::Paste(text) => m.paste(text, at(2)),
         });
-        let ask = Job::Ask { to: user("bob"), thread: None, text: want.to_owned(), quote: None };
+        let ask = Job::Ask { to: user("bob"), thread: None, text: want.to_owned(), quote: None, team: None };
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(ask, want.to_owned())));
     }
 }

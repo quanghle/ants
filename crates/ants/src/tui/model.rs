@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use ants_daemon::records::reactions::Reactions;
 use ants_proto::{
     ApprovalRequest, ChannelEntry, ChannelId, ChannelNotify, ChannelReadMarkers, Humans, Reaction, ReadMarker,
-    ThreadId, UserId, Uuid, Verdict,
+    TeamDirectory, ThreadId, UserId, Uuid, Verdict,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use ratatui::text::Span;
@@ -21,7 +21,7 @@ use super::reads::{Levels, Mark};
 use super::work::{Facts, Filter};
 use super::{
     ant, cards, catchup, channel, credentials, dm, faces, fold, held, home, images, nav, people, search, settings,
-    steps, thread, timeline, tree, work,
+    steps, team, thread, timeline, tree, work,
 };
 use crate::live::State;
 
@@ -169,6 +169,8 @@ pub struct Data {
     pub channels: Vec<ChannelEntry>,
     /// The team's humans, once read.
     pub humans: Option<Humans>,
+    /// The team directory, once read; none on a bus without `ants_teams`.
+    pub teams: Option<TeamDirectory>,
     /// The reactions to the messages watched.
     pub reactions: Reactions,
     /// The tool calls of the threads, heard live or read from their timelines.
@@ -287,6 +289,7 @@ pub enum Page {
     Home(home::Page),
     Work(work::Page),
     Channel(channel::Page),
+    Team(team::Page),
     Thread(thread::Page),
     Dm(dm::Page),
     Search(search::Page),
@@ -304,6 +307,7 @@ impl Page {
             nav::Item::Work(state) => Self::Work(work::Page::new(Filter { state: *state, ..Filter::default() })),
             nav::Item::Activity => Self::Work(work::Page::new(Filter { activity: true, ..Filter::default() })),
             nav::Item::Channel(channel) => Self::Channel(channel::Page::new(channel.clone())),
+            nav::Item::Team(team) => Self::Team(team::Page::new(team.clone())),
             nav::Item::Ant(user) => Self::Ant(ant::Page::new(user.clone())),
             nav::Item::Person(user) => Self::Dm(dm::Page::new(user.clone())),
         }
@@ -314,6 +318,7 @@ impl Page {
             Self::Home(_) => "home",
             Self::Work(_) => "work",
             Self::Channel(_) => "channel",
+            Self::Team(_) => "team",
             Self::Thread(_) => "thread",
             Self::Dm(_) => "dm",
             Self::Search(_) => "search",
@@ -342,6 +347,10 @@ pub enum To {
     React(Uuid),
     /// A thread's delegation tree.
     Tree(ThreadId),
+    /// An ant's view, over the view.
+    Ant(UserId),
+    /// A team's view, over the view.
+    Team(UserId),
     /// Cancel the prompt running on a thread.
     Interrupt(ThreadId),
     /// The thread, with the command bar open to reply on it.
@@ -417,6 +426,7 @@ impl Model {
             channel_levels: Levels::new(),
             channels: Vec::new(),
             humans: None,
+            teams: None,
             reactions: Reactions::new(),
             calls: timeline::Threads::default(),
             steps: steps::Steps::default(),
@@ -532,6 +542,7 @@ impl Model {
             | Page::Search(_)
             | Page::Tree(_)
             | Page::Ant(_)
+            | Page::Team(_)
             | Page::Credentials(_)
             | Page::Held(_) => None,
         }

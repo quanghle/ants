@@ -101,6 +101,7 @@ impl Parser {
             from: Some(e.from),
             to: Some(e.to),
             channel,
+            team: e.team,
             owner: e.owner,
             note,
             text,
