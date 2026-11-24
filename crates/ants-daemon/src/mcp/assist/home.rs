@@ -324,6 +324,7 @@ impl Hub {
         }
         .with_owner(Some(human.clone()))
         .on_behalf(Some(human.clone()));
+        let post = self.through_teams(post, &entry).await?;
         let excerpt = behalf::excerpt(&post.text);
         (access.post)(post.clone(), None).await.map_err(|e| format!("not posted: {e:#}"))?;
         let thread = &post.thread_id;

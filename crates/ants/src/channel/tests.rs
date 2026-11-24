@@ -1,5 +1,5 @@
-//! Tests of channels as humans run them: sigils, the table, mentions, posts on threads, reading back by thread, webhook
-//! threads, and read markers.
+//! Tests of channels as humans run them: sigils, the table, mentions, a team refused as a member, posts on threads,
+//! reading back by thread, webhook threads, and read markers.
 
 use std::time::Duration;
 
@@ -80,6 +80,23 @@ fn mentions_of_non_members_reach_nobody() {
     entry.add_member(p("alice"));
     assert_eq!(idle_mentions(&post, Some(&entry)), [&p("dev-b")], "a human member is notified");
     assert_eq!(idle_mentions(&post, None), [&p("dev-a"), &p("dev-b"), &p("alice")]);
+}
+
+#[test]
+fn a_team_is_refused_as_a_member_the_messenger_or_the_owner() {
+    let mut teams = ants_proto::TeamDirectory::default();
+    teams.create(ants_proto::Team::new(p("backend"), p("dev-a"), ants_test_support::human()), None).unwrap();
+    teams.create(ants_proto::Team::unled(p("web"), ants_test_support::human()), None).unwrap();
+    let humans = ants_proto::Humans::default();
+    let add = |users: &[&str]| Change { add: users.iter().map(|u| p(u)).collect(), ..Change::default() };
+    let err = add(&["dev-b", "backend"]).check(&ops(), &humans, Some(&teams)).unwrap_err();
+    let refused = "backend is a team, which is no channel member: an @backend in a post of #ops mentions its lead, \
+                   dev-a, who has to be a member";
+    assert_eq!(err.to_string(), refused);
+    let err = Change { messenger: Some(Some(p("web"))), ..Change::default() }.check(&ops(), &humans, Some(&teams));
+    assert!(err.unwrap_err().to_string().contains("mentions the team's lead, who"), "a team without one");
+    assert!(add(&["dev-a", "dev-b"]).check(&ops(), &humans, Some(&teams)).is_ok());
+    assert!(add(&["backend"]).check(&ops(), &humans, None).is_ok(), "a bus without teams");
 }
 
 #[test]

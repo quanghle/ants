@@ -7,9 +7,15 @@ expression: value
   "channel": "backend",
   "thread_id": "019a7d2c-0000-7000-8000-000000000001",
   "from": "github",
-  "text": "@dev-a CI failed",
+  "text": "@sre CI failed",
   "mentions": [
     "dev-a"
+  ],
+  "teams": [
+    {
+      "team": "sre",
+      "lead": "dev-a"
+    }
   ],
   "turn_budget": 8,
   "in_reply_to": "019a7d2e-0000-7000-8000-000000000001",

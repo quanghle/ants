@@ -1,12 +1,15 @@
 //! The team tools: `list_teams` shows the forest of teams, or one team with its members and their colony state, and
 //! `manage_team` changes a team the ant manages, its own or one beneath it, through `ants signer`
-//! ([`crate::teams::keeper`]). A message to a team goes to its lead ([`Hub::addressed`]), and `list_ants` and `route`
+//! ([`crate::teams::keeper`]). A message to a team goes to its lead ([`Hub::addressed`]), a post's @mention of a team
+//! mentions its lead ([`Hub::through_teams`]), and `list_ants` and `route`
 //! keep to a team's ants, through its member teams, when given one ([`Hub::team_ants`]).
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use ants_proto::{ColonyEntry, TEAMADM_WAIT, TeamAdminOutcome, TeamDirectory, TeamOp, ThreadId, UserId};
+use ants_proto::{
+    ChannelEntry, ChannelPost, ColonyEntry, TEAMADM_WAIT, TeamAdminOutcome, TeamDirectory, TeamOp, ThreadId, UserId,
+};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
@@ -153,6 +156,23 @@ impl Hub {
             ));
         }
         Ok((lead, Some(to)))
+    }
+
+    /// `post` to the channel of `entry` with each team it @mentions standing for the team's lead, who has to be a
+    /// member ([`ChannelPost::through_teams`]). A directory that cannot be read holds no post back: its mentions then
+    /// stay as they are.
+    pub(super) async fn through_teams(&self, post: ChannelPost, entry: &ChannelEntry) -> Result<ChannelPost, String> {
+        if self.teams.get().is_none() || post.mentions.is_empty() {
+            return Ok(post);
+        }
+        match self.directory().await {
+            Ok(Some(directory)) => post.through_teams(&directory, Some(entry)).map_err(|e| e.to_string()),
+            Ok(None) => Ok(post),
+            Err(e) => {
+                tracing::debug!(channel = %entry.channel, error = e, "taking the post's mentions as they are");
+                Ok(post)
+            }
+        }
     }
 
     /// The ants of team `team` and of the teams beneath it.

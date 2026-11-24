@@ -102,17 +102,27 @@ pub(crate) struct Posting {
 }
 
 impl Posting {
-    /// The post of `text` that `me` makes to `channel`, or on its `thread` ([`channel::compose`]).
+    /// The post of `text` that `me` makes to `channel`, or on its `thread` ([`channel::compose`]), each team it
+    /// @mentions standing for the team's lead, who has to be a member ([`ChannelPost::through_teams`]); a team
+    /// directory that cannot be read holds no post back.
     pub async fn compose(
         js: &jetstream::Context,
+        js_domain: Option<&ants_proto::JsDomain>,
         me: &humans::Me,
         channel: ChannelId,
         thread: Option<ThreadId>,
         text: String,
     ) -> Result<Self> {
         let humans = humans::load(js, me).await;
-        let post = channel::compose(js, me, &humans, channel, thread, text).await;
+        let mut post = channel::compose(js, me, &humans, channel, thread, text).await;
         let entry = channel::get(&channel::open(js).await?, &post.channel).await?;
+        if !post.mentions.is_empty() {
+            match crate::teams::read_of(js, js_domain).await {
+                Ok(Some(teams)) => post = post.through_teams(&teams, entry.as_ref())?,
+                Ok(None) => {}
+                Err(e) => tracing::warn!("not checking whether the post mentions a team: {e:#}"),
+            }
+        }
         let mut warnings = Vec::new();
         if entry.is_none() {
             warnings.push(format!(

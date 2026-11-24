@@ -470,7 +470,8 @@ async fn pause(ctx: &Ctx, ant: &UserId, paused: bool) -> Result<Done> {
 async fn change_channel(ctx: &Ctx, channel: ChannelId, change: &crate::channel::Change) -> Result<Done> {
     let kv = crate::channel::open(&ctx.js).await?;
     let humans = humans::load(&ctx.js, &ctx.me).await;
-    let changed = change.write(&ctx.js, &kv, &channel, &humans).await?;
+    let teams = crate::channel::teams(&ctx.js, ctx.domain.as_ref()).await;
+    let changed = change.write(&ctx.js, &kv, &channel, &humans, teams.as_ref()).await?;
     let line = changed_line(&channel, change, &changed);
     Ok(Done { line, warnings: changed.warnings, channel: Some(channel), ..Done::default() })
 }

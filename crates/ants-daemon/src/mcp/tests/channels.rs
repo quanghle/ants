@@ -70,6 +70,14 @@ async fn manage_channel_asks_the_channel_manager_for_the_owner_s_changes() {
     let (ok, text) = call(&client, "manage_channel", both).await;
     assert!(!ok && text.contains("not both"), "{text}");
 
+    mcp.with_teams(super::teams::memory_teams(super::teams::forest(), false).0);
+    let asked = admin.requests.locked().len();
+    let (ok, text) = call(&client, "manage_channel", serde_json::json!({"channel": "ops", "add": ["@infra"]})).await;
+    let refused = "#ops was not changed: infra is a team, which is no channel member; an @infra in a post of #ops \
+                   mentions its lead, boss, who has to be a member";
+    assert_eq!((ok, text.as_str()), (false, refused));
+    assert_eq!(admin.requests.locked().len(), asked, "nothing asked of the channel manager");
+
     let silent = Arc::new(MemoryAdmin { channels: StdMutex::default(), requests: StdMutex::default(), silent: true });
     let other_home = super::home("chanadm-silent");
     let (mcp, _sent) = start(&other_home).await;
@@ -150,6 +158,43 @@ async fn post_channel_starts_a_thread_the_ant_created_where_it_may_post() {
     let (ok, text) = call(&client, "post_channel", post("ops", "@dev-b go")).await;
     assert!(!ok && text.contains("has no turns left"), "{text}");
     assert_eq!(posted.locked().len(), 2);
+}
+
+/// A post's @mention of a team mentions its lead, who has to be a member of the channel.
+#[tokio::test]
+async fn post_channel_mentions_a_team_s_lead_for_the_team() {
+    let home = home("post-channel-team");
+    let (mcp, _sent) = start(&home).await;
+    let current = from_human();
+    let _turn = mcp.begin(&current);
+    let client = {
+        let (url, token) = http_server(&mcp, &current.thread_id);
+        http_client(&url, &token).await
+    };
+    let mut ops = ChannelEntry::new("ops".parse().unwrap());
+    for member in ["dev-a", "boss", "dev-b"] {
+        ops.add_member(user(member));
+    }
+    let mut dev = ChannelEntry::new("dev".parse().unwrap());
+    dev.add_member(user("dev-a"));
+    let posted = Arc::new(StdMutex::new(Vec::new()));
+    mcp.with_channels(channels(vec![ops, dev], posted.clone()));
+    mcp.with_teams(super::teams::memory_teams(super::teams::forest(), false).0);
+    let post = |channel: &str, text: &str| serde_json::json!({"channel": channel, "text": text});
+
+    let (ok, text) = call(&client, "post_channel", post("ops", "@infra @boss disk full")).await;
+    assert!(ok && text.contains("it wakes boss."), "{text}");
+    let got = posted.locked().pop().unwrap();
+    assert_eq!(got.mentions, [user("boss")], "the lead once");
+    let teams: Vec<_> = got.teams.iter().map(|t| (t.team.as_str(), t.lead.as_str())).collect();
+    assert_eq!(teams, [("infra", "boss")]);
+
+    let (ok, text) = call(&client, "post_channel", post("ops", "@orphans anyone?")).await;
+    assert!(!ok && text.starts_with("nothing posted: team orphans has no lead, nor has any team above it"), "{text}");
+    let (ok, text) = call(&client, "post_channel", post("dev", "@eng help")).await;
+    let refused = "nothing posted: @eng mentions the lead of team eng, boss, who is no member of #dev";
+    assert!(!ok && text.starts_with(refused), "{text}");
+    assert!(posted.locked().is_empty());
 }
 
 #[tokio::test]

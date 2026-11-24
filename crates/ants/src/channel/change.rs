@@ -2,8 +2,8 @@
 //! chat` the channel view's members editor. The same checks refuse it, and the same compare-and-set update
 //! ([`super::update`]) writes it.
 
-use ants_proto::{ChannelEntry, ChannelId, Humans, UserId};
-use anyhow::Result;
+use ants_proto::{ChannelEntry, ChannelId, Humans, TeamDirectory, UserId};
+use anyhow::{Result, bail};
 use async_nats::jetstream::{self, kv};
 
 use crate::ants::colony;
@@ -22,6 +22,15 @@ pub struct Change {
     pub owner: Option<Option<UserId>>,
     /// The description, or with none (or a blank one) no description.
     pub description: Option<Option<String>>,
+}
+
+/// The team directory a change is checked against ([`Change::check`]): None when the bus keeps no teams, or, warned
+/// of, when it cannot be read.
+pub async fn teams(js: &jetstream::Context, js_domain: Option<&ants_proto::JsDomain>) -> Option<TeamDirectory> {
+    crate::teams::read_of(js, js_domain).await.unwrap_or_else(|e| {
+        tracing::warn!("not checking whether the users named are teams: {e:#}");
+        None
+    })
 }
 
 /// What a change written did.
@@ -43,10 +52,21 @@ impl Change {
     }
 
     /// Refuse a human as the messenger ([`super::check_messenger_not_human`]) or the owner
-    /// ([`super::check_owner_not_human`]), and a description over [`ants_proto::MAX_CHANNEL_DESCRIPTION`] characters.
-    pub fn check(&self, channel: &ChannelId, humans: &Humans) -> Result<()> {
+    /// ([`super::check_owner_not_human`]), a team of `teams` as a member, the messenger or the owner, and a
+    /// description over [`ants_proto::MAX_CHANNEL_DESCRIPTION`] characters.
+    pub fn check(&self, channel: &ChannelId, humans: &Humans, teams: Option<&TeamDirectory>) -> Result<()> {
         super::check_messenger_not_human(self.messenger.as_ref().and_then(Option::as_ref), humans)?;
         super::check_owner_not_human(self.owner.as_ref().and_then(Option::as_ref), humans)?;
+        let named = self.members.iter().flatten().chain(&self.add);
+        let mut named = named.chain(self.messenger.iter().flatten()).chain(self.owner.iter().flatten());
+        if let Some((teams, team)) = teams.and_then(|teams| named.find(|u| teams.is_team(u)).map(|team| (teams, team)))
+        {
+            let lead = teams.lead_of(team).map_or("the team's lead".to_owned(), |lead| format!("its lead, {lead}"));
+            bail!(
+                "{team} is a team, which is no channel member: an @{team} in a post of #{channel} mentions {lead}, \
+                 who has to be a member"
+            );
+        }
         if let Some(description) = &self.description {
             ChannelEntry::new(channel.clone()).set_description(description.as_deref())?;
         }
@@ -76,15 +96,16 @@ impl Change {
     }
 
     /// Check the change and write it to the entry of `channel` in `kv`, the channels bucket, `humans` telling the
-    /// humans from the ants.
+    /// humans from the ants and `teams` the teams.
     pub async fn write(
         &self,
         js: &jetstream::Context,
         kv: &kv::Store,
         channel: &ChannelId,
         humans: &Humans,
+        teams: Option<&TeamDirectory>,
     ) -> Result<Changed> {
-        self.check(channel, humans)?;
+        self.check(channel, humans, teams)?;
         let (entry, (added, removed)) = super::update(kv, channel, |entry| self.apply(entry)).await?;
         let mut warnings: Vec<String> = Vec::new();
         for user in self.add.iter().filter(|u| !added.contains(u)) {

@@ -111,7 +111,7 @@ pub(super) async fn post(
     files: &[File],
 ) -> Result<Done> {
     let new = thread.is_none();
-    let mut posting = send::Posting::compose(&ctx.js, &ctx.me, channel, thread, text).await?;
+    let mut posting = send::Posting::compose(&ctx.js, ctx.domain.as_ref(), &ctx.me, channel, thread, text).await?;
     if let Some(q) = quote {
         posting.post = posting.post.quoting(q.id, q.quote(false));
     }

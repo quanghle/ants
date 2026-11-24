@@ -148,7 +148,7 @@ impl Hub {
                 self.ant
             ));
         }
-        let mut post = match &poster {
+        let post = match &poster {
             Some(((answered, _), _)) => answered
                 .reply(self.ant.clone(), text, &[], &self.humans.humans())
                 .map_err(|_| thread_spent(&answered.thread_id))?,
@@ -164,6 +164,7 @@ impl Hub {
                 post
             }
         };
+        let mut post = self.through_teams(post, &entry).await?;
         let loaded = self.load(thread, &attach).await?;
         post.attachments = loaded.iter().map(|l| l.attachment.clone()).collect();
         self.check_fits(&post)?;
@@ -195,6 +196,22 @@ impl Hub {
         Ok(format!(
             "Posted to #{channel}, starting thread {posted} that {} created ({left} turns left); {wakes}.",
             self.ant
+        ))
+    }
+
+    /// Refuse `ops` making a team a member or the messenger of `channel`: a team is no member, its lead is
+    /// ([`ChannelPost::through_teams`]). The channel manager refuses it too, as no ant of the colony.
+    async fn no_team_member(&self, channel: &ChannelId, ops: &[ChannelOp]) -> Result<(), String> {
+        let mut named = ops.iter().filter_map(|op| match op {
+            ChannelOp::AddMember { ant } | ChannelOp::SetMessenger { ant } => Some(ant),
+            _ => None,
+        });
+        let Ok(Some(directory)) = self.directory().await else { return Ok(()) };
+        let Some(team) = named.find(|u| directory.is_team(u)) else { return Ok(()) };
+        let lead = directory.lead_of(team).map_or("the team's lead".to_owned(), |lead| format!("its lead, {lead}"));
+        Err(format!(
+            "#{channel} was not changed: {team} is a team, which is no channel member; an @{team} in a post of \
+             #{channel} mentions {lead}, who has to be a member"
         ))
     }
 
@@ -234,6 +251,7 @@ impl Hub {
             let entry = entries.iter().find(|e| e.channel == channel).ok_or(format!("no channel #{channel}"))?;
             return Ok(describe_channel(entry));
         }
+        self.no_team_member(&channel, &ops).await?;
         let request = ChannelAdminRequest::new(channel.clone(), self.ant.clone(), thread.clone(), ops);
         let reply = admin.request(request).await.map_err(|e| format!("cannot ask the channel manager: {e:#}"))?;
         let Some(reply) = reply else {
@@ -258,8 +276,9 @@ impl Hub {
 #[tool_router(router = channels_router, vis = "pub(super)")]
 impl Tools {
     #[tool(description = "Start a thread in `channel` with a top-level post, as its creator: the @mentioned \
-        members of the channel wake and answer on the thread, and an escalation on the thread goes up this ant's \
-        escalation chain, whichever ant gets stuck. Only a member or the messenger of the channel may post. The \
+        members of the channel wake and answer on the thread (an @mentioned team mentions its lead, who has to be a \
+        member), and an escalation on the thread goes up this ant's escalation chain, whichever ant gets stuck. Only \
+        a member or the messenger of the channel may post. The \
         thread has no owner and gets the turns the current message leaves, one fewer unless it is a human's; with \
         none left it is refused. With `on_thread`, while the message being handled is a post on a thread of \
         `channel`, post on that thread instead, as a reply that spends one of the thread's turns and keeps its owner, \
@@ -276,8 +295,8 @@ impl Tools {
 
     #[tool(description = "Manage a channel this ant owns (a human makes an ant a channel's owner): `add` and \
         `remove` change its members, `messenger` sets the ant that triages humans' posts that mention nobody, and \
-        `clear_messenger` gives it the default messenger again. Members are ants in the colony or humans; the \
-        messenger is an ant in the colony. \
+        `clear_messenger` gives it the default messenger again. Members are ants in the colony or humans, never a \
+        team; the messenger is an ant in the colony. \
         The channel manager applies the change, refuses it unless this ant owns the channel, and announces it in \
         the channel. With only `channel` it shows the channel; with nothing it lists the channels this ant owns.")]
     async fn manage_channel(

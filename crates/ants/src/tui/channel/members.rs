@@ -349,7 +349,7 @@ fn change(field: Field, text: &str, channel: &ChannelId, data: &Data) -> Result<
     let mut humans = data.humans.clone().unwrap_or_default();
     let me = data.me();
     let _ = humans.add(me.as_str(), ants_proto::HumanEntry::new(me.clone()));
-    change.check(channel, &humans).map_err(|e| format!("{e:#}"))?;
+    change.check(channel, &humans, data.teams.as_ref()).map_err(|e| format!("{e:#}"))?;
     Ok(change)
 }
 
