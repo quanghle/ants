@@ -37,6 +37,9 @@ pub fn inbox_of(user: &UserId) -> String {
     format!("ants.inbox.{user}.>")
 }
 
+/// Every message to every user.
+pub const ALL_INBOXES: &str = "ants.inbox.>";
+
 /// Every message to `user` as the hub's stream stored it, republished there ([`super::STORED_INBOX_SOURCE`]).
 pub fn stored_inbox(user: &UserId) -> String {
     format!("{}.stored.>", super::inbox_prefix(user))
@@ -278,7 +281,7 @@ pub fn max_deliveries_advisories() -> String {
 /// The inbox, notes and channel subjects `user` in `role` may publish on: every inbox for a human (to replay dead
 /// letters as they were), else [`inbox_from`]; [`notes_from`]; and [`chan_from`].
 pub fn sendable(user: &UserId, role: Role) -> [String; 3] {
-    let inbox = if role.is_human() { "ants.inbox.>".to_owned() } else { inbox_from(user) };
+    let inbox = if role.is_human() { ALL_INBOXES.to_owned() } else { inbox_from(user) };
     [inbox, notes_from(user), chan_from(user)]
 }
 
@@ -309,6 +312,8 @@ pub fn approval_decision(ant: &UserId, request: &super::Uuid) -> String {
 pub const ALL_APPROVAL_REQUESTS: &str = "ants.approvals.*";
 /// Every approval decision, of all ants.
 pub const ALL_APPROVAL_DECISIONS: &str = "ants.approvals.*.*";
+/// Every approval request and decision, of all ants: what the stream keeps of them.
+pub const ALL_APPROVALS: &str = "ants.approvals.>";
 
 /// Where `ants add --enroll` asks for the credentials of `ant`
 /// ([`EnrollRequest`](super::EnrollRequest); core NATS, not stored). Only the enrollment credentials of `ant`
@@ -525,6 +530,9 @@ pub fn trailed(ant: &UserId) -> String {
 pub fn kv(bucket: &str, key: impl fmt::Display) -> String {
     format!("$KV.{bucket}.{key}")
 }
+
+/// Every key of every KV bucket.
+pub const ALL_KV: &str = "$KV.>";
 
 /// Every key of the KV bucket `bucket`: the subjects of its stream.
 pub fn kv_all(bucket: &str) -> String {

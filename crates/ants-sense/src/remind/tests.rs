@@ -34,7 +34,7 @@ async fn create(sense: &Sense, trigger: Value) -> ItemId {
 async fn pending_delivery_survives_restart_retries_and_confirmation_retries() {
     let (log, sense_id) = (SharedLog::default(), SenseId::new());
     let items = open_store(log.clone(), sense_id.clone()).await;
-    let sense = Sense::with_stores(Arc::new(One(items.clone())));
+    let sense = Sense::with_stores(Arc::new(One::new(items.clone())));
     let id = create(&sense, json!({"kind":"at","at":now()})).await;
     let first = prepare_firing(&*items, &id, now(), "time due").await.unwrap().unwrap();
     assert_eq!(first.id, format!("{id}:1"));
@@ -159,7 +159,7 @@ async fn condition_reservations_fence_probes_and_persist_backoff_and_expiry() {
 async fn condition_reservation_survives_takeover_and_rejects_an_earlier_probe() {
     let (log, sense_id) = (SharedLog::default(), SenseId::new());
     let first = open_store(log.clone(), sense_id.clone()).await;
-    let sense = Sense::with_stores(Arc::new(One(first.clone())));
+    let sense = Sense::with_stores(Arc::new(One::new(first.clone())));
     let id = create(&sense, json!({"kind":"condition","condition":{"kind":"command","command":"true"}})).await;
     let earlier = reserve_condition(&*first, &id, now()).await.unwrap().unwrap();
     let takeover = open_store(log, sense_id).await;
@@ -263,12 +263,12 @@ async fn a_trigger_giving_no_time_to_fire_at_is_refused_as_invalid() {
 async fn simultaneous_creations_share_the_active_limit_across_stores() {
     let (log, sense_id) = (SharedLog::default(), SenseId::new());
     let first = open_store(log.clone(), sense_id.clone()).await;
-    let first_sense = Sense::with_stores(Arc::new(One(first.clone())));
+    let first_sense = Sense::with_stores(Arc::new(One::new(first.clone())));
     for _ in 0..MAX_ACTIVE - 1 {
         create(&first_sense, json!({"kind":"after","seconds":60})).await;
     }
     let second = open_store(log, sense_id).await;
-    let second_sense = Sense::with_stores(Arc::new(One(second)));
+    let second_sense = Sense::with_stores(Arc::new(One::new(second)));
     let args = call(now(), json!({"title":"last slot","trigger":{"kind":"after","seconds":60}}));
     let (a, b) = tokio::join!(remind(&first_sense, &args), remind(&second_sense, &args));
     assert_ne!(a.is_error, b.is_error, "{a:?} {b:?}");

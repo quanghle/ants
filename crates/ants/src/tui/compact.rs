@@ -140,8 +140,9 @@ impl Model {
             Key::Up | Key::Down | Key::Char('j' | 'k') | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
                 return None;
             }
-            // The digest is no key of the top item, and the pane has no room to draw it.
-            Key::Tab | Key::Esc | Key::Char('s') => return None,
+            // The digest, the credentials, the held messages and the tree are no keys of the top item, and the pane
+            // has no room to draw them.
+            Key::Tab | Key::Esc | Key::Char('s' | 'c' | 'o' | 't') => return None,
             _ => {}
         }
         // Home again, its selection on the top item.
@@ -224,6 +225,66 @@ mod tests {
         assert_eq!(pane(&m, at(3)), before);
         assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(thread)), "Enter opens the top item, not a digest's");
         assert!(!m.compact && !m.digest_shown());
+    }
+
+    /// A pane whose top item is the thread returned, finished.
+    fn pane_with_a_finished_thread() -> (Model, ThreadId) {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        m.compact = true;
+        let mut opening = message(1, &thread, "alice", "dev-a", "deploy");
+        opening.owner = Some(user("alice"));
+        m.stored(vec![opening, message(2, &thread, "dev-a", "alice", "deployed")], at(2));
+        (m, thread)
+    }
+
+    /// `key`, no key of the top item, opens no page the pane could not draw.
+    fn opens_no_page(key: char) {
+        let (mut m, thread) = pane_with_a_finished_thread();
+        let before = pane(&m, at(3));
+        assert_eq!(m.key(Key::Char(key), at(3)), None);
+        assert!(m.compact && matches!(m.page(), Page::Home(_)), "{key} opened a page unseen");
+        assert_eq!(pane(&m, at(3)), before);
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(thread)), "Enter opens the top item, no other page's");
+    }
+
+    #[test]
+    fn c_opens_no_credentials_the_pane_could_not_draw() {
+        opens_no_page('c');
+    }
+
+    #[test]
+    fn o_opens_no_held_messages_the_pane_could_not_draw() {
+        opens_no_page('o');
+    }
+
+    #[test]
+    fn t_opens_no_tree_the_pane_could_not_draw() {
+        opens_no_page('t');
+    }
+
+    #[test]
+    fn z_asks_in_the_pane_how_long_to_snooze_the_top_item_and_takes_what_is_typed() {
+        use crate::tui::acts::Change;
+
+        let (mut m, thread) = pane_with_a_finished_thread();
+        assert_eq!(m.key(Key::Char('z'), at(3)), None);
+        assert!(m.compact && pane(&m, at(3)).contains("snooze deploy for (at most 7d): 1h"), "{}", pane(&m, at(3)));
+        // Keys of home's items, typed into the prompt.
+        for typed in ['2', 'd'] {
+            assert_eq!(m.key(Key::Char(typed), at(3)), None);
+        }
+        assert!(m.compact && pane(&m, at(3)).contains("snooze deploy for (at most 7d): 2d"), "{}", pane(&m, at(3)));
+        let until = at(3) + chrono::TimeDelta::days(2);
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Change(thread, Change::Snooze(Some(until)), 2)));
+        assert!(m.compact, "snoozed in the pane");
+        assert!(pane(&m, at(4)).contains("nothing waits"), "{}", pane(&m, at(4)));
+
+        let (mut m, thread) = pane_with_a_finished_thread();
+        assert_eq!(m.key(Key::Char('z'), at(3)), None);
+        assert_eq!(m.key(Key::Esc, at(3)), None);
+        assert!(m.compact && pane(&m, at(3)).contains("▸ finished deploy"), "Esc keeps it: {}", pane(&m, at(3)));
+        assert_eq!(m.key(Key::Enter, at(3)), Some(Action::Open(thread)));
     }
 
     #[test]

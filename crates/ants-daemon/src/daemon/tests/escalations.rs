@@ -256,7 +256,8 @@ async fn past_the_hop_limit_the_owner_gets_it_and_a_human_starts_the_chain_over(
 async fn an_unanswered_escalation_goes_one_level_higher_after_escalate_after() {
     let Some((mut bus, _to_human)) = Bus::start().await else { return };
     let [lead, boss, carol] = ants(["lead", "boss", "carol"]);
-    bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(Duration::from_millis(300)), ..Chain::default() };
+    // Long enough that a slow machine hears of the escalation well before its deadline.
+    bus.chain = Chain { escalate_to: vec![lead.clone()], after: Some(Duration::from_secs(2)), ..Chain::default() };
     bus.put_colony(&lead, std::slice::from_ref(&boss)).await;
     let [mut to_lead, mut to_boss] = inboxes(&bus, &[lead.clone(), boss.clone()]).await;
     let (launch, _, _) = fake::launch();
@@ -271,7 +272,7 @@ async fn an_unanswered_escalation_goes_one_level_higher_after_escalate_after() {
         let up = next_envelope(&mut to_boss).await;
         assert_eq!(up.escalation.as_deref().map(|e| (e.level, &e.leader)), Some((2, &boss)));
         let late =
-            format!("[ants] No answer from lead on thread {t1} within 300 ms; the escalation goes one level higher.");
+            format!("[ants] No answer from lead on thread {t1} within 2 s; the escalation goes one level higher.");
         assert!(up.text.contains(&late), "{}", up.text);
         assert!(up.text.ends_with("Last message from carol:\nstuck"), "{}", up.text);
         assert!(timeout(Duration::from_millis(500), to_boss.next()).await.is_err(), "no deadline without one set");

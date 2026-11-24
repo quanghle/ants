@@ -57,7 +57,7 @@ pub enum Scope {
 impl Scope {
     fn filter(self) -> &'static str {
         match self {
-            Self::Inboxes => "ants.inbox.>",
+            Self::Inboxes => subject::ALL_INBOXES,
             Self::Everything => subject::ALL,
         }
     }

@@ -24,7 +24,7 @@ fn services() -> Vec<(&'static str, bool)> {
         ("$JS.*.API.>", true),
         ("$JS.ACK.>", false),
         ("$JS.FC.>", false),
-        ("$KV.>", false),
+        (subject::ALL_KV, false),
         ("$O.>", false),
         (subject::ALL_SENSE, false),
         (OUTBOX_SUBJECTS, false),

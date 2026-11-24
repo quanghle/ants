@@ -69,6 +69,11 @@ async fn a_paused_ant_keeps_its_messages_queued_and_takes_no_prompt_until_resume
         until("the colony to show the pause", || bus.workload.paused().is_some()).await;
         gate.add_permits(1);
         assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold b".to_owned()), "a running prompt finishes");
+        // Its ack comes after its reply.
+        eventually_every(Duration::from_millis(20), WAIT, "b is not acked", async || {
+            bus.consumer().await.num_ack_pending == 1
+        })
+        .await;
         bus.send(&t2, "d").await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(log.locked().prompted, 2, "neither the message in hand nor a new one starts");
@@ -272,6 +277,43 @@ async fn a_human_reply_automatically_steers_a_running_prompt_ahead_of_the_queue_
     }
     assert_eq!(bus.unacked().await, 0);
     assert!(dead::list(&bus.stream).await.unwrap().is_empty(), "no dead letter");
+}
+
+/// A human's message whose reply is stored, its ack lost, comes again while another prompt runs on its thread, as
+/// after the hub was out of reach past the ack wait: it is acked on its turn, and the prompt goes on.
+#[tokio::test]
+async fn a_message_answered_before_interrupts_no_prompt_when_it_comes_again() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    bus.send_ant(&t1, "hold b").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        let answered = Envelope::on_thread(t1.clone(), UserId::human(), bus.dev.clone(), "a");
+        let reply = answered.reply(bus.dev.clone(), "s1: a", Role::Human).unwrap();
+        bus.marks.answered.add(&answered, &Reply::Message(Box::new(reply))).await.unwrap();
+        let seq = bus::publish_json(&bus.js, answered.subject(), &answered, None).await.unwrap();
+        // Behind the prompt, it is acked only after it.
+        timeout(WAIT, async {
+            while bus.consumer().await.num_ack_pending < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the message never came in hand");
+        gate.add_permits(1);
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold b".to_owned()), "the prompt ran to its end");
+        bus.until_acked(seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(bus.unacked().await, 0);
+    let log = log.locked();
+    assert_eq!((log.cancelled, log.prompted), (0, 1), "neither interrupted nor prompted again");
 }
 
 #[tokio::test]
