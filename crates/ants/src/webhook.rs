@@ -401,7 +401,7 @@ impl Running {
                 (notified.clone(), self.links.clone(), self.nats.clone(), self.js_domain.clone(), failed.clone());
             let task = tasks.spawn(async move {
                 let name = served.config.name.clone();
-                if let Err(e) = notify::run(served, links, nats, domain).await {
+                if let Err(e) = Box::pin(notify::run(served, links, nats, domain)).await {
                     let _ = failed.send(e.context(format!("human {name}")));
                 }
             });

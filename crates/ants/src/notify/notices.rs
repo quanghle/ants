@@ -1,5 +1,6 @@
-//! What a human is notified of: the [`Notice`] of a tool request, escalation, completion, question, unserved
-//! address, digest or reminder, whether a snooze or quiet hours hold it back, and its JSON form for exec and http sinks.
+//! What a human is notified of: the [`Notice`] of a tool request, escalation, completion, question, message from
+//! another human, channel mention, trail run's end, unserved address, digest or reminder, whether a snooze or quiet
+//! hours hold it back, and its JSON form for exec and http sinks.
 
 use std::fmt::Write as _;
 use std::sync::OnceLock;
@@ -7,8 +8,8 @@ use std::sync::OnceLock;
 use ants_daemon::delivery::unserved::Unserved;
 use ants_daemon::secrets::redact::Redactor;
 use ants_proto::{
-    ApprovalRequest, Away, Envelope, Escalation, EscalationReason, HeldNotices, NoticeKind, NotifyPrefs, Question,
-    Questions, Reminder, ThreadId, UserId, Uuid, Verdict,
+    ApprovalRequest, Away, ChannelId, Envelope, Escalation, EscalationReason, HeldNotices, NoticeKind, NotifyPrefs,
+    Question, Questions, Reminder, RunEnd, RunId, ThreadId, TrailName, UserId, Uuid, Verdict,
 };
 use chrono::{DateTime, Utc};
 use jiff::tz::TimeZone;
@@ -47,8 +48,16 @@ pub(super) enum About {
     /// A daemon's notice `kind` that a human has to act on ([`NoticeKind::needs_action`]), in the message `id` from
     /// `from` on `thread`.
     Notice { id: Uuid, from: UserId, thread: ThreadId, kind: NoticeKind },
-    /// The questions `questions` that `from` asks the human on `thread`, in the message `id`.
-    Question { id: Uuid, from: UserId, thread: ThreadId, questions: Box<Questions> },
+    /// The questions `questions` that `from` asks the human on `thread`, in the message `id`: a human() step of the
+    /// trail run `run`, if it is one.
+    Question { id: Uuid, from: UserId, thread: ThreadId, questions: Box<Questions>, run: Option<RunId> },
+    /// The message `id` another human, `from`, sent the human on `thread`.
+    Message { id: Uuid, from: UserId, thread: ThreadId },
+    /// The post `post` of `from` in `channel`, on `thread`, that @mentions the human, told in the message `id`.
+    Mention { id: Uuid, from: UserId, thread: ThreadId, channel: ChannelId, post: Uuid },
+    /// The end of the trail run `run` of `trail` (none for an inline script), `state`, that its conductor `from` tells
+    /// on the run's `thread` in the message `id`.
+    Run { id: Uuid, from: UserId, thread: ThreadId, run: RunId, trail: Option<TrailName>, state: RunEnd },
     /// A test notice of `ants webhook notify-test`.
     Test { id: Uuid },
     /// The messages `messages` the human sent, waiting for `ant`, which no daemon serves.
@@ -65,9 +74,12 @@ impl About {
         match self {
             Self::Approval { request, .. } => Some(&request.thread_id),
             Self::Escalation { escalation, .. } => Some(&escalation.thread_id),
-            Self::Completion { thread, .. } | Self::Question { thread, .. } | Self::Notice { thread, .. } => {
-                Some(thread)
-            }
+            Self::Completion { thread, .. }
+            | Self::Question { thread, .. }
+            | Self::Notice { thread, .. }
+            | Self::Message { thread, .. }
+            | Self::Mention { thread, .. }
+            | Self::Run { thread, .. } => Some(thread),
             Self::Test { .. } | Self::Unserved { .. } | Self::Digest { .. } | Self::Reminder { .. } => None,
         }
     }
@@ -80,6 +92,9 @@ impl About {
             Self::Completion { .. } => "completion",
             Self::Notice { .. } => "notice",
             Self::Question { .. } => "question",
+            Self::Message { .. } => "message",
+            Self::Mention { .. } => "mention",
+            Self::Run { .. } => "run",
             Self::Test { .. } => "test",
             Self::Unserved { .. } => "unserved",
             Self::Digest { .. } => "digest",
@@ -94,11 +109,19 @@ impl About {
             Self::Escalation { .. } | Self::Notice { .. } => Some(Bypass::Escalations),
             Self::Question { .. } => Some(Bypass::Questions),
             Self::Completion { .. }
+            | Self::Message { .. }
+            | Self::Mention { .. }
+            | Self::Run { .. }
             | Self::Test { .. }
             | Self::Unserved { .. }
             | Self::Digest { .. }
             | Self::Reminder { .. } => None,
         }
+    }
+
+    /// Whether it is a question a trail run's human() step asks, which quiet hours hold back only until they end.
+    pub(super) fn is_run_question(&self) -> bool {
+        matches!(self, Self::Question { run: Some(_), .. })
     }
 }
 
@@ -139,7 +162,15 @@ pub(super) fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
         "sent_at": now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "links": links,
     });
-    let facts = match &notice.about {
+    if let (Value::Object(json), Value::Object(facts)) = (&mut json, facts(&notice.about)) {
+        json.extend(facts);
+    }
+    json
+}
+
+/// The facts of what a notice is about, `kind` first, in its JSON notice.
+fn facts(about: &About) -> Value {
+    match about {
         About::Approval { request, seq } => json!({
             "kind": "approval",
             "id": request.id,
@@ -186,12 +217,36 @@ pub(super) fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             "thread": thread,
             "notice": kind.as_str(),
         }),
-        About::Question { id, from, thread, questions } => json!({
-            "kind": "question",
+        About::Question { id, from, thread, questions, run } => {
+            let mut facts = json!({
+                "kind": "question",
+                "id": id,
+                "ant": from,
+                "thread": thread,
+                "questions": questions.questions.iter().map(question_facts).collect::<Vec<_>>(),
+            });
+            if let Some(run) = run {
+                facts["run"] = json!(run);
+            }
+            facts
+        }
+        About::Message { id, from, thread } => json!({ "kind": "message", "id": id, "from": from, "thread": thread }),
+        About::Mention { id, from, thread, channel, post } => json!({
+            "kind": "mention",
+            "id": id,
+            "from": from,
+            "thread": thread,
+            "channel": channel,
+            "post": post,
+        }),
+        About::Run { id, from, thread, run, trail, state } => json!({
+            "kind": "run",
             "id": id,
             "ant": from,
             "thread": thread,
-            "questions": questions.questions.iter().map(question_facts).collect::<Vec<_>>(),
+            "run": run,
+            "trail": trail,
+            "state": state.as_str(),
         }),
         About::Test { id } => json!({ "kind": "test", "id": id }),
         About::Unserved { ant, messages } => {
@@ -205,11 +260,7 @@ pub(super) fn notice_json(notice: &Notice, now: DateTime<Utc>) -> Value {
             "message": message,
             "due": due.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }),
-    };
-    if let (Value::Object(json), Value::Object(facts)) = (&mut json, facts) {
-        json.extend(facts);
     }
-    json
 }
 
 /// The facts of the digest `id` of the notices `held` back, with the tool requests `pending`, in its JSON notice.
@@ -421,9 +472,112 @@ pub(super) fn relayed(
     Some(Envelope::on_thread(thread, owner.clone(), stand_in.clone(), text).with_escalation(Some(escalation)))
 }
 
+/// The notice of `envelope`, reaching the inbox of `human`, from a human if `from_human`, if `human` takes one of
+/// it: an escalation, a question, a daemon's notice to act on, a channel mention, a trail run's end, a message from
+/// another human or an ant's reply, each as `human`'s config lets it through.
+pub(super) fn inbox_notice(human: &Human, envelope: &Envelope, from_human: bool) -> Option<Notice> {
+    if envelope.escalation.is_some() {
+        return escalation_notice(envelope)
+            .filter(|notice| human.escalations && !human.gets_relayed_request(&notice.about));
+    }
+    if envelope.question.is_some() {
+        return question_notice(envelope).filter(|_| human.questions);
+    }
+    if envelope.notice.is_some() {
+        return action_notice(envelope).filter(|_| human.escalations);
+    }
+    if envelope.mention.is_some() {
+        return mention_notice(envelope).filter(|_| human.mentions);
+    }
+    if envelope.trail_end.is_some() {
+        return run_notice(envelope).filter(|_| human.runs);
+    }
+    if from_human {
+        return message_notice(envelope).filter(|_| human.messages);
+    }
+    completion_notice(envelope).filter(|_| human.completions)
+}
+
+/// The notice of `envelope`, a message from another human, if it is one to push: none of a decision, a summary
+/// request or an answer, nor of a message to itself. A sealed one names its sender and thread only.
+pub(super) fn message_notice(envelope: &Envelope) -> Option<Notice> {
+    let message = envelope.approval.is_none()
+        && envelope.summary.is_none()
+        && envelope.answer.is_none()
+        && !envelope.webhook
+        && envelope.from != envelope.to;
+    if !message {
+        return None;
+    }
+    let (from, thread) = (&envelope.from, &envelope.thread_id);
+    let text = format!(
+        "{}\n\nthread {thread}; answer with ants ask --thread {thread} @{from} TEXT",
+        notice_text(envelope, MAX_TEXT)
+    );
+    Some(Notice {
+        about: About::Message { id: envelope.id, from: from.clone(), thread: thread.clone() },
+        human: envelope.to.clone(),
+        title: format!("{from} wrote"),
+        text,
+        buttons: Vec::new(),
+        urgent: false,
+    })
+}
+
+/// The notice of the channel post that @mentions the human, as `envelope` tells it ([`Envelope::mention`]): from the
+/// post's author, whoever relayed it.
+pub(super) fn mention_notice(envelope: &Envelope) -> Option<Notice> {
+    let mention = envelope.mention.as_ref()?;
+    let from = mention.author.as_ref().unwrap_or(&envelope.from);
+    let (channel, thread) = (&mention.channel, &envelope.thread_id);
+    Some(Notice {
+        about: About::Mention {
+            id: envelope.id,
+            from: from.clone(),
+            thread: thread.clone(),
+            channel: channel.clone(),
+            post: mention.post,
+        },
+        human: envelope.to.clone(),
+        title: format!("{from} mentions {} in #{channel}", envelope.to),
+        text: format!("{}\n\nchannel {channel}, thread {thread}", notice_text(envelope, MAX_TEXT)),
+        buttons: Vec::new(),
+        urgent: false,
+    })
+}
+
+/// The notice of the end of a trail run, as its conductor tells it in `envelope` ([`Envelope::trail_end`]).
+pub(super) fn run_notice(envelope: &Envelope) -> Option<Notice> {
+    let end = envelope.trail_end.as_ref()?;
+    let thread = &envelope.thread_id;
+    let name = match &end.trail {
+        Some(trail) => format!("trail {trail}"),
+        None => "an inline script".to_owned(),
+    };
+    Some(Notice {
+        about: About::Run {
+            id: envelope.id,
+            from: envelope.from.clone(),
+            thread: thread.clone(),
+            run: end.run.clone(),
+            trail: end.trail.clone(),
+            state: end.state,
+        },
+        human: envelope.to.clone(),
+        title: format!("{}: run of {name} {}", envelope.from, end.state.as_str()),
+        text: format!(
+            "{}\n\nthread {thread}; ants trail show {} shows the run",
+            notice_text(envelope, MAX_TEXT),
+            end.run
+        ),
+        buttons: Vec::new(),
+        urgent: false,
+    })
+}
+
 /// The notice of an ant's reply `envelope`, if it is one: a message answering another (`in_reply_to`) that carries no
-/// escalation, decision, mention, summary or daemon's notice and comes from no webhook. The CLI that asked for a summary takes the
-/// reply itself.
+/// escalation, decision, mention, summary, daemon's notice or trail run's end and comes from no webhook. The CLI that
+/// asked for a summary takes the reply itself.
 pub(super) fn completion_notice(envelope: &Envelope) -> Option<Notice> {
     let reply = envelope.in_reply_to.is_some()
         && envelope.escalation.is_none()
@@ -431,6 +585,7 @@ pub(super) fn completion_notice(envelope: &Envelope) -> Option<Notice> {
         && envelope.mention.is_none()
         && envelope.summary.is_none()
         && envelope.notice.is_none()
+        && envelope.trail_end.is_none()
         && !envelope.webhook
         && envelope.from != envelope.to;
     if !reply {
@@ -526,6 +681,7 @@ pub(super) fn question_notice(envelope: &Envelope) -> Option<Notice> {
             from: envelope.from.clone(),
             thread: thread.clone(),
             questions: Box::new(questions.clone()),
+            run: envelope.trail_step.as_ref().map(|step| step.run.clone()),
         },
         human: envelope.to.clone(),
         title: format!("{} {asks}: {asked}", envelope.from),
@@ -557,6 +713,9 @@ pub(super) fn counted(kind: &str, n: u32) -> String {
         "completion" => ("reply", "replies"),
         "notice" => ("notice", "notices"),
         "question" => ("question", "questions"),
+        "message" => ("message", "messages"),
+        "mention" => ("mention", "mentions"),
+        "run" => ("trail run ended", "trail runs ended"),
         _ => return format!("{n} {kind} notices"),
     };
     format!("{n} {}", if n == 1 { one } else { many })

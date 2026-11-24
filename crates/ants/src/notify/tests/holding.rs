@@ -48,7 +48,10 @@ fn quiet_hours_read_the_wall_clock_of_their_time_zone_across_midnight() {
     let only =
         human(&format!("name = \"bob\"\napprovals = false\nescalations = false\ncompletions = true\n{NTFY_SINK}"));
     assert_eq!(only.unwrap().subjects(), ["ants.inbox.bob.>"], "completions read the inbox");
-    let none = format!("name = \"bob\"\napprovals = false\nescalations = false\n{NTFY_SINK}");
+    let none = format!(
+        "name = \"bob\"\napprovals = false\nescalations = false\nmessages = false\nmentions = false\nruns = false\n\
+         {NTFY_SINK}"
+    );
     assert!(error(&none).contains("nothing to notify"), "{}", error(&none));
 }
 
@@ -154,6 +157,91 @@ fn a_notice_held_from_a_human_away_is_relayed_to_its_stand_in_who_is_told_whom_t
     assert_eq!(escalation_notice(&forged).unwrap().title, "dev-b escalates: asked on dev-a", "relayed by no one away");
     let expired = escalated.with_escalation(Some(Escalation::of_request(&asked)));
     assert!(relayed(&alice, &escalation_notice(&expired).unwrap(), "snoozed", is_human).is_none(), "nothing to answer");
+}
+
+#[test]
+fn messages_mentions_and_run_ends_are_held_back_by_a_mute_a_snooze_and_quiet_hours_and_counted_for_the_digest() {
+    let now = at("2026-03-10T12:00:00Z");
+    let thread = ThreadId::generate();
+    let message = About::Message { id: Uuid::now_v7(), from: p("bob"), thread: thread.clone() };
+    let mention = About::Mention {
+        id: Uuid::now_v7(),
+        from: p("bob"),
+        thread: thread.clone(),
+        channel: "ops".parse().unwrap(),
+        post: Uuid::now_v7(),
+    };
+    let run = About::Run {
+        id: Uuid::now_v7(),
+        from: p("lead"),
+        thread: thread.clone(),
+        run: "r1".parse().unwrap(),
+        trail: None,
+        state: ants_proto::RunEnd::Done,
+    };
+    let text =
+        format!("name = \"alice\"\nquiet = \"11:00-13:00\"\nbypass = [\"escalations\", \"questions\"]\n{NTFY_SINK}");
+    let night = human(&text).unwrap();
+    let day = human(&format!("name = \"alice\"\nbypass = [\"escalations\", \"questions\"]\n{NTFY_SINK}")).unwrap();
+    let prefs = NotifyPrefs::default();
+    let mut muted = NotifyPrefs::default();
+    muted.muted.insert(thread, now + TimeDelta::hours(1));
+    let snoozed = NotifyPrefs { snoozed_until: Some(now + TimeDelta::minutes(5)), ..NotifyPrefs::default() };
+    for about in [&message, &mention, &run] {
+        assert_eq!(held(&day, about, &prefs, now), None, "{about:?}");
+        assert_eq!(held(&night, about, &prefs, now), Some("quiet hours"), "no bypass lets it through");
+        assert_eq!(held(&day, about, &snoozed, now), Some("snoozed"));
+        assert_eq!(held(&day, about, &muted, now), Some("muted thread"));
+    }
+
+    let mut counts = HeldNotices::default();
+    for about in [&message, &message, &mention, &run, &run] {
+        counts.add(about.kind(), now);
+    }
+    let notice = digest_notice(&day, counts, &[], now);
+    assert_eq!(notice.title, "5 notices held back");
+    assert!(notice.text.starts_with("1 mention, 2 messages, 2 trail runs ended held back"), "{}", notice.text);
+    assert_eq!(notice_json(&notice, now)["counts"], json!({ "mention": 1, "message": 2, "run": 2 }));
+    assert_eq!((counted("run", 1), counted("message", 1)), ("1 trail run ended".to_owned(), "1 message".to_owned()));
+}
+
+#[test]
+fn a_trail_runs_question_that_quiet_hours_held_back_is_pushed_once_they_end_unless_another_hold_holds_it() {
+    let night = human(&format!("name = \"alice\"\nquiet = \"11:00-13:00\"\n{NTFY_SINK}")).unwrap();
+    let (alice, lead) = (p("alice"), p("lead"));
+    let question = ants_proto::Question::new("Ship it?", &["yes".to_owned(), "no".to_owned()], false).unwrap();
+    let asking = Envelope::asking(ThreadId::generate(), lead, alice, question);
+    let step = ants_proto::TrailStep {
+        run: "r1".parse().unwrap(),
+        call: 1,
+        label: None,
+        schema: None,
+        trail: None,
+        script: None,
+        tip_key: None,
+        bounds: None,
+    };
+    let stepped = asking.clone().as_step(step);
+    let notice = question_notice(&stepped).unwrap();
+    assert!(notice.about.is_run_question() && !question_notice(&asking).unwrap().about.is_run_question());
+    assert_eq!(notice_json(&notice, Utc::now())["run"], json!("r1"));
+
+    let notified = Notified::new(night);
+    let (quiet, after) = (at("2026-03-10T12:00:00Z"), at("2026-03-10T13:00:00Z"));
+    notified.keep_for_later(notice, 7);
+    let mut prefs = NotifyPrefs::default();
+    assert!(notified.due_later(&prefs, quiet).is_empty(), "quiet hours still hold");
+    prefs.snoozed_until = Some(after + TimeDelta::minutes(5));
+    let due = notified.due_later(&prefs, after);
+    assert_eq!(due.iter().map(|(_, seq, why)| (*seq, *why)).collect::<Vec<_>>(), [(7, Some("snoozed"))]);
+    assert!(notified.due_later(&NotifyPrefs::default(), after).is_empty(), "taken once");
+
+    for seq in 0..70 {
+        notified.keep_for_later(question_notice(&stepped).unwrap(), seq);
+    }
+    let due = notified.due_later(&NotifyPrefs::default(), after);
+    assert_eq!(due.len(), LATER, "the oldest dropped");
+    assert_eq!((due[0].1, due[0].2), (6, None));
 }
 
 #[test]

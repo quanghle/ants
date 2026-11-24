@@ -118,6 +118,29 @@ impl RunEnd {
     }
 }
 
+/// What makes a message the end of a trail run ([`crate::Envelope::trail_end`]): the run, the saved trail it started
+/// on, and how it ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrailEnd {
+    pub run: RunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<TrailName>,
+    pub state: RunEnd,
+}
+
+impl TrailEnd {
+    /// The end of `run`; none while it runs or waits.
+    pub fn of(run: &TrailRun) -> Option<Self> {
+        let state = match &run.state {
+            RunState::Running | RunState::Waiting => return None,
+            RunState::Done { .. } => RunEnd::Done,
+            RunState::Failed { .. } => RunEnd::Failed,
+            RunState::Stopped { .. } => RunEnd::Stopped,
+        };
+        Some(Self { run: run.run.clone(), trail: run.first_trail().cloned(), state })
+    }
+}
+
 /// What befell a team ([`StatusUpdate::TeamChanged`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

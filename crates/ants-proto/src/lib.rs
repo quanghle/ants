@@ -162,7 +162,8 @@ pub use shared::{
     is_shared_field,
 };
 pub use status::{
-    DecidedBy, MAX_RUN_ERROR, MAX_TOOL_PATHS, PlanStep, RunEnd, State, StatusEvent, StatusUpdate, StepStage, TeamChange,
+    DecidedBy, MAX_RUN_ERROR, MAX_TOOL_PATHS, PlanStep, RunEnd, State, StatusEvent, StatusUpdate, StepStage,
+    TeamChange, TrailEnd,
 };
 pub use teams::{
     TEAM_DIRECTORY_KEY, Team, TeamAdminOutcome, TeamAdminReply, TeamAdminRequest, TeamDirectory, TeamOp, TeamRefusal,

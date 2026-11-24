@@ -87,6 +87,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         trail_spent: None,
         trail_start: None,
         rating_of: None,
+        trail_end: None,
         review_outcomes: None,
         team: None,
         sent_at: post.sent_at,

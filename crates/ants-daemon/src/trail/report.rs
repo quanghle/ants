@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use ants_proto::{
     CallAnswer, DEFAULT_TURN_BUDGET, Envelope, MAX_TITLE, NotesPost, PendingCall, RunId, RunLimit, RunState,
-    StatusUpdate, StepStage, ThreadId, TrailLimits, TrailRun, UserId,
+    StatusUpdate, StepStage, ThreadId, TrailEnd, TrailLimits, TrailRun, UserId,
 };
 use ants_trail::{Event, Meta};
 
@@ -159,8 +159,9 @@ impl Trails {
             return true;
         }
         let to = self.inner.humans.owner_or_default(run.owner.as_ref());
-        let mut message =
-            Envelope::on_thread(run.thread.clone(), self.inner.ant.clone(), to, text).with_owner(run.owner.clone());
+        let mut message = Envelope::on_thread(run.thread.clone(), self.inner.ant.clone(), to, text)
+            .with_owner(run.owner.clone())
+            .ending(TrailEnd::of(run));
         if let Some(ended_at) = run.ended_at.filter(|_| run.finished()) {
             message.id = end_id("trail-end", &run.run, ended_at);
         }

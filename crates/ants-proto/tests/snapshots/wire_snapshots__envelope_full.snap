@@ -178,6 +178,11 @@ expression: value
     }
   },
   "rating_of": "019a7d2f-0000-7000-8000-000000000001",
+  "trail_end": {
+    "run": "019a7d2f-0000-7000-8000-000000000001",
+    "trail": "release",
+    "state": "failed"
+  },
   "review_outcomes": {
     "dream": 7,
     "findings": [
