@@ -524,9 +524,10 @@ impl Dedicated {
         Ok(Some(Self { name: ant.clone(), creds, key: finding.key, home }))
     }
 
-    /// Unlist the ant from the config file at `path`, wait up to `wait` for its daemon to stop it as the colony
-    /// `js` shows, revoke its credentials with the account key in `dir` and push the account (unless `no_push`) to
-    /// the server of `nats`, and remove their file. Its home stays.
+    /// Unlist the ant from the config file at `path`, wait up to `wait` for its daemon to stop it as the colony `js`
+    /// shows, revoke its credentials with the account key in `dir` and push the account (unless `no_push`) to the
+    /// server of `nats`, remove their file and take the ant off its team. Its home stays. Refused while the ant leads
+    /// a team.
     async fn retire(
         &self,
         path: &Path,
@@ -537,6 +538,7 @@ impl Dedicated {
         nats: &Nats<'_>,
     ) -> Result<()> {
         let name = &self.name;
+        crate::teams::check_retirable_on(js, nats.domain, name).await?;
         config::write(path, &config::without_ant(path, name)?)?;
         println!(
             "unlisted {name} from {}: the daemon serving it stops it, its prompts in flight ending first",
@@ -566,6 +568,9 @@ impl Dedicated {
         };
         retire::forget(&self.creds)?;
         println!("{} removed", self.creds.display());
+        if let Some(line) = crate::teams::drop_ant_or_say(js, nats.domain, name).await {
+            println!("{line}");
+        }
         let seed = sealing::key_path(&self.creds);
         if seed.exists() {
             std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
