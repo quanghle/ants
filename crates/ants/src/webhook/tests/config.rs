@@ -1,5 +1,5 @@
 //! Tests of the webhook config: destinations and mentions, signatures, humans and their links, private secret
-//! files, and templates.
+//! files, templates, and the trail each event starts.
 
 use super::*;
 
@@ -197,4 +197,42 @@ fn the_text_comes_from_the_template_and_the_event_id_from_its_source() {
     let id = HEXLOWER.encode(digest::digest(&digest::SHA256, b"ping").as_ref());
     assert_eq!(event.text, format!("[webhook github] {id}\n\nping"));
     assert_eq!(plain.webhooks[0].event(&headers, b"\xff").err().unwrap().0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[test]
+fn a_webhook_naming_a_trail_starts_it_with_its_args_under_its_limits() {
+    let config = parse(&format!(
+        "{HOOK}ant = \"dev-a\"\ntrail = \"triage\"\nargs = {{ repo = \"app\" }}\nlimits = {{ steps = 100, wall = \"2d\" }}\n"
+    ))
+    .unwrap();
+    let start = config.webhooks[0].trail.as_ref().expect("a trail");
+    assert_eq!(start.trail.as_str(), "triage");
+    assert_eq!(start.args, serde_json::json!({"repo": "app"}));
+    let asked = ants_proto::TrailLimits { steps: 100, wall_secs: 2 * 86400, ..ants_proto::TrailLimits::DEFAULT };
+    assert_eq!(start.limits, asked, "the limits given, the others their defaults");
+    let plain = parse(&format!("{HOOK}ant = \"dev-a\"\ntrail = \"triage\"\n")).unwrap();
+    let start = plain.webhooks[0].trail.as_ref().unwrap();
+    assert_eq!((&start.args, start.limits), (&serde_json::json!({}), ants_proto::TrailLimits::DEFAULT));
+    assert!(parse(&format!("{HOOK}ant = \"dev-a\"\n")).unwrap().webhooks[0].trail.is_none());
+
+    for (extra, why) in [
+        ("ant = \"dev-a\"\nargs = { a = 1 }", "args go with trail only"),
+        ("ant = \"dev-a\"\nlimits = { steps = 9 }", "limits go with trail only"),
+        ("channel = \"ops\"\ntrail = \"triage\"", "names the ant conducting its runs, not a channel"),
+        ("ant = \"dev-a\"\ntrail = \"triage\"\nallow = [\"read\"]", "allow goes without trail"),
+        ("ant = \"dev-a\"\ntrail = \"triage\"\nargs = { text = \"t\" }", "args.text is the event's text"),
+        ("ant = \"dev-a\"\ntrail = \"Triage!\"", "trail"),
+        (
+            "ant = \"dev-a\"\ntrail = \"triage\"\nlimits = { steps = 501 }",
+            "limits: steps is over the most a run may take, 500",
+        ),
+        (
+            "ant = \"dev-a\"\ntrail = \"triage\"\nlimits = { wall = \"8d\" }",
+            "limits: wall is over the most a run may take, 7d",
+        ),
+        ("ant = \"dev-a\"\ntrail = \"triage\"\nlimits = { stepz = 9 }", "unknown field `stepz`"),
+    ] {
+        let e = error(&format!("{HOOK}{extra}\n"));
+        assert!(e.contains(why), "{extra}: {e}");
+    }
 }

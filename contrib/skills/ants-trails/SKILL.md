@@ -1195,9 +1195,10 @@ Args:
 A human starts a run with `ants trail run`, which shows what the run may spend before it starts and takes the limit
 flags `--steps`, `--at-once`, `--turns` and `--wall`; an ant starts one with the `run_trail` MCP tool, from a saved
 trail's `name` or a `script` of its own, on its current thread, getting the run's id at once or, with `wait`, its
-result; a `[[schedule]]` entry with `trail =` (and `args =`, a table) starts a saved trail on its `ant` at each firing.
-`run_trail`'s `limits` (`{"steps", "at_once", "turns", "wall"}`) and a schedule's `limits` table set the same limits as
-those flags. `trail_status` tells how a run the ant conducts stands (state, steps and turns spent of its limits, the
+result; a `[[schedule]]` entry with `trail =` (and `args =`, a table) starts a saved trail on its `ant` at each firing,
+and a `[[webhook]]` entry with `trail =` at each event, the event's text in `args["text"]`. `run_trail`'s `limits`
+(`{"steps", "at_once", "turns", "wall"}`) and a schedule's or webhook's `limits` table set the same limits as those
+flags. `trail_status` tells how a run the ant conducts stands (state, steps and turns spent of its limits, the
 steps it waits on, the result), and `stop_trail` stops one, which only a human resumes. `find_trails` finds saved
 trails for a task by their ratings, and `rate_trail` rates a run once it ends ([Finding and
 rating](#finding-and-rating)). Saved trails are colony-wide:

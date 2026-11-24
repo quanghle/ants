@@ -603,9 +603,28 @@ async fn read_body(mut body: Incoming, read: Body) -> Result<Option<Vec<u8>>, hy
 }
 
 impl Hook {
-    /// Deliver `event` unless it was delivered already, and answer once the hub's stream stored it.
+    /// Deliver `event` unless it was delivered already, and answer once the hub's stream stored it; for a webhook
+    /// starting a trail, refuse an event whose text makes the run's args larger than a run takes.
     async fn deliver(&self, bus: &Bus, event: Event) -> Result<Response<Full<Bytes>>> {
         let hook = &self.config;
+        let (text, trail) = match &hook.trail {
+            None => (event.text, None),
+            Some(start) => {
+                let mut start = start.clone();
+                if let serde_json::Value::Object(args) = &mut start.args {
+                    args.insert(config::TEXT_ARG.to_owned(), serde_json::Value::String(event.text));
+                }
+                let size = serde_json::to_vec(&start.args)?.len();
+                if size > ants_proto::MAX_TRAIL_ARGS {
+                    let why = format!(
+                        "the event's text makes {size} bytes of the run's args; a run takes at most {}",
+                        ants_proto::MAX_TRAIL_ARGS
+                    );
+                    return Ok(reply(StatusCode::PAYLOAD_TOO_LARGE, &why));
+                }
+                (format!("Run of trail {} for an event of webhook {}.", start.trail, hook.name), Some(start))
+            }
+        };
         let delivered = bus
             .deliver(Delivery {
                 from: &hook.name,
@@ -615,8 +634,8 @@ impl Hook {
                 allow: hook.allow.as_deref(),
                 key: webhook_seen_key(&hook.name, &event.hash),
                 message_id: format!("webhook.{}.{}", hook.name, event.hash),
-                text: event.text,
-                trail: None,
+                text,
+                trail: trail.as_ref(),
             })
             .await?;
         if delivered.duplicate {

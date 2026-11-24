@@ -237,6 +237,10 @@ A run is started three ways; each names a conductor, an owner and a thread to re
   unknown trail, is told to the thread's owner there. The entry's `limits` table (`steps`, `at_once`, `turns`, `wall`)
   sets what each run may spend, the firing carrying them; a limit left out takes its default, and one of 0 or over its
   maximum fails config loading. Such a run is untrusted ([Trust](#trust)).
+- **A webhook** with `trail = "NAME"` ([webhooks.md](webhooks.md#trail-runs), `ants webhook add --trail NAME`): each
+  event sends `ant`, the conductor, a message `Run of trail NAME for an event of webhook WEBHOOK.` carrying the trail,
+  its `args` with the event's text added as `args.text`, and its `limits`, started as a schedule's firing is, once per
+  event. Such a run is untrusted too.
 
   ```toml
   [[schedule]]
