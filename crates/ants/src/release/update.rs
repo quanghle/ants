@@ -503,8 +503,9 @@ pub(crate) fn remove_old() {
 }
 
 /// What a daemon does about a newer release, polling the stable releases about daily while `mode` is not off: warns
-/// of it (`check`), or installs it (`install`) for the daemon's upgrade check, every `upgrade_check`, to restart onto
-/// it. Never downgrades; backs off after a failure. Never returns.
+/// of it (`check`), or installs it (`install`), up to the version the bus runs ([`ants_daemon::host::bus_version`]),
+/// for the daemon's upgrade check, every `upgrade_check`, to restart onto it. Both say when this machine runs behind
+/// or ahead of the bus. Never downgrades; backs off after a failure. Never returns.
 pub(crate) async fn auto(mode: AutoUpdate, upgrade_check: Duration) {
     if mode == AutoUpdate::Off {
         return std::future::pending().await;
@@ -532,30 +533,78 @@ fn backoff(retry: Duration) -> Duration {
     retry.saturating_mul(2).min(POLL_EVERY)
 }
 
-/// What `mode` does once the latest stable release is `latest` and this executable `running`: nothing (off, or not
-/// newer), warn (check) or install.
-fn decide(mode: AutoUpdate, running: &Version, latest: &Version) -> AutoUpdate {
-    if latest > running { mode } else { AutoUpdate::Off }
+/// What a poll does about the releases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Decision {
+    /// Nothing: off, or no newer release to act on.
+    Nothing,
+    /// Warn of the newer release (`check`).
+    Warn,
+    /// Install this release (`install`).
+    Install(Version),
+    /// Install nothing, as the version the bus runs is not known (`install`).
+    BusUnknown,
+}
+
+/// What `mode` does once the latest stable release is `latest`, this executable `running` and the bus `bus`: nothing
+/// (off, or not newer), warn (check), or install the latest release, but none newer than the bus's (install).
+fn decide(mode: AutoUpdate, running: &Version, latest: &Version, bus: Option<&Version>) -> Decision {
+    match (mode, bus) {
+        (AutoUpdate::Off, _) => Decision::Nothing,
+        _ if latest <= running => Decision::Nothing,
+        (AutoUpdate::Check, _) => Decision::Warn,
+        (AutoUpdate::Install, None) => Decision::BusUnknown,
+        (AutoUpdate::Install, Some(bus)) if bus <= running => Decision::Nothing,
+        (AutoUpdate::Install, Some(bus)) => Decision::Install(latest.min(bus).clone()),
+    }
+}
+
+/// Where this machine, running `running`, stands to the bus running `bus`, when apart.
+fn apart(running: &Version, bus: &Version) -> Option<String> {
+    match running.cmp(bus) {
+        Ordering::Less => {
+            Some(format!("this machine runs ants {running}, behind the bus's {bus} (the version `ants signer` runs)"))
+        }
+        Ordering::Greater => Some(format!(
+            "this machine runs ants {running}, ahead of the bus's {bus} (the version `ants signer` runs): a release \
+             before 1.0 may change the wire, so update the hub first"
+        )),
+        Ordering::Equal => None,
+    }
 }
 
 /// Poll the releases once, doing what `mode` says of a newer one: whether one was installed.
 async fn poll(mode: AutoUpdate, upgrade_check: Duration) -> Result<bool> {
-    let release = resolve(None, false).await?;
-    let version = release.version().with_context(|| format!("release tag {} is not a version", release.tag_name))?;
+    let latest = resolve(None, false).await?;
+    let version = latest.version().with_context(|| format!("release tag {} is not a version", latest.tag_name))?;
     let running = Version::running();
-    match decide(mode, &running, &version) {
-        AutoUpdate::Off => {
-            tracing::debug!(%running, latest = %version, "ants is up to date");
+    let bus = ants_daemon::host::bus_version().and_then(|v| Version::parse(&v));
+    if let Some(note) = bus.as_ref().and_then(|bus| apart(&running, bus)) {
+        tracing::warn!("{note}");
+    }
+    match decide(mode, &running, &version, bus.as_ref()) {
+        Decision::Nothing => {
+            tracing::debug!(%running, latest = %version, bus = ?bus.map(|b| b.to_string()), "nothing to install");
             Ok(false)
         }
-        AutoUpdate::Check => {
+        Decision::Warn => {
             tracing::warn!(
                 "ants {version} is available (running {running}); `ants update` installs it, or auto_update = \
                  \"install\" in the config file"
             );
             Ok(false)
         }
-        AutoUpdate::Install => {
+        Decision::BusUnknown => {
+            tracing::warn!(
+                "ants {version} is available (running {running}), but auto_update = \"install\" installs nothing \
+                 while the version the bus runs is not known: it is read with the machine's host credentials \
+                 (`ants auth host`) from the record `ants signer` puts"
+            );
+            Ok(false)
+        }
+        Decision::Install(target) => {
+            let release = if target == version { latest } else { resolve(Some(&target.to_string()), false).await? };
+            let version = target;
             let exe = executable()?;
             let nats_server = install(&release, &exe).await?;
             tracing::info!(executable = %exe.display(), "installed ants {version} (was {running})");
@@ -677,10 +726,13 @@ mod tests {
     #[test]
     fn auto_update_acts_on_a_newer_release_only_and_backs_off() {
         let (running, newer, older) = (v("v0.2.0"), v("v0.3.0"), v("v0.1.0"));
+        assert_eq!(decide(AutoUpdate::Off, &running, &newer, Some(&newer)), Decision::Nothing);
+        assert_eq!(decide(AutoUpdate::Check, &running, &newer, None), Decision::Warn);
+        assert_eq!(decide(AutoUpdate::Install, &running, &newer, Some(&newer)), Decision::Install(newer.clone()));
         for mode in [AutoUpdate::Off, AutoUpdate::Check, AutoUpdate::Install] {
-            assert_eq!(decide(mode, &running, &newer), mode);
-            assert_eq!(decide(mode, &running, &running), AutoUpdate::Off, "{mode:?}");
-            assert_eq!(decide(mode, &running, &older), AutoUpdate::Off, "{mode:?} never downgrades");
+            let bus = Some(&newer);
+            assert_eq!(decide(mode, &running, &running, bus), Decision::Nothing, "{mode:?}");
+            assert_eq!(decide(mode, &running, &older, bus), Decision::Nothing, "{mode:?} never downgrades");
         }
         let mut retry = RETRY_AFTER;
         let waits: Vec<_> = (0..7)
@@ -692,6 +744,22 @@ mod tests {
             .collect();
         assert_eq!(waits, [1, 2, 4, 8, 16, 24, 24]);
         assert!(random_below(FIRST_POLL) < FIRST_POLL);
+    }
+
+    /// On a bus whose signer runs 0.4.0, install does not take 0.5.0 until the signer runs it; a machine behind the bus
+    /// catches up to it, and one ahead installs nothing; check warns of 0.5.0 all the same.
+    #[test]
+    fn install_goes_up_to_the_version_the_bus_runs_and_check_says_where_the_machine_stands() {
+        let (v3, v4, v5) = (v("v0.3.0"), v("v0.4.0"), v("v0.5.0"));
+        assert_eq!(decide(AutoUpdate::Install, &v4, &v5, Some(&v4)), Decision::Nothing, "the bus runs 0.4.0");
+        assert_eq!(decide(AutoUpdate::Install, &v4, &v5, Some(&v5)), Decision::Install(v5.clone()), "then 0.5.0");
+        assert_eq!(decide(AutoUpdate::Install, &v3, &v5, Some(&v4)), Decision::Install(v4.clone()), "up to the bus");
+        assert_eq!(decide(AutoUpdate::Install, &v5, &v5, Some(&v4)), Decision::Nothing, "ahead of the bus");
+        assert_eq!(decide(AutoUpdate::Install, &v4, &v5, None), Decision::BusUnknown);
+        assert_eq!(decide(AutoUpdate::Check, &v4, &v5, Some(&v4)), Decision::Warn);
+        assert_eq!(apart(&v4, &v4), None);
+        assert!(apart(&v3, &v4).unwrap().contains("ants v0.3.0, behind the bus's v0.4.0"), "{:?}", apart(&v3, &v4));
+        assert!(apart(&v5, &v4).unwrap().contains("ants v0.5.0, ahead of the bus's v0.4.0"), "{:?}", apart(&v5, &v4));
     }
 
     #[test]

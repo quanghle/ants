@@ -16,19 +16,32 @@ use crate::auth;
 use crate::credentials::issued;
 use crate::credentials::push;
 use crate::credentials::revoke;
-use crate::people::devices;
+use crate::people::{devices, humans};
 use crate::signing::github::Github;
 use crate::signing::signer::AbortOnDrop;
 
 impl Registrar<'_> {
     /// Revoke every key of `name`, bound to the GitHub user `account`, which left the registration policy for the
     /// reason `why`, as `ants auth revoke` does: record it in [`OFFBOARDED`], push the account, and record the revoked
-    /// devices in the hub's directory ([`devices::record_revocations`]). Returns what happened, in words.
+    /// devices in the hub's directory ([`devices::record_revocations`]). A human's dedicated assistant is revoked with
+    /// it, and the human taken out of the humans bucket ([`humans::forget`]). Returns what happened, in words.
     pub(super) async fn offboard(&self, name: &str, account: &GithubAccount, why: &str, by: Offboarder) -> String {
+        let human = issued::issued(self.dir)
+            .is_ok_and(|issued| issued.iter().any(|i| i.name == name && i.kind == issued::Kind::Human));
         let revoked = match revoke::revoke(self.dir, Some(name), &[]) {
             Ok(revoked) => revoked,
             Err(e) => return format!("revoking the keys of {name} failed ({e:#}): `ants auth revoke {name}`"),
         };
+        let assistants = match human.then(|| revoke::revoke_assistants(self.dir, name)) {
+            Some(Ok(assistants)) => assistants,
+            Some(Err(e)) => {
+                tracing::warn!(name, "revoking the assistant of {name}: {e:#}");
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        let mut assistant_names: Vec<String> = assistants.iter().filter_map(|r| r.name.clone()).collect();
+        assistant_names.dedup();
         let keys: Vec<String> = revoked.into_iter().map(|r| r.key).collect();
         let n = keys.len();
         tracing::warn!(name, github = %account.login, by = ?by, keys = n, "revoked as {why}");
@@ -44,7 +57,24 @@ impl Registrar<'_> {
             },
             Err(e) => format!(", but pushing the account failed ({e:#}): `ants auth push`"),
         };
-        format!("{n} keys of {name} revoked{pushed}")
+        let mut said = vec![format!("{n} keys of {name} revoked{pushed}")];
+        if !assistant_names.is_empty() {
+            said.push(format!("its assistant {} revoked too", assistant_names.join(", ")));
+        }
+        if human {
+            let forgotten = match name.parse() {
+                Ok(id) => humans::forget(self.url, self.js_domain, self.dir, &id).await,
+                Err(e) => Err(anyhow::Error::from(e)),
+            };
+            said.push(match forgotten {
+                Ok(()) => crate::cmd::auth::forgotten_note(name),
+                Err(e) => format!(
+                    "taking {name} out of {} failed ({e:#}): `ants auth revoke {name}`",
+                    ants_proto::HUMANS_BUCKET
+                ),
+            });
+        }
+        said.join("; ")
     }
 
     /// Begin a membership sweep if one is due and may run: a task checking on GitHub, one at a time, the users the

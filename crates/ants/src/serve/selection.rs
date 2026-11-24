@@ -299,7 +299,8 @@ pub struct Listed {
 /// not. `creds` (`--creds`) are the credentials of the ant described by flags, else of the file's ant `--ant` names,
 /// else of its one `[[ant]]`, where it sets none ([`config::Loaded::credit`]): never a built-in ant's unless named, and
 /// refused for a file listing several or none. A daemon serving the whole file says once why it leaves a built-in ant
-/// to another machine ([`config::Loaded::elsewhere`]), and fails where that leaves nothing to serve.
+/// to another machine ([`config::Loaded::elsewhere`]), and fails where that leaves nothing to serve, unless the file
+/// has the daemon manage the machine's nats-server (`[nats_server]`), which it then serves with no ants.
 pub fn ants(args: &DaemonArgs, default_path: &Path, hostname: &str, creds: Option<&Path>) -> Result<Listed> {
     select(args, default_path, hostname, creds, false)
 }
@@ -365,7 +366,7 @@ fn select(
             let whole = args.ant.is_none();
             if whole {
                 tell_elsewhere(&loaded.elsewhere, !loaded.ants.is_empty());
-                if loaded.ants.is_empty() && !allow_empty {
+                if loaded.ants.is_empty() && !allow_empty && loaded.nats_server.is_none() {
                     let mut why = loaded.elsewhere.iter().map(elsewhere).collect::<Vec<_>>().join("; ");
                     if why.is_empty() {
                         why = "no [[ant]] entries and messenger = false".to_owned();

@@ -170,6 +170,13 @@ impl ThreadSnoozes {
         self.0.get(thread).filter(|s| now < s.until && s.until - s.at <= SNOOZE_MAX)
     }
 
+    /// Whether the snooze of `thread` in force at `now` keeps it off the human's home, `latest` being when the latest
+    /// item for the human on it arrived: it holds until an item arrives after it was set. Home and an assistant's
+    /// `human_queue` leave out the threads it holds.
+    pub fn holds(&self, thread: &ThreadId, now: DateTime<Utc>, latest: Option<DateTime<Utc>>) -> bool {
+        self.get(thread, now).is_some_and(|s| latest.is_none_or(|at| at <= s.at))
+    }
+
     /// Drop the snoozes past at `now`.
     pub fn prune(&mut self, now: DateTime<Utc>) {
         self.0.retain(|_, s| now < s.until);

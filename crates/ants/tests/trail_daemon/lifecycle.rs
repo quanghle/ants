@@ -1,7 +1,8 @@
 //! A run from its start to its end: its steps to ants and humans, the reply to one answering it, a human's own or
 //! their assistant's, a re-ask for a reply matching a schema; started by a human or a schedule's firing; stopped and
-//! resumed, by a human or an admin order, asked at once or not stored, and the steps a run counts across them; a step
-//! to a team going to its lead; a paused conductor starting none and holding its steps.
+//! resumed, by a human or an admin order, asked at once or not stored, and the steps a run counts across them; ended
+//! as its conductor is retired; a step to a team going to its lead; a paused conductor starting none and holding its
+//! steps.
 
 use super::*;
 
@@ -488,6 +489,33 @@ async fn a_stopped_run_gives_up_its_steps_and_resumes_with_fresh_ones() {
     assert!(lead.reply(&first, &first.text.to_uppercase()).await);
     assert!(lead.reply(&second, &second.text.to_uppercase()).await);
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(["A", "B"]) });
+}
+
+#[tokio::test]
+async fn a_retired_conductor_ends_its_running_and_stopped_runs_each_owner_told_why_on_its_thread() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let running = lead.start(r#"await agent("a", ant="dev")"#, TrailLimits::default()).await;
+    lead.step().await;
+    let stopped = lead.start(r#"await agent("b", ant="ops")"#, TrailLimits::default()).await;
+    lead.step().await;
+    let human = ants_test_support::human();
+    lead.trails.stop(&stopped, &human).await.unwrap();
+    lead.told().await;
+
+    let why = "its conductor lead was retired, so no daemon conducts it any more";
+    assert_eq!(lead.trails.end_all(why).await, 2);
+    assert!(lead.trails.unfinished().is_empty(), "no run is left running, waiting or stopped");
+    let told = [lead.told().await, lead.told().await];
+    for run in [&running, &stopped] {
+        let header = lead.header(run).await;
+        assert_eq!(header.state, RunState::Failed { error: why.to_owned(), limit: None });
+        let told = told.iter().find(|told| told.thread_id == header.thread).expect("the owner is told");
+        assert_eq!(told.to, human);
+        assert!(told.text.contains(&format!("{run}")) && told.text.contains(why), "{}", told.text);
+    }
+    assert_eq!(lead.trails.end_all(why).await, 0, "an ended run ends once");
 }
 
 #[tokio::test]

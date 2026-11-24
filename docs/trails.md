@@ -719,6 +719,14 @@ the longest wall time, so a finished run stays at least 30 days. The full layout
   'ants resume ANT' resumes it`. Its runs make no pass while it is paused, so none sends a step; the replies already
   taken wait, and each run woken meanwhile makes its pass once the conductor resumes. A pass under way as it pauses
   ends first. Wall time keeps running while paused.
+- **Retirement:** a conductor retired (`ants retire`, a retire order, `retire_ant`) or revoked whole (`ants auth revoke
+  ANT`) ends its runs, as no daemon conducts them any more: each running, waiting or stopped run fails, its error
+  naming the retirement, and its owner is told on the run's thread. The conductor's daemon ends them as the retirement
+  stops the ant, before leaving the colony, waiting up to 1 min. Runs it left unfinished, its daemon away, end once a
+  revocation leaves the ant no live key and the colony shows no daemon serving it: where the account key is, the
+  revocation's cleanup (with [temporary credentials](auth.md#issuing-and-revoking-credentials) scoped to the ant)
+  marks each run failed, tells its owner on the run's thread as the conductor, and empties the conductor's
+  `<ant>.runs`.
 
 ```sh
 ants trail runs
@@ -752,4 +760,6 @@ refuses before running anything. With a human's credentials it lists the runs st
 (steps, turns or wall time, as their records say) that `ants trail resume` may still continue, naming the limits to
 raise; those whose steps went to ants not in the colony, naming `ants trail stop`; those running or waiting over
 5 min past their wall time, which the conductor's daemon does not drive, naming `ants trail stop` or a restart of that
-daemon; and those whose conductor is not in the colony ([cli.md](cli.md#identity-setup-completions-and-doctor)).
+daemon; and those whose conductor is not in the colony, naming the daemon to start and, for a retired or revoked
+conductor, `ants auth revoke ANT` where the account key is, which ends its runs
+([cli.md](cli.md#identity-setup-completions-and-doctor)).

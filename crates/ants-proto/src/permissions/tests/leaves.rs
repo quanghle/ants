@@ -74,6 +74,7 @@ fn leaf_permissions_cover_each_user_once() {
             // The payloads of its admin orders.
             "$O.ants_files.C._admin.*.m1.>",
             "$JS.API.DIRECT.GET.OBJ_ants_files.$O.ants_files.C._admin.*.m1.>",
+            "$JS.API.DIRECT.GET.KV_ants_machines.$KV.ants_machines._account",
             "$JS.ACK.ANTS.admin-m1.>",
             "$JS.ACK.*.*.ANTS.admin-m1.>",
             // Asking for any renewal on the machine.

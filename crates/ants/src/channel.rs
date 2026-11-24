@@ -17,8 +17,10 @@ use std::time::{Duration, SystemTime};
 use ants_daemon::bus;
 pub use ants_daemon::channel::list;
 use ants_daemon::channel::{CLOCK_SLACK, Stored, load, read_back};
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelPost, Humans, ThreadId, ThreadMarks, ThreadOrigin, UserId, Uuid, subject,
+    CHANNELS_BUCKET, ChannelEntry, ChannelId, ChannelPost, Humans, ThreadId, ThreadMarks, ThreadOrigin, UserId, Uuid,
+    subject,
 };
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream::kv;
@@ -216,6 +218,60 @@ pub async fn update<T>(
         tracing::debug!(%channel, "the channel changed meanwhile; retrying");
     }
     bail!("channel #{channel} kept changing; try again")
+}
+
+/// Take `ant`, retired or revoked whole, out of every channel it is a member, the messenger or the owner of, each
+/// change announced in the channel by the channel manager, naming the retirement; one line per channel changed. `js`
+/// reads the whole bucket by direct gets ([`DirectKv::whole`]) and posts as the channel manager.
+pub(crate) async fn drop_retired(
+    js: &jetstream::Context,
+    js_domain: Option<&ants_proto::JsDomain>,
+    ant: &UserId,
+) -> Result<Vec<String>> {
+    let found = crate::buckets::latest_in(js, CHANNELS_BUCKET, &subject::kv_all(CHANNELS_BUCKET)).await?;
+    let kv = DirectKv::whole(js, js_domain, CHANNELS_BUCKET).await?;
+    let mut lines = Vec::new();
+    for (key, _) in found {
+        for _ in 0..ATTEMPTS {
+            let (Lookup::Value(value), last) = kv.lookup_last(&key).await? else { break };
+            let Ok(mut entry) = serde_json::from_slice::<ChannelEntry>(&value) else { break };
+            if entry.check_key(&key).is_err() {
+                break;
+            }
+            let changed = without(&mut entry, ant);
+            if changed.is_empty() {
+                break;
+            }
+            if !kv.update(&key, encode(&entry)?, last).await? {
+                continue;
+            }
+            let by = format!("the retirement of {ant}");
+            let post = ants_daemon::chanadm::announcement(&by, &entry, &changed);
+            let id = format!("retired-{ant}-{}-{last}", entry.channel);
+            bus::store(js, post.subject(), &post, &id).await?;
+            lines.push(format!("took {ant} out of #{}: {}", entry.channel, changed.join("; ")));
+            break;
+        }
+    }
+    Ok(lines)
+}
+
+/// Take `ant` out of `entry`'s members, its messenger and its owner: what changed, as an announcement names it.
+fn without(entry: &mut ChannelEntry, ant: &UserId) -> Vec<String> {
+    let mut changed = Vec::new();
+    if entry.members.contains(ant) {
+        entry.members.retain(|member| member != ant);
+        changed.push(format!("removed {ant}"));
+    }
+    if entry.messenger.as_ref() == Some(ant) {
+        entry.messenger = None;
+        changed.push(format!("messenger back to the default {}", UserId::messenger()));
+    }
+    if entry.owner.as_ref() == Some(ant) {
+        entry.owner = None;
+        changed.push(format!("owner {ant} cleared"));
+    }
+    changed
 }
 
 /// Run the channel manager until it fails: connect with `creds`, the channel manager's, retrying until the hub

@@ -283,7 +283,7 @@ impl Trails {
 
     /// End the run of `slot` in `state`, bounded to what its record holds, then store and tell its end ([`Trails::close`]).
     /// The steps it counted and never sent are given back; an error is kept without control characters.
-    async fn end(&self, slot: &Slot, mut state: RunState) -> Result<()> {
+    pub(super) async fn end(&self, slot: &Slot, mut state: RunState) -> Result<()> {
         if let RunState::Failed { error, .. } = &mut state {
             *error = lines(error);
         }

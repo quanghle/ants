@@ -187,9 +187,14 @@ impl Seen<'_> {
                     "{name} waits on its conductor {}, which is not in the colony: no daemon conducts it",
                     run.conductor
                 );
-                let fix =
-                    format!("start the daemon serving {}; `ants trail stop {}` needs it too", run.conductor, run.run);
-                return Some(Check::warn(CHECK, detail, vec![fix]));
+                let fixes = vec![
+                    format!("start the daemon serving {}; `ants trail stop {}` needs it too", run.conductor, run.run),
+                    format!(
+                        "for a retired or revoked {0}: `ants auth revoke {0}` where the account key is ends its runs",
+                        run.conductor
+                    ),
+                ];
+                return Some(Check::warn(CHECK, detail, fixes));
             }
             RunState::Running | RunState::Waiting if elapsed > run.limits.wall_time() + OVERDUE_GRACE => {
                 return Some(overdue(run, &name, elapsed));

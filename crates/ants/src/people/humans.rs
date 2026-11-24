@@ -21,6 +21,43 @@ pub async fn ensure(js: &jetstream::Context) -> Result<kv::Store> {
         .context("opening the humans bucket (with credentials, `ants init` as a human creates it)")
 }
 
+/// How long taking a human out of the humans bucket waits for the hub.
+const FORGET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Take `human`, revoked whole, out of the humans bucket on the hub at `url`, with short-lived credentials signed with
+/// the account key in `dir` ([`crate::auth::human_offboarder_creds`]): delete its assistant grant, which withdraws its
+/// assistant at every reader, its pre-allow rules and confirmations, and its entry, which marks it gone, so no daemon
+/// takes it for a human, an owner or the assistant's human any more (but a daemon whose config names it the default
+/// human).
+pub(crate) async fn forget(
+    url: &str,
+    js_domain: Option<&ants_proto::JsDomain>,
+    dir: &Path,
+    human: &UserId,
+) -> Result<()> {
+    ants_daemon::bus::check_url(url)?;
+    let creds = crate::auth::human_offboarder_creds(dir, js_domain, human)?;
+    let connect = async_nats::ConnectOptions::with_credentials(&creds)?
+        .name("ants-auth")
+        .custom_inbox_prefix(ants_proto::ENROLL_INBOX)
+        .connection_timeout(FORGET_TIMEOUT)
+        .connect(url);
+    let client = tokio::time::timeout(FORGET_TIMEOUT, connect).await.context("no answer from the hub")??;
+    let mut js = ants_daemon::bus::jetstream(client, js_domain);
+    js.set_timeout(FORGET_TIMEOUT);
+    let kv = ants_daemon::records::direct_kv::DirectKv::new(&js, js_domain, HUMANS_BUCKET).await?;
+    let keys = [
+        ants_proto::assistant_grant_key(human),
+        ants_proto::pre_allow_key(human),
+        ants_proto::confirmations_key(human),
+        human.to_string(),
+    ];
+    for key in keys {
+        kv.delete(&key).await.with_context(|| format!("deleting {key} from {HUMANS_BUCKET}"))?;
+    }
+    Ok(())
+}
+
 /// Who the CLI acts as: the user its credentials name, a human or an ant, or without credentials the human the config
 /// file's `human` names.
 #[derive(Debug, Clone, PartialEq, Eq)]

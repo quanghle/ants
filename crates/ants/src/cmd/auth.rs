@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ants_proto::{
-    BuiltinAnt, ChannelId, Destination, DeviceKey, IDENTITIES_BUCKET, JsDomain, Machine, Permissions, UserId,
+    BuiltinAnt, ChannelId, Destination, DeviceKey, HUMANS_BUCKET, IDENTITIES_BUCKET, JsDomain, Machine, Permissions,
+    UserId,
 };
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
@@ -805,7 +806,19 @@ pub(crate) async fn revoke_credentials(
         let issued = issued::issued(&dir).unwrap_or_default();
         issued.iter().any(|i| &i.name == name && matches!(i.kind, issued::Kind::Ant | issued::Kind::Assistant))
     });
-    let revoked = revoke::revoke(&dir, name.as_deref(), &keys)?;
+    let human = name.clone().filter(|name| {
+        let issued = issued::issued(&dir).unwrap_or_default();
+        issued.iter().any(|i| &i.name == name && i.kind == issued::Kind::Human)
+    });
+    let mut revoked = revoke::revoke(&dir, name.as_deref(), &keys)?;
+    // A human revoked whole takes its dedicated assistant with it.
+    let assistants = match &human {
+        Some(human) => revoke::revoke_assistants(&dir, human)?,
+        None => Vec::new(),
+    };
+    let mut assistant_names: Vec<String> = assistants.iter().filter_map(|r| r.name.clone()).collect();
+    assistant_names.dedup();
+    revoked.extend(assistants);
     for r in &revoked {
         let expired = if r.expires_at.is_some_and(|exp| exp <= now) { " (already expired)" } else { "" };
         println!("revoked {} ({}){expired}", r.key, r.name.as_deref().unwrap_or("name unknown"));
@@ -840,20 +853,43 @@ pub(crate) async fn revoke_credentials(
         if let Some(ant) = &ant {
             println!("{IDENTITIES_BUCKET} keeps {ant}'s identity: revoking {ant} again without --no-push deletes it");
         }
+        if let Some(human) = &human {
+            println!(
+                "{HUMANS_BUCKET} keeps {human}'s entry, assistant grant and pre-allow rules: revoking {human} again \
+                 without --no-push deletes them"
+            );
+        }
         return Ok(());
     }
     push_and_report(url, domain, &dir).await?;
     for ant in &retired {
-        crate::signing::retire::clean_consumers(url, domain, &dir, ant).await;
+        for line in crate::signing::retire::clean_consumers(url, domain, &dir, ant).await {
+            println!("{line}");
+        }
     }
     if !retired.is_empty() {
         leave_teams(url, domain, &dir, &retired).await;
     }
-    if let Some(ant) = ant {
+    for ant in ant.into_iter().chain(assistant_names) {
         devices::forget_identity(url, domain, &dir, &ant.parse()?).await?;
         println!("{ant}'s identity deleted from {IDENTITIES_BUCKET}");
     }
+    if let Some(human) = human {
+        crate::people::humans::forget(url, domain, &dir, &human.parse()?).await.with_context(|| {
+            format!("the credentials were revoked, but taking {human} out of {HUMANS_BUCKET} did not finish: revoke {human} again by name")
+        })?;
+        println!("{}", forgotten_note(&human));
+    }
     Ok(())
+}
+
+/// What `ants auth revoke` and the membership sweep say of a human revoked whole once out of the humans bucket.
+pub(crate) fn forgotten_note(human: &str) -> String {
+    format!(
+        "{human}'s entry, assistant grant, pre-allow rules and confirmations deleted from {HUMANS_BUCKET}: no daemon \
+         takes {human} for a human, an owner or its assistant's human any more; a config file naming {human} as its \
+         `human` or a `stand_in` keeps it there until changed"
+    )
 }
 
 /// Take the ants of `revoked`, revoked whole, off their teams, with short-lived credentials signed with the account

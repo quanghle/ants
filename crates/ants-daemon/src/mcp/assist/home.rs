@@ -1,5 +1,6 @@
 //! What waits for the human in its home, and acting in it for the human: `human_queue` lists the questions, tool
-//! requests and unread messages waiting for it, or reads one of its threads; `answer_for_human`, `send_for_human`,
+//! requests, stuck threads, unread messages and mentions and due reminders waiting for it, less the threads done or
+//! snoozed ([`ants_proto::ThreadSnoozes::holds`], as home leaves them out), or reads one of its threads; `answer_for_human`, `send_for_human`,
 //! `post_for_human`, `notes_for_human`, `react_for_human` and `decide_for_human` answer, send, post, react and decide
 //! tool requests for it.
 
@@ -16,7 +17,7 @@ use rmcp::model::CallToolResult;
 use rmcp::{ErrorData, schemars, tool, tool_router};
 use serde::Deserialize;
 
-use super::{HumanMessage, HumanStore, LOOKBACK};
+use super::{HumanMessage, HumanStore, LOOKBACK, Messages};
 use crate::mcp::Hub;
 use crate::mcp::messages::shown;
 use crate::mcp::notes::POST_TRIES;
@@ -153,47 +154,112 @@ impl Hub {
         line
     }
 
+    /// The messages of `human` on `thread`, oldest first.
+    async fn human_thread_text(&self, human: &UserId, messages: &Messages, thread: &str) -> Result<String, String> {
+        let thread: ThreadId = thread.parse().map_err(|e| format!("{e}"))?;
+        let on: Vec<&HumanMessage> = messages.on(&thread).collect();
+        if on.is_empty() {
+            return Err(format!("{human} has no message on thread {thread} in the last 7 days"));
+        }
+        let mut out = format!("Thread {thread} of {human}, oldest first:");
+        for m in on.iter().skip(on.len().saturating_sub(SHOWN)) {
+            let _ = write!(out, "\n{}", self.line(human, m, true).await);
+        }
+        Ok(out)
+    }
+
+    /// Write to `out` the heading of `listed`, how many there are between its two parts, then a line on each of the
+    /// latest.
+    async fn write_listed(
+        &self,
+        out: &mut String,
+        human: &UserId,
+        (what, how): (&str, &str),
+        listed: &[&HumanMessage],
+    ) {
+        let _ = write!(out, "\n{what} ({}){how}", listed.len());
+        for m in listed.iter().skip(listed.len().saturating_sub(SHOWN)) {
+            let _ = write!(out, "\n{}", self.line(human, m, false).await);
+        }
+    }
+
+    /// The threads of `messages` stuck on `human`, as home tells them: escalated to it with nothing said by a human, or
+    /// this ant for it, since; the latest escalation of each, oldest first.
+    fn stuck<'a>(&self, human: &UserId, messages: &'a Messages) -> Vec<&'a HumanMessage> {
+        let mut by_human: HashMap<&ThreadId, u64> = HashMap::new();
+        for m in &messages.stored {
+            if self.humans.is_human(&m.envelope.from) || messages.by_human(&m.envelope) {
+                by_human.insert(&m.envelope.thread_id, m.seq);
+            }
+        }
+        let mut stuck: HashMap<&ThreadId, &HumanMessage> = HashMap::new();
+        for m in messages.stored.iter().filter(|m| m.envelope.to == *human && m.envelope.escalation.is_some()) {
+            if by_human.get(&m.envelope.thread_id).is_none_or(|said| *said < m.seq) {
+                stuck.insert(&m.envelope.thread_id, m);
+            }
+        }
+        let mut stuck: Vec<&HumanMessage> = stuck.into_values().collect();
+        stuck.sort_by_key(|m| m.seq);
+        stuck
+    }
+
     /// What waits for the human in its home, or the messages of `thread`.
     async fn human_queue(&self, thread: Option<&str>) -> Result<String, String> {
         let (human, store) = self.acting_for()?;
         let messages = self.human_messages(&human, store).await?;
         if let Some(thread) = thread.map(str::trim).filter(|t| !t.is_empty()) {
-            let thread: ThreadId = thread.parse().map_err(|e| format!("{e}"))?;
-            let on: Vec<&HumanMessage> = messages.on(&thread).collect();
-            if on.is_empty() {
-                return Err(format!("{human} has no message on thread {thread} in the last 7 days"));
-            }
-            let mut out = format!("Thread {thread} of {human}, oldest first:");
-            for m in on.iter().skip(on.len().saturating_sub(SHOWN)) {
-                let _ = write!(out, "\n{}", self.line(&human, m, true).await);
-            }
-            return Ok(out);
+            return self.human_thread_text(&human, &messages, thread).await;
         }
 
+        let now = chrono::Utc::now();
         let marker = store.read_marker(human.clone()).await.map_err(|e| format!("{e:#}"))?;
+        let (reminders, assisted) =
+            store.reminders(human.clone(), self.ant.clone()).await.map_err(|e| format!("{e:#}"))?;
+        let snoozed = reminders.snoozed.clone().with_assisted(&assisted, now);
         let questions = messages.open_questions();
         let asked: HashSet<Uuid> = questions.iter().map(|q| q.envelope.id).collect();
-        let unread: Vec<&HumanMessage> = messages
-            .stored
-            .iter()
-            .filter(|m| m.envelope.to == human && m.envelope.from != self.ant && !asked.contains(&m.envelope.id))
-            .filter(|m| !marker.is_read(m.seq))
-            .collect();
         let mut last: HashMap<&ThreadId, u64> = HashMap::new();
         for m in &messages.stored {
             last.insert(&m.envelope.thread_id, m.seq);
         }
+        let stuck = self.stuck(&human, &messages);
+        let (mentions, unread): (Vec<&HumanMessage>, Vec<&HumanMessage>) = messages
+            .stored
+            .iter()
+            .filter(|m| m.envelope.to == human && m.envelope.from != self.ant && !asked.contains(&m.envelope.id))
+            .filter(|m| m.envelope.escalation.is_none() && !marker.is_read(m.seq))
+            .partition(|m| m.envelope.mention.is_some());
         let mut done = HashSet::new();
-        for thread in questions.iter().chain(&unread).map(|m| &m.envelope.thread_id).collect::<HashSet<_>>() {
+        let listed = questions.iter().chain(&stuck).chain(&unread).chain(&mentions);
+        for thread in listed.map(|m| &m.envelope.thread_id).collect::<HashSet<_>>() {
             let mark = store.done(thread.clone()).await.map_err(|e| format!("{e:#}"))?;
             if mark.is_some_and(|d| d.holds(last[thread])) {
                 done.insert(thread.clone());
             }
         }
-        let open = |m: &&HumanMessage| !done.contains(&m.envelope.thread_id);
-        let questions: Vec<&HumanMessage> = questions.into_iter().filter(open).collect();
-        let unread: Vec<&HumanMessage> = unread.into_iter().filter(open).collect();
         let requests = self.waiting_requests(&human, store).await?;
+        let due = reminders.due(now);
+        // When the latest item for the human on each thread arrived, which ends a snooze set before it.
+        let mut latest: HashMap<ThreadId, chrono::DateTime<chrono::Utc>> = HashMap::new();
+        let mut arrived = |thread: &ThreadId, at| {
+            let known = latest.entry(thread.clone()).or_insert(at);
+            *known = (*known).max(at);
+        };
+        for m in questions.iter().chain(&stuck).chain(&unread).chain(&mentions) {
+            arrived(&m.envelope.thread_id, m.envelope.sent_at);
+        }
+        for r in &requests {
+            arrived(&r.thread_id, r.requested_at);
+        }
+        for (thread, reminder) in &due {
+            arrived(thread, reminder.due);
+        }
+        let held = |thread: &ThreadId| snoozed.holds(thread, now, latest.get(thread).copied());
+        let open = |m: &&HumanMessage| !done.contains(&m.envelope.thread_id) && !held(&m.envelope.thread_id);
+        let [questions, stuck, unread, mentions] =
+            [questions, stuck, unread, mentions].map(|of| of.into_iter().filter(open).collect::<Vec<_>>());
+        let requests: Vec<ApprovalRequest> = requests.into_iter().filter(|r| !held(&r.thread_id)).collect();
+        let due: Vec<_> = due.into_iter().filter(|(thread, _)| !held(thread)).collect();
         let held: HashSet<Uuid> = messages
             .stored
             .iter()
@@ -201,14 +267,15 @@ impl Hub {
             .filter_map(|m| m.envelope.approval.as_ref().map(|d| d.request_id))
             .collect();
 
-        if questions.is_empty() && unread.is_empty() && requests.is_empty() {
+        if [&questions, &stuck, &unread, &mentions].iter().all(|of| of.is_empty())
+            && requests.is_empty()
+            && due.is_empty()
+        {
             return Ok(format!("Nothing waits for {human}."));
         }
         let mut out = format!("What waits for {human}, latest last:");
-        let _ = write!(out, "\nQuestions to {human} ({}), answered with answer_for_human:", questions.len());
-        for m in questions.iter().skip(questions.len().saturating_sub(SHOWN)) {
-            let _ = write!(out, "\n{}", self.line(&human, m, false).await);
-        }
+        let asked = (&*format!("Questions to {human}"), ", answered with answer_for_human:");
+        self.write_listed(&mut out, &human, asked, &questions).await;
         let _ = write!(out, "\nTool requests ({}), decided with decide_for_human:", requests.len());
         for r in requests.iter().skip(requests.len().saturating_sub(SHOWN)) {
             let options: Vec<&str> = r.options.iter().map(|v| v.as_str()).collect();
@@ -225,9 +292,15 @@ impl Hub {
                 r.expires_at.format("%Y-%m-%d %H:%M UTC"),
             );
         }
-        let _ = write!(out, "\nUnread messages to {human} ({}):", unread.len());
-        for m in unread.iter().skip(unread.len().saturating_sub(SHOWN)) {
-            let _ = write!(out, "\n{}", self.line(&human, m, false).await);
+        let escalated = format!(", escalated to {human} with no human's word since:");
+        self.write_listed(&mut out, &human, ("Stuck threads", &escalated), &stuck).await;
+        self.write_listed(&mut out, &human, (&format!("Unread messages to {human}"), ":"), &unread).await;
+        self.write_listed(&mut out, &human, (&format!("Unread mentions of {human}"), ":"), &mentions).await;
+        let _ = write!(out, "\nDue reminders ({}):", due.len());
+        for (thread, reminder) in due.iter().skip(due.len().saturating_sub(SHOWN)) {
+            let due = reminder.due.format("%Y-%m-%d %H:%M UTC");
+            let note = if reminder.note.is_empty() { String::new() } else { format!(": {}", reminder.note) };
+            let _ = write!(out, "\n- thread {thread}, due {due}{note}");
         }
         Ok(out)
     }
@@ -408,9 +481,10 @@ impl Hub {
 #[tool_router(router = assist_home_router, vis = "pub(super)")]
 impl Tools {
     #[tool(description = "As the assistant of a human, read what waits for it in its home in ants chat: the \
-        questions ants asked it not yet answered, the tool requests waiting for its decision, and its unread \
-        messages, each with its message id and thread, from the last 7 days. With `thread`, read that thread's \
-        messages to and from the human instead. A sealed message shows as [sealed] unless the human enrolled this \
+        questions ants asked it not yet answered, the tool requests waiting for its decision, the threads stuck \
+        on it, its unread messages and mentions, each with its message id and thread, from the last 7 days, and its \
+        due reminders; threads it or this ant snoozed stay out until something new arrives on them. With \
+        `thread`, read that thread's messages to and from the human instead. A sealed message shows as [sealed] unless the human enrolled this \
         ant as one of its devices.")]
     async fn human_queue(&self, Parameters(args): Parameters<HumanQueue>) -> Result<CallToolResult, ErrorData> {
         Ok(text(self.hub.human_queue(args.thread.as_deref()).await))

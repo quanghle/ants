@@ -161,6 +161,33 @@ pub(super) fn workload(config: &Config) -> std::sync::Arc<colony::Workload> {
     workload
 }
 
+/// How long ending a retired conductor's runs may take before the retirement goes on without the rest.
+const END_RUNS_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// End the runs `trails` conducts when [`super::serve`] stopped as a retirement other than `retired_before` is marked:
+/// no daemon conducts them once the ant's credentials go, so each fails, its owner told why on its thread.
+pub(super) async fn end_runs_if_retired(
+    served: &Served,
+    config: &Config,
+    trails: Option<&Trails>,
+    retired_before: Option<uuid::Uuid>,
+) {
+    let Some(trails) = trails.filter(|trails| !trails.unfinished().is_empty()) else { return };
+    if *served != Served::Stopped
+        || !events::retirement(&config.storage.home).await.is_some_and(|r| Some(r) != retired_before)
+    {
+        return;
+    }
+    let why = format!("its conductor {} was retired, so no daemon conducts it any more", config.ant);
+    match tokio::time::timeout(END_RUNS_WAIT, trails.end_all(&why)).await {
+        Ok(ended) => tracing::info!(ended, "ended the trail runs of the retired conductor"),
+        Err(_) => tracing::warn!(
+            wait = ?END_RUNS_WAIT,
+            "ending the trail runs of the retired conductor took too long; the rest stay as they are"
+        ),
+    }
+}
+
 /// Delete the ant's channel and done consumers when [`super::serve`] stopped as a retirement other than `retired_before` is
 /// marked.
 pub(super) async fn forget_if_retired(

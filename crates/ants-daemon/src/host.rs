@@ -4,18 +4,21 @@
 //! so an ant stays addressable on its machine after its colony entry expired. It also takes the admin orders to the
 //! machine's ants and records their outcomes ([`crate::admin`]), reading the humans' consent to their assistants'
 //! orders from [`ants_proto::HUMANS_BUCKET`] ([`crate::admin::held`]), and keeps the shared settings of the machine's
-//! ants ([`crate::profile::shared`]), creating those still missing from the machine's config. Once it fails, it is tried
+//! ants ([`crate::profile::shared`]), creating those still missing from the machine's config, and reads the version
+//! the bus runs ([`bus_version`]). Once it fails, it is tried
 //! again with backoff ([`keep`]). Without host credentials, where the ants have their own, the connection stays off and
 //! the daemon serves its ants as before, sense keeping none of their data ([`uncredentialed`]). A daemon serving one ant (`ants daemon --ant`) makes no host connection, but
 //! sense a link of its own with the host credentials, carrying its logs alone ([`run_sense`]), tried again with backoff
 //! after it fails ([`keep_sense`]).
 
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ants_proto::{
-    DEVICES_BUCKET, IDENTITIES_BUCKET, JsDomain, MACHINES_BUCKET, Machine, MachineRecord, UserId, host_inbox_prefix,
+    ACCOUNT_HOLDER_KEY, AccountHolder, DEVICES_BUCKET, IDENTITIES_BUCKET, JsDomain, MACHINES_BUCKET, Machine,
+    MachineRecord, UserId, host_inbox_prefix,
 };
 use anyhow::{Context as _, Result, bail};
 use tokio::sync::watch;
@@ -26,6 +29,7 @@ use crate::records::direct_kv::DirectKv;
 use crate::secrets::creds::{self, Kind};
 use crate::secrets::keystore;
 use crate::sense::{Hosting, Link};
+use crate::sync::RwLockExt as _;
 use crate::{admin, bus, colony};
 
 const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -33,6 +37,37 @@ const RETRY_MAX: Duration = Duration::from_secs(30);
 /// The longest wait of the host connection, or sense's link of its own, between tries after it failed ([`keep`],
 /// [`keep_sense`]).
 const LINK_RETRY_MAX: Duration = Duration::from_mins(5);
+
+/// How often the host connection reads the version the bus runs again ([`bus_version`]).
+const BUS_VERSION_EVERY: Duration = Duration::from_hours(1);
+
+/// The version the bus runs, as the host connection last read it ([`bus_version`]).
+static BUS_VERSION: RwLock<Option<String>> = RwLock::new(None);
+
+/// The version of ants the bus runs: the one `ants signer` recorded running on the machine holding the account key
+/// ([`AccountHolder::version`]), as this process's host connection read it last, on connecting and every hour. None
+/// before it was read, without a host connection, or when no signer recorded a version.
+pub fn bus_version() -> Option<String> {
+    BUS_VERSION.read_locked().clone()
+}
+
+/// Read the version the bus runs ([`bus_version`]) from the record of `kv` now and every [`BUS_VERSION_EVERY`],
+/// until dropped; a read failing keeps the version read last.
+async fn keep_bus_version(kv: Option<DirectKv>) {
+    let Some(kv) = kv else { return std::future::pending().await };
+    let mut every = tokio::time::interval(BUS_VERSION_EVERY);
+    loop {
+        every.tick().await;
+        match kv.get(ACCOUNT_HOLDER_KEY).await {
+            Ok(record) => {
+                let holder = record.and_then(|r| serde_json::from_slice::<AccountHolder>(&r).ok());
+                let version = holder.map(|h| h.version).filter(|v| !v.is_empty());
+                *BUS_VERSION.write_locked() = version;
+            }
+            Err(e) => tracing::debug!(error = format!("{e:#}"), "reading the version the bus runs"),
+        }
+    }
+}
 
 /// What a host connection connects with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,7 +223,9 @@ pub async fn run_keeping(host: Host, ants: watch::Receiver<Vec<UserId>>, sense: 
     };
     let shared = host.config.as_ref().map(|c| c.shared.clone());
     let polled = ants.clone();
+    let machines = DirectKv::new(&js, host.js_domain.as_ref(), MACHINES_BUCKET).await.ok();
     tokio::select! {
+        () = keep_bus_version(machines) => Ok(()),
         recorded = keep_record(&js, &host, &machine, &hostname, ants, shared.clone()) => recorded,
         () = admin::serve(js.clone(), host.js_domain.clone(), orders) => Ok(()),
         kept = keep_shared(&js, &host, &machine, &accounts, shared, polled) => kept,

@@ -109,6 +109,26 @@ pub fn revoke(dir: &Path, name: Option<&str>, keys: &[String]) -> Result<Vec<Rev
     Ok(targets)
 }
 
+/// Revoke by name, as [`revoke`] does, every assistant of `human` ([`Issued::assistant_of`]) holding a live key: its
+/// dedicated assistant, which acts for no one once its human is revoked whole. Returns the keys revoked.
+pub fn revoke_assistants(dir: &Path, human: &str) -> Result<Vec<Revoked>> {
+    let now = auth::now()?;
+    let gone: Vec<String> = revoked(dir)?.into_iter().map(|r| r.key).collect();
+    let mut names: Vec<String> = issued(dir)?
+        .into_iter()
+        .filter(|i| i.kind == Kind::Assistant && i.assistant_of.as_ref().is_some_and(|of| of.as_str() == human))
+        .filter(|i| !gone.contains(&i.key) && i.expires_at.is_none_or(|exp| exp > now))
+        .map(|i| i.name)
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut all = Vec::new();
+    for name in names {
+        all.extend(revoke(dir, Some(&name), &[])?);
+    }
+    Ok(all)
+}
+
 /// Withdraw at `now` the approval grants of the keys of `name` in the registry `issued` of `dir`: append again the
 /// latest line of each key a human's approval registered, marked [`Issued::withdrawn`]. Its GitHub binding stays.
 fn withdraw_approvals(dir: &Path, issued: &[Issued], name: &str, now: u64) -> Result<()> {

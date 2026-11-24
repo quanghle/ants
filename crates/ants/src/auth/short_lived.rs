@@ -100,6 +100,12 @@ pub(crate) fn team_keeper_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Res
     short_lived_creds(dir, js_domain, Permissions::for_team_keeper())
 }
 
+/// Short-lived credentials taking one human revoked whole out of the humans bucket
+/// ([`Permissions::for_human_offboarder`]).
+pub(crate) fn human_offboarder_creds(dir: &Path, js_domain: Option<&JsDomain>, human: &UserId) -> Result<String> {
+    short_lived_creds(dir, js_domain, Permissions::for_human_offboarder(human))
+}
+
 /// Short-lived credentials for checking and cleaning up one retired ant ([`Permissions::for_retired_consumers`]).
 pub(crate) fn retired_consumer_creds(dir: &Path, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<String> {
     short_lived_creds(dir, js_domain, Permissions::for_retired_consumers(ant))

@@ -229,6 +229,34 @@ impl Trails {
         waiting
     }
 
+    /// End every run not finished, stopped ones too, as failed with `why`, for a conductor retired, whose runs no
+    /// daemon conducts any more: a parent before its children, which its end stops. Each end is stored and told as
+    /// any other (`Trails::close`), its owner told `why` on the run's thread. Returns how many ended.
+    pub async fn end_all(&self, why: &str) -> usize {
+        let mut runs: Vec<TrailRun> = self.unfinished();
+        runs.sort_by_key(|run| run.parent.is_some());
+        let mut ended = 0;
+        for run in runs.iter().map(|run| &run.run) {
+            let ending = async {
+                let Some(slot) = locked(&self.inner.runs).get(run).cloned() else { return Ok(false) };
+                let _engine = slot.engine.lock().await;
+                if slot.header().finished() {
+                    return Ok(false);
+                }
+                self.end(&slot, RunState::Failed { error: why.to_owned(), limit: None }).await.map(|()| true)
+            };
+            match self.holding(run, true, Box::pin(ending)).await.expect("waited for") {
+                Ok(true) => {
+                    tracing::info!(%run, why, "trail run ended");
+                    ended += 1;
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(%run, error = format!("{e:#}"), "ending a trail run"),
+            }
+        }
+        ended
+    }
+
     /// Resume a stopped run, or one failed on a limit, under `limits` when given: from its stored records, with the
     /// steps it waited on sent anew and its child runs stopped or failed on a limit resumed. A run started answering a
     /// step resumes within what the step's grant leaves after the other runs answering it.

@@ -44,7 +44,7 @@ pub use self::issuing::{
 pub use self::relocate::move_stores;
 pub use self::renewal::{Renewed, renew, renew_registered};
 pub use self::short_lived::{approver_creds, issue_bootstrap, issue_enrollment, revoker_creds, signer_creds};
-pub(crate) use self::short_lived::{retired_consumer_creds, team_keeper_creds};
+pub(crate) use self::short_lived::{human_offboarder_creds, retired_consumer_creds, team_keeper_creds};
 pub use self::uplink::{
     check_leaf, extend_leaf, issue_leaf, leaf_store_creds, leaf_system_creds, leaf_user, shrink_leaf,
 };

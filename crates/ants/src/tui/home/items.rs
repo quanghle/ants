@@ -210,13 +210,13 @@ pub fn snoozed(data: &Data, now: DateTime<Utc>) -> HashMap<ThreadId, DateTime<Ut
 /// The threads a snooze keeps off home among `items`: it holds until an item for the human arrives on the thread
 /// after it was set.
 fn held(data: &Data, items: &[Item], now: DateTime<Utc>) -> HashMap<ThreadId, DateTime<Utc>> {
-    data.cards
-        .snoozed
+    let snoozed = &data.cards.snoozed;
+    let latest = |thread: &ThreadId| items.iter().filter(|i| i.thread == *thread).map(|i| i.at).max();
+    snoozed
         .0
         .keys()
-        .filter_map(|thread| data.cards.snoozed.get(thread, now).map(|s| (thread, s)))
-        .filter(|(thread, s)| !items.iter().any(|i| i.thread == **thread && i.at > s.at))
-        .map(|(thread, s)| (thread.clone(), s.until))
+        .filter(|thread| snoozed.holds(thread, now, latest(thread)))
+        .filter_map(|thread| snoozed.get(thread, now).map(|s| (thread.clone(), s.until)))
         .collect()
 }
 

@@ -729,3 +729,68 @@ async fn an_assistant_s_admin_orders_wait_for_its_human_to_consent() {
     drop(ants);
     tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
 }
+
+/// Revoking alice whole revokes her dedicated assistant too and takes her out of the humans bucket: a daemon's reader
+/// honours no grant or pre-allow rule of hers any more, knows her for no human, and gives what is meant for her as an
+/// owner to the default human.
+#[tokio::test]
+async fn revoking_a_human_whole_ends_its_assistant_s_grant_and_rules_and_takes_it_out_of_the_directory() {
+    use crate::credentials::revoke;
+
+    let Some(server) = Server::start() else { return };
+    let team = server.dir().join("auth");
+    let (alice, pa, human) = (p("alice"), p("pa"), ants_test_support::human());
+    let creds = server.creds_as(&alice, Role::Human);
+    let account = devices::account_of(Some(&creds)).unwrap();
+    let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
+    humans::ensure(&js).await.unwrap();
+    let me = humans::Me { id: alice.clone(), role: Role::Human, assistant_of: None };
+    assert!(humans::register(&js, &me).await.unwrap());
+    for config in [ants_daemon::hub::devices_config(), ants_daemon::hub::identities_config()] {
+        js.create_key_value(config).await.unwrap();
+    }
+    bus::ensure_colony(&js, ants_proto::COLONY_TTL).await.unwrap();
+    let new = auth::Registered { assistant_of: Some(alice.clone()), ..auth::Registered::default() };
+    let rights = ants_proto::Permissions::for_assistant(&pa, &alice);
+    auth::Issue::new(&team, &pa, issued::Kind::Assistant, rights)
+        .with(&new)
+        .into_file(&server.dir().join("pa-assistant.creds"))
+        .unwrap();
+
+    put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
+    let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
+    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], false, false).await.unwrap();
+    let (_, bob_js) = server.connect_as(&p("bob"), Role::Human).await;
+    let reader = Registry::new(human.clone()).verifying_grants(account);
+    let _watching = reader.watch(bob_js, ants_daemon::people::humans::RETRY);
+    let until = async |what: &str, done: &dyn Fn() -> bool| {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the reader never saw {what}"));
+    };
+    until("alice's grant and rules", &|| {
+        reader.honours_assistant(&alice, &pa, Some(&alice)) && reader.pre_allow(&alice, &pa).is_some()
+    })
+    .await;
+    assert!(reader.is_human(&alice));
+    assert_eq!(reader.owner_or_default(Some(&alice)), alice);
+
+    let conn = crate::connection::Connection { nats: &server.url, creds: None, js_domain: None, human: None };
+    let name = Some(alice.to_string());
+    crate::cmd::auth::revoke_credentials(name, Vec::new(), Vec::new(), false, Some(team.clone()), &conn).await.unwrap();
+
+    let revoked: Vec<Option<String>> = revoke::revoked(&team).unwrap().into_iter().map(|r| r.name).collect();
+    assert!(revoked.contains(&Some("pa".to_owned())), "the assistant is revoked with its human: {revoked:?}");
+    until("alice gone", &|| !reader.is_human(&alice)).await;
+    until("no grant or rule of alice's", &|| {
+        reader.assistant(&alice).is_none() && reader.pre_allow(&alice, &pa).is_none()
+    })
+    .await;
+    assert!(!reader.honours_assistant(&alice, &pa, Some(&alice)));
+    assert_eq!(reader.owner_or_default(Some(&alice)), human, "an owner gone is no owner");
+    assert_eq!(reader.human_owner(Some(&alice)), None);
+}
