@@ -270,7 +270,10 @@ impl Status {
             | StatusUpdate::Asked { .. }
             | StatusUpdate::Decided { .. }
             | StatusUpdate::Step { .. }
-            | StatusUpdate::Leg { .. } => false,
+            | StatusUpdate::Leg { .. }
+            | StatusUpdate::RunEnded { .. }
+            | StatusUpdate::OrderSettled { .. }
+            | StatusUpdate::TeamChanged { .. } => false,
         }
     }
 
