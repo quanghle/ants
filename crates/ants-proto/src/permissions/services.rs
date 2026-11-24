@@ -177,6 +177,17 @@ impl Permissions {
         }
     }
 
+    /// What the short-lived credentials `ants auth revoke` and the membership sweep issue themselves from the account
+    /// key allow for a human revoked whole: deleting its entry in [`HUMANS_BUCKET`], which marks it gone, and the
+    /// records under its name, its assistant grant, pre-allow rules and confirmations, which no one else writes; with
+    /// the replies of its JetStream requests under [`ENROLL_INBOX`].
+    pub fn for_human_offboarder(human: &UserId) -> Self {
+        Self {
+            publish: vec![subject::kv(HUMANS_BUCKET, human), subject::kv(HUMANS_BUCKET, format_args!("{human}.>"))],
+            subscribe: vec![format!("{ENROLL_INBOX}.>")],
+        }
+    }
+
     /// What retirement cleanup allows on the hub: checking one ant's colony entry and deleting only its channel
     /// and done consumers, never its inbox consumer; for the trail runs it conducted that no daemon ends any more,
     /// reading the runs, writing its own keys of them and telling each run's owner on its thread, as the ant; and
