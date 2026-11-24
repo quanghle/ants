@@ -356,9 +356,14 @@ A run reports on the thread it started with, as its conductor:
 
 `ants trail runs` lists the runs of every conductor, or `--ant CONDUCTOR`'s, each with the trail it started (its route
 once it went on by `goto()`); `ants trail show RUN` prints a run (its id or a unique start of one): state, phase,
-spending, args, its route (each leg's trail, waypoint, start and steps), its child runs with their states, the calls
-waiting and queued (none once the run is done or failed), and its journal; `--follow` follows it as `ants trail run
---follow` does. These need human credentials. In `ants chat`, `/trail runs` shows the same list in the pager, and
+spending, what it spent, args, its route (each leg's trail, waypoint, start and steps), its child runs with their
+states, the calls waiting and queued (none once the run is done or failed), and its journal; `--follow` follows it as
+`ants trail run --follow` does. What it spent is what its step threads spent, read from each ant's thread spend in
+`ants_sessions` as `ants spend --thread` reads it, in all rather than since a human's last message: tokens and cost in
+all and by ant, an ant a step's ant asked on the step's thread counting too (`spent on its step threads: N tokens, cost
+C (ANT N tokens, cost C; …)`), then the ants the run's `agent()` steps went to that counted none there, as an ant
+whose harness reports no spend (`counted no spend, as a harness reporting none: ANT, …`). A child run's steps count on
+its own record, and work an ant hands to a thread of its own counts on no step's. These need human credentials. In `ants chat`, `/trail runs` shows the same list in the pager, and
 `/trail show RUN` the run as `ants trail show RUN` prints it.
 
 ## Limits

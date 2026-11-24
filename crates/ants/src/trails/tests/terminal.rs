@@ -69,6 +69,7 @@ fn a_run_shows_its_phase_error_labels_and_answers_on_their_own_lines() {
         journal: journal.clone(),
         children: Vec::new(),
         ratings: Vec::new(),
+        spend: None,
     };
     let text = runs::render(&detail, now);
     assert_eq!(text.lines().filter(|l| l.starts_with("state:")).count(), 1, "{text}");
