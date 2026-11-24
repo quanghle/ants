@@ -41,6 +41,9 @@ pub enum NoticeKind {
     /// A run the ant started with `run_trail` while answering a trail step ended or stopped: the notice, on the step's
     /// thread to its conductor, tells what the runs started answering the step spent ([`Envelope::trail_spent`]).
     RunSpent,
+    /// The ant turned a trail step away unanswered: it reached a spending cap, or the step's thread has no turns left.
+    /// The notice, on the step's thread to its conductor ([`Envelope::step_notice`]), fails the step's call.
+    Unanswered,
 }
 
 impl NoticeKind {
@@ -62,6 +65,7 @@ impl NoticeKind {
             Self::Steered => "steered",
             Self::McpSignIn => "mcp_sign_in",
             Self::RunSpent => "run_spent",
+            Self::Unanswered => "unanswered",
         }
     }
 

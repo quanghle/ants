@@ -401,10 +401,14 @@ limits, not those it was dumped with.
 
 Each `agent()` step reserves up to 8 of the run's turns as its message's turn budget; the turns its reply spent, and
 one per re-ask, count against the run's turns, and a run that cannot reserve one fails on its turn limit. Each step
-also counts against the spending caps of the ant answering it. A goto spends nothing and changes no limit: the run's
-legs share its limits, spending and wall time. A child run's steps and turns count against its root run's limits too,
-and its wall time ends with what its parent has left. Keep the script's own work small: only the compute between steps
-counts against the compute limit, and every variable counts against the session's size at each suspension.
+also counts against the spending caps of the ant answering it. A step reaching an ant at one of its spending caps, or
+whose thread has no turns left, is not escalated: the ant's daemon acks it unprompted and tells the conductor with an
+`unanswered` notice on the step's thread, and the call raises `RuntimeError: <ant> never answered: <cap>; <ant> does
+not answer the step.` in the script, which may catch it and ask another ant; the run's thread notes the notice. A goto
+spends nothing and changes no limit: the run's legs share its limits, spending and wall time. A child run's steps and
+turns count against its root run's limits too, and its wall time ends with what its parent has left. Keep the
+script's own work small: only the compute between steps counts against the compute limit, and every variable counts
+against the session's size at each suspension.
 
 Each `agent()` step also carries a grant: what the runs its recipient starts with `run_trail` while answering it may
 spend together ([Starting a run](#starting-a-run)). The conductor takes it out of what the run's tree has left as

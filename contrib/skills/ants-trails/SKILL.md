@@ -157,7 +157,7 @@ checks = await command(f"gh pr checks {args['pr']}")
 A step that fails (an `ant=` naming a human or no valid ant name, a `capability=` no ant but the conductor
 advertises, a `tips=` key that is not one line of 1-120 characters, malformed questions, a reply still off its schema
 after two retries, the step's message withdrawn from its
-recipient's queue, an unknown trail, ancestor cycle or failed child run in `trail()`, the run's step limit reached)
+recipient's queue, the recipient at one of its spending caps or the step's thread out of turns, an unknown trail, ancestor cycle or failed child run in `trail()`, the run's step limit reached)
 raises `RuntimeError` with the reason where the step is awaited. A step to an ant no daemon serves raises nothing: it
 waits in that ant's queue, as any message does, until the run ends or a human stops it. An exception the script does
 not catch fails the run with
@@ -193,7 +193,9 @@ the trail can go on without that item, and log what was lost.
 | Nested calls | 200 | `RecursionError` in the script |
 | Lists and dicts nested in one JSON value: args, a call's arguments, an answer, the result | 100 | deeper arguments raise `TypeError` at the call; a deeper result fails the run |
 
-A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers it.
+A run's limits are set when it starts, and each step also counts against the spending caps of the ant that answers it:
+a step to an ant at a cap, or out of turns, raises `RuntimeError: <ant> never answered: …` naming the cap, so catch it
+to go on with another ant.
 A run's legs share its limits and what it spent, and a goto spends nothing. A child run's steps and turns count
 against the limits of its root run, the one no `trail()` started, and its wall time ends with its parent's. A run
 started with `run_trail` while answering a step spends from the step's grant, a share of what the step's run has left:

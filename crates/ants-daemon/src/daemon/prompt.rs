@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use ants_proto::{
-    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, PromptEnd, Stage, State, StatusUpdate,
-    SummaryRequest, UserId,
+    Envelope, Error as ProtoError, EscalationReason, Hold, Humans, NoReplyWhy, NoticeKind, PromptEnd, Stage, State,
+    StatusUpdate, SummaryRequest, UserId,
 };
 use anyhow::Result;
 use async_nats::jetstream;
@@ -481,11 +481,17 @@ impl Inbox<'_> {
         matches!(spent, Some(ProtoError::BudgetExhausted(_)))
     }
 
-    /// Escalates the thread instead of prompting when it has no turns (`spent`) or allowance left; true if so.
-    async fn out_of_turns(&self, Handling { incoming, msg, seq }: Handling<'_>, spent: bool) -> Result<bool> {
+    /// Escalates the thread instead of prompting when it has no turns (`spent`) or allowance left; true if so. A trail
+    /// step is not escalated but turned away, its conductor told ([`Inbox::step_unanswered`]).
+    async fn out_of_turns(&self, h @ Handling { incoming, msg, seq }: Handling<'_>, spent: bool) -> Result<bool> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
+        let step = envelope.trail_step.is_some() && incoming.post.is_none();
         if spent {
+            if step {
+                self.step_unanswered(h, "Turn budget spent: the step's thread has no turns left").await?;
+                return Ok(true);
+            }
             // Out of turns: escalate the thread instead of spending another prompt.
             self.escalate(incoming, "Turn budget spent", EscalationReason::TurnBudget, seq, None).await?;
             bus::double_ack(self.client, msg).await?;
@@ -493,6 +499,10 @@ impl Inbox<'_> {
             return Ok(true);
         }
         match self.ledger.reached(thread).await {
+            Ok(Some(cap)) if step => {
+                self.step_unanswered(h, &cap).await?;
+                Ok(true)
+            }
             Ok(Some(cap)) => {
                 // Out of allowance: the same, until a human or the escalation's leader answers, or the day ends.
                 self.escalate(incoming, &cap, EscalationReason::Cap, seq, None).await?;
@@ -506,6 +516,21 @@ impl Inbox<'_> {
                 Ok(false)
             }
         }
+    }
+
+    /// Ack `incoming`, a trail step at stream sequence `seq`, unprompted, once its conductor is told that the ant does
+    /// not answer it, for `why`, in an [`NoticeKind::Unanswered`] notice ([`Envelope::step_notice`]): the step's call
+    /// raises in the script at once, which an escalation would leave waiting. The notice takes the step's reply id, so
+    /// a redelivery tells once.
+    async fn step_unanswered(&self, Handling { incoming, msg, seq }: Handling<'_>, why: &str) -> Result<()> {
+        let envelope = &incoming.envelope;
+        tracing::info!(thread = %envelope.thread_id, conductor = %envelope.from, why, "turning a trail step away");
+        let text = format!("[ants] {why}; {} does not answer the step.", self.ant);
+        let notice = envelope.step_notice(self.ant.clone(), NoticeKind::Unanswered, text);
+        bus::store(self.js, notice.subject(), &notice, &super::delivery::reply_id(self.ant, envelope)).await?;
+        bus::double_ack(self.client, msg).await?;
+        self.marks.attempts.forget(seq).await;
+        Ok(())
     }
 
     /// Whether the session called `complete` in the turn on `incoming`, and why: never for a message always answered,

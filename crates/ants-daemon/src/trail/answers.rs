@@ -2,8 +2,8 @@
 //! messages on the thread of a step the run no longer waits on, or of a run no longer in memory.
 
 use ants_proto::{
-    AgentArgs, CallAnswer, Envelope, JournalEntry, NoticeKind, PendingCall, Role, RunId, RunLimit, TipBoard,
-    TrailFunction, TrailRun, UserId,
+    AgentArgs, CallAnswer, Envelope, JournalEntry, PendingCall, Role, RunId, RunLimit, TipBoard, TrailFunction,
+    TrailRun, UserId,
 };
 use anyhow::Result;
 use chrono::Utc;
@@ -15,7 +15,8 @@ use super::{Slot, Step, Trails, locked, nested, steps};
 impl Trails {
     /// Take `message` when it arrived on a step's thread: the reply answering the step's call, resolving it; a
     /// notice or escalation, or a further reply of the step's recipient once the run no longer waits on the step,
-    /// reported on the run's thread. True when taken, to be acked without prompting the harness, once this returns.
+    /// reported on the run's thread, a notice that the recipient does not answer the step failing the call
+    /// (`steps::unanswered`). True when taken, to be acked without prompting the harness, once this returns.
     pub async fn take(&self, message: &Envelope) -> Result<bool> {
         let step = locked(&self.inner.threads).get(&message.thread_id).cloned();
         let answerer = self.answerer(message);
@@ -39,11 +40,7 @@ impl Trails {
             let call = Some(pending.call);
             let stray = Stray { run: &run, run_thread: &header.thread, call, to: &pending.to, waited: true };
             self.report_stray(stray, message).await;
-            let withdrawn = message.notice == Some(NoticeKind::Withdrawn)
-                && message.from == pending.to
-                && message.in_reply_to == Some(pending.message);
-            if withdrawn {
-                let error = format!("{} never answered: the step's message was withdrawn from its queue", pending.to);
+            if let Some(error) = steps::unanswered(&pending, message) {
                 self.resolve(&slot, &header, &pending, CallAnswer::Error(error), 0).await?;
             }
             return Ok(true);

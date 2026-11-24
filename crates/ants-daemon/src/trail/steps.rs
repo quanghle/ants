@@ -1,8 +1,8 @@
 //! A call's step: the message carrying it to its recipient, and the answer a reply to it gives the call.
 
 use ants_proto::{
-    AgentArgs, CallAnswer, Envelope, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, PendingCall, Ranked, TipBoard, TrailFunction,
-    TrailRun, TrailStep, UserId, WEBHOOK_ALLOW, script_sha256,
+    AgentArgs, CallAnswer, Envelope, MAX_TIPS_BLOCK, MAX_TIPS_CARRIED, NoticeKind, PendingCall, Ranked, TipBoard,
+    TrailFunction, TrailRun, TrailStep, UserId, WEBHOOK_ALLOW, script_sha256,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -23,6 +23,24 @@ pub(super) fn answered_by(call: &PendingCall, message: &Envelope, answerer: &Use
         && message.escalation.is_none()
         && message.rating_of.is_none()
 }
+
+/// The error raising in the script for `call` when `message`, on its step's thread, tells that the step's recipient
+/// does not answer it: a notice of the recipient replying to the step's last message that the message was withdrawn
+/// from its queue, or that the recipient turned it away ([`NoticeKind::Unanswered`]). The error names the recipient
+/// and the notice's text.
+pub(super) fn unanswered(call: &PendingCall, message: &Envelope) -> Option<String> {
+    let kind = message.notice?;
+    let ends = matches!(kind, NoticeKind::Withdrawn | NoticeKind::Unanswered);
+    if !ends || message.from != call.to || message.in_reply_to != Some(call.message) {
+        return None;
+    }
+    let text = message.text.trim();
+    let text: String = text.strip_prefix("[ants] ").unwrap_or(text).chars().take(MAX_UNANSWERED).collect();
+    Some(format!("{} never answered: {text}", call.to))
+}
+
+/// Most characters of a notice's text the error of a step its recipient does not answer quotes.
+const MAX_UNANSWERED: usize = 1000;
 
 /// How many times a reply not matching its schema is asked for again before the call raises in the script.
 pub(super) const MAX_RETRIES: u32 = 2;
