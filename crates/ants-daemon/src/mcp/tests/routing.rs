@@ -123,7 +123,7 @@ async fn requests_are_routed_by_colony_capabilities() {
 }
 
 /// Looks ants up in `colony`.
-fn lookup_in(colony: Vec<ColonyEntry>) -> ColonyLookup {
+pub(super) fn lookup_in(colony: Vec<ColonyEntry>) -> ColonyLookup {
     Arc::new(move |ant| {
         let entry = colony.iter().find(|e| e.ant == ant).cloned();
         Box::pin(async move { Ok(entry) })

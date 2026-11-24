@@ -15,6 +15,9 @@ pub struct AgentArgs {
     pub ant: Option<String>,
     #[serde(default)]
     pub capability: Option<String>,
+    /// The team whose lead answers the step, given neither `ant` nor `capability`.
+    #[serde(default)]
+    pub team: Option<String>,
     #[serde(default)]
     pub schema: Option<Value>,
     #[serde(default)]
@@ -25,9 +28,13 @@ pub struct AgentArgs {
 }
 
 impl AgentArgs {
-    /// The arguments in `args`, refused without a prompt or with a tips key [`check_tip_key`] refuses.
+    /// The arguments in `args`, refused without a prompt, with a team beside an ant or a capability, or with a tips key
+    /// [`check_tip_key`] refuses.
     pub fn of(args: &Value) -> Result<Self, String> {
         let args: Self = serde_json::from_value(args.clone()).map_err(|e| format!("agent() takes a prompt: {e}"))?;
+        if args.team.is_some() && (args.ant.is_some() || args.capability.is_some()) {
+            return Err("agent() takes team= alone, without ant= or capability=".to_owned());
+        }
         if let Some(key) = &args.tips {
             check_tip_key(key).map_err(|e| format!("agent() names no tip key as {key:?}: {e}"))?;
         }

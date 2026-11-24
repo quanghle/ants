@@ -21,7 +21,7 @@ const MAX_ASK_WAIT: Duration = Duration::from_mins(30);
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SendMessage {
-    /// Recipient ant, such as `dev-b`, or `human`.
+    /// Recipient ant, such as `dev-b`, a team, such as `backend`, which reaches its lead, or `human`.
     to: String,
     /// The message.
     text: String,
@@ -45,7 +45,7 @@ struct Handoff {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct AskAnt {
-    /// Ant to ask, such as `dev-b`.
+    /// Ant to ask, such as `dev-b`, or a team, such as `backend`, which reaches its lead.
     to: String,
     /// The question.
     text: String,
@@ -229,8 +229,9 @@ impl Tools {
         ))
     }
 
-    /// Send `text` to `to` as `send_message` does, noting when no daemon serves `to` now: the message waits for one.
-    pub(super) async fn send_to(
+    /// Send `text` to `to` as `send_message` does, a team's lead for a team, noting when no daemon serves the
+    /// recipient now: the message waits for one.
+    async fn send_to(
         &self,
         thread: &ThreadId,
         to: &str,
@@ -238,7 +239,21 @@ impl Tools {
         on: Option<&str>,
         attach: &[String],
     ) -> Result<String, String> {
-        let mut envelope = self.hub.outgoing(thread, to, text, on)?;
+        let to = self.hub.addressed(to).await?;
+        self.send_to_user(thread, to, text, on, attach).await
+    }
+
+    /// Send `text` as `send_message` does to `to`, a user, carrying the team it was addressed to, if any.
+    pub(super) async fn send_to_user(
+        &self,
+        thread: &ThreadId,
+        (to, team): (UserId, Option<UserId>),
+        text: String,
+        on: Option<&str>,
+        attach: &[String],
+    ) -> Result<String, String> {
+        let mut envelope = self.hub.outgoing(thread, to.as_str(), text, on)?;
+        envelope.team = team;
         let loaded = self.hub.load(thread, attach).await?;
         envelope.attachments = loaded.iter().map(|l| l.attachment.clone()).collect();
         self.hub.check_fits(&envelope)?;
@@ -246,8 +261,9 @@ impl Tools {
         let attachments = self.hub.store(loaded, |id| envelope.attachment_handle(id)).await?;
         envelope.attachments = attachments;
         self.hub.send(&envelope).await?;
+        let through = envelope.team.as_ref().map_or_default(|team| format!(", the lead of team {team},"));
         let sent = format!(
-            "Sent to {} on thread {} as message {} ({} turns left).",
+            "Sent to {}{through} on thread {} as message {} ({} turns left).",
             envelope.to, envelope.thread_id, envelope.id, envelope.turn_budget
         );
         Ok(match unserved {
@@ -256,9 +272,8 @@ impl Tools {
         })
     }
 
-    /// Ask `to` as `ask_ant` does, and return the reply. Refused at once, with nothing sent, when no daemon serves
-    /// `to` now, rather than waiting out the reply that cannot come.
-    pub(super) async fn ask(
+    /// Ask `to` as `ask_ant` does, a team's lead for a team, and return the reply.
+    async fn ask(
         &self,
         thread: &ThreadId,
         to: &str,
@@ -267,7 +282,24 @@ impl Tools {
         wait: Duration,
         cx: &RequestContext<RoleServer>,
     ) -> Result<Envelope, String> {
-        let mut envelope = self.hub.outgoing(thread, to, text, None)?;
+        let to = self.hub.addressed(to).await?;
+        self.ask_user(thread, to, text, attach, wait, cx).await
+    }
+
+    /// Ask `to`, a user, as `ask_ant` does, carrying the team it was addressed to, if any, and return the reply.
+    /// Refused at once, with nothing sent, when no daemon serves `to` now, rather than waiting out the reply that
+    /// cannot come.
+    pub(super) async fn ask_user(
+        &self,
+        thread: &ThreadId,
+        (to, team): (UserId, Option<UserId>),
+        text: String,
+        attach: &[String],
+        wait: Duration,
+        cx: &RequestContext<RoleServer>,
+    ) -> Result<Envelope, String> {
+        let mut envelope = self.hub.outgoing(thread, to.as_str(), text, None)?;
+        envelope.team = team;
         if self.hub.humans.is_human(&envelope.to) {
             return Err(format!("ask_ant is for ants; send_message reaches {}", envelope.to));
         }
@@ -291,7 +323,8 @@ impl Tools {
 
 #[tool_router(router = messages_router, vis = "pub(super)")]
 impl Tools {
-    #[tool(description = "Send a message to another ant, or to `human`, and return at once. It goes on the \
+    #[tool(description = "Send a message to another ant, or to `human`, and return at once; to a team, it goes to \
+        the team's lead, telling it the message came through the team. It goes on the \
         current thread unless `thread` says otherwise. A message between ants spends one turn of the thread's \
         budget; with none left it is refused and the thread is its owner's to decide. A reply comes later as a new \
         message. When no daemon serves the ant now (no colony entry, a stale one, or a harness signed out) the \
@@ -339,7 +372,8 @@ impl Tools {
         Ok(text(self.hub.ask_human(&thread, args).await))
     }
 
-    #[tool(description = "Ask another ant and wait for its reply, which is returned. The question goes on the \
+    #[tool(description = "Ask another ant and wait for its reply, which is returned; a team's lead answers for \
+        the team. The question goes on the \
         current thread and spends one turn of its budget. A reply that arrives after the wait gives up is kept for \
         check_inbox, and once the turn ends is prompted on this thread. When no daemon serves the ant now (no colony entry, a stale one, or a harness signed out) the \
         call is refused at once with nothing sent, saying why and naming ants from the colony to ask instead. \

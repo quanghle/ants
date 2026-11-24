@@ -160,6 +160,12 @@ async fn attached(attachments: Option<Attached>, images: bool) -> (String, Vec<C
     (shown.lines, images.map(ContentBlock::Image).collect())
 }
 
+/// What the first prompt of a session adds after the brief: the note of the ant's team and the channel's description.
+struct Notes<'a> {
+    channel: Option<&'a str>,
+    team: Option<&'a crate::teams::Note>,
+}
+
 /// What [`serve`] runs prompts with once the harness is connected.
 struct Connected<'a> {
     cx: &'a ConnectionTo<Agent>,
@@ -212,11 +218,12 @@ impl Connected<'_> {
             steering,
             brief,
             channel,
+            team,
             began: _,
         } = prompt;
-        let channel = channel.as_deref();
+        let notes = Notes { channel: channel.as_deref(), team: team.as_ref() };
         let ((lines, images), mut briefed) =
-            tokio::join!(attached(attachments, self.images), self.brief(brief.as_ref(), channel, opened));
+            tokio::join!(attached(attachments, self.images), self.brief(brief.as_ref(), &notes, opened));
         // Without steering by the agent, the steering is dropped unready: steers stop the prompt instead.
         let mut steers = steering.filter(|_| self.steers).map(|steering| {
             let _ = steering.ready.send(());
@@ -242,7 +249,7 @@ impl Connected<'_> {
                         return Err(e);
                     }
                     (rebuild, retry) = (Some(Rebuild::Overflow), false);
-                    briefed = self.brief(brief.as_ref(), channel, Some(BriefReason::Rebuilt)).await;
+                    briefed = self.brief(brief.as_ref(), &notes, Some(BriefReason::Rebuilt)).await;
                 }
                 Some(Err(e)) if ended.cut.is_none() && overflowed(e) => {
                     let harness = self.launch.harness.name.clone();
@@ -283,18 +290,27 @@ impl Connected<'_> {
         too_many
     }
 
-    /// The part of a prompt `brief` and the `channel`'s description add when the prompt is the first of a session
-    /// that opened for `reason`.
-    async fn brief(&self, brief: Option<&Briefing>, channel: Option<&str>, reason: Option<BriefReason>) -> String {
+    /// The part of a prompt `brief` and the `notes`, of the ant's team and of the channel's description, add when the
+    /// prompt is the first of a session that opened for `reason`.
+    async fn brief(&self, brief: Option<&Briefing>, notes: &Notes<'_>, reason: Option<BriefReason>) -> String {
         let Some(reason) = reason else { return String::new() };
-        let briefed = match brief {
-            Some(brief) => {
-                let model = self.launch.settings.model.as_deref();
-                brief.section(reason, &self.launch.harness.name, model, &self.launch.cwd).await
+        let briefing = async {
+            match brief {
+                Some(brief) => {
+                    let model = self.launch.settings.model.as_deref();
+                    brief.section(reason, &self.launch.harness.name, model, &self.launch.cwd).await
+                }
+                None => String::new(),
             }
-            None => String::new(),
         };
-        [briefed.as_str(), channel.unwrap_or_default()]
+        let team = async {
+            match notes.team {
+                Some(note) => note.text().await.unwrap_or_default(),
+                None => String::new(),
+            }
+        };
+        let (briefed, team) = tokio::join!(briefing, team);
+        [briefed.as_str(), team.as_str(), notes.channel.unwrap_or_default()]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()

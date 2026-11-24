@@ -182,6 +182,8 @@ const MCP: &[(&str, Chat)] = &[
     ("read_attachment", Press(View::Thread, Key::Char('o'), "open file")),
     ("post_channel", Shown(POST)),
     ("manage_channel", Press(View::Channel, Key::Char('M'), "members")),
+    ("list_teams", Missing("ants-n0szm.5")),
+    ("manage_team", Missing("ants-n0szm.5")),
     ("escalate", Press(View::Home, Key::Char('g'), "grant")),
     ("decide_approval", Slash("approve reject")),
     ("request_ant", Slash("add")),

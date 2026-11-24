@@ -421,8 +421,8 @@ impl Trails {
         Ok(issued)
     }
 
-    /// Who answers `call`: for agent(), the ant it names, an ant of the colony with the capability it names, or else
-    /// the conductor; for human(), the run's owner. An error for a call no one can answer.
+    /// Who answers `call`: for agent(), the ant it names, an ant of the colony with the capability it names, the lead
+    /// of the team it names, or else the conductor; for human(), the run's owner. An error for a call no one can answer.
     async fn recipient(
         &self,
         header: &TrailRun,
@@ -447,6 +447,9 @@ impl Trails {
             }
             return Ok(Ok(ant));
         }
+        if let Some(team) = &args.team {
+            return Ok(self.lead_of(team).await);
+        }
         let Some(capability) = &args.capability else { return Ok(Ok(self.inner.ant.clone())) };
         if colony.is_none() {
             *colony = Some((self.inner.colony)().await?);
@@ -456,6 +459,17 @@ impl Trails {
             Some(entry) => Ok(entry.ant.clone()),
             None => Err(format!("no ant of the colony but the conductor has the capability {capability:?}")),
         })
+    }
+
+    /// The lead of `team`, which an agent(team=) step goes to: an error for no such team, a leaderless one, a bus
+    /// keeping no teams or a directory that cannot be read now.
+    async fn lead_of(&self, team: &str) -> Result<ants_proto::UserId, String> {
+        let team: ants_proto::UserId = team.parse().map_err(|e| format!("agent() names no team as {team:?}: {e}"))?;
+        let Some(kv) = &self.inner.teams else { return Err("the bus keeps no teams".to_owned()) };
+        let Some(directory) = crate::teams::read_quickly(kv).await else {
+            return Err(format!("the teams cannot be read, so team {team} has no lead to send to"));
+        };
+        directory.lead_of(&team).cloned().map_err(|e| e.to_string())
     }
 
     /// Answer `call` with `error`, raising in the script, as its journal entry, stored.

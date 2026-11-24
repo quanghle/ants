@@ -318,6 +318,7 @@ impl Bus {
                 sense: self.sense.as_ref(),
             },
             trails: self.trails.clone(),
+            teams: crate::teams::open(&self.js, None).await.ok(),
         };
         let stop = || {
             let ctrl_c = ctrl_c.clone();

@@ -334,7 +334,8 @@ impl Unresumable<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrailFunction {
-    /// `agent(prompt, ant=, capability=, schema=, label=, tips=)`: args `{"prompt", "ant"?, "capability"?, "schema"?,
+    /// `agent(prompt, ant=, capability=, team=, schema=, label=, tips=)`: args `{"prompt", "ant"?, "capability"?,
+    /// "team"?, "schema"?,
     /// "label"?, "tips"?}`, the keyword arguments given as None left out.
     Agent,
     /// `human(questions)`: args `{"questions"}`.
