@@ -1,5 +1,6 @@
-//! The team directory: the forest rule and the lead rule on every change and every read, the changes a lead may make
-//! of the teams it manages, the requests asking for them and the team note of a member's prompt.
+//! The team directory: the forest rule and the lead rule on every change and every read, leads inherited from the
+//! teams above, the changes a lead may make of the teams it manages, the requests asking for them and the team note of
+//! a member's prompt.
 
 use super::*;
 use crate::{TeamAdminRequest, p};
@@ -69,11 +70,8 @@ fn no_ant_or_team_is_on_two_teams_and_no_team_holds_itself() {
 }
 
 #[test]
-fn every_team_is_created_with_a_lead_that_is_never_removed_only_replaced() {
+fn a_lead_is_one_of_its_team_s_direct_ants_and_removing_it_clears_it() {
     let mut directory = forest();
-    let mut leadless = Team::new(p("ops"), p("dev-e"), p("alice"));
-    leadless.lead = None;
-    assert!(matches!(directory.create(leadless, None), Err(TeamRefusal::Invalid { .. })));
     let mut outside = Team::new(p("ops"), p("dev-e"), p("alice"));
     outside.members.clear();
     assert_eq!(directory.create(outside, None), Err(TeamRefusal::NotLeadable { ant: p("dev-e"), team: p("ops") }));
@@ -87,15 +85,14 @@ fn every_team_is_created_with_a_lead_that_is_never_removed_only_replaced() {
         Err(TeamRefusal::TeamExists { team: p("eng") })
     );
     assert_eq!(
-        directory.remove(&p("backend"), &p("dev-a")),
-        Err(TeamRefusal::RemovesLead { lead: p("dev-a"), team: p("backend") })
-    );
-    assert_eq!(
         directory.set_lead(&p("backend"), &p("dev-c")),
         Err(TeamRefusal::NotLeadable { ant: p("dev-c"), team: p("backend") })
     );
     assert_eq!(directory.set_lead(&p("backend"), &p("dev-b")), Ok(true));
-    assert_eq!(directory.remove(&p("backend"), &p("dev-a")), Ok(true));
+    assert_eq!(directory.remove(&p("backend"), &p("dev-b")), Ok(true));
+    assert_eq!(directory.team(&p("backend")).unwrap().lead, None, "removing the lead clears it");
+    assert_eq!(directory.lead_of(&p("backend")), Ok(&p("boss")), "inherited from team eng");
+    assert_eq!(directory.check(), Ok(()));
     let mut hand = forest();
     hand.teams[1].lead = Some(p("dev-c"));
     assert_eq!(hand.check(), Err(TeamRefusal::NotLeadable { ant: p("dev-c"), team: p("backend") }));
@@ -112,9 +109,12 @@ fn renaming_retiring_revoking_and_deleting_keep_the_forest() {
     assert_eq!(directory.drop_ant(&p("dev-b")), None);
     assert_eq!(directory.drop_ant(&p("dev-x")), Some(p("backend")), "a revoked lead");
     let backend = directory.team(&p("backend")).unwrap();
-    assert!(backend.leaderless() && backend.members.is_empty());
-    assert_eq!(directory.check(), Ok(()), "a leaderless team breaks only itself");
-    assert_eq!(directory.lead_of(&p("backend")), Err(TeamRefusal::Leaderless { team: p("backend") }));
+    assert!(backend.lead.is_none() && backend.members.is_empty());
+    assert_eq!(directory.check(), Ok(()));
+    assert_eq!(directory.lead_of(&p("backend")), Ok(&p("boss")), "a revoked lead's team inherits");
+    assert_eq!(directory.drop_ant(&p("boss")), Some(p("eng")));
+    assert_eq!(directory.lead_of(&p("backend")), Err(TeamRefusal::NoLead { team: p("backend") }));
+    assert_eq!(directory.check(), Ok(()), "no lead anywhere breaks nothing");
     let changed = directory.delete(&p("eng")).unwrap();
     assert_eq!(changed, ["deleted team eng"]);
     assert_eq!(directory.roots().len(), 2, "its member teams are on no team");
@@ -145,9 +145,10 @@ fn a_lead_changes_the_teams_it_manages_only() {
         TeamOp::SetDescription { description: "Services.".to_owned() },
         TeamOp::RemoveMember { member: p("dev-a") },
     ];
+    let wrong = [ops[0].clone(), TeamOp::SetLead { ant: p("dev-c") }];
     assert_eq!(
-        directory.apply_for_ant(&p("dev-a"), &p("backend"), &ops, colony),
-        Err(TeamRefusal::RemovesLead { lead: p("dev-a"), team: p("backend") })
+        directory.apply_for_ant(&p("dev-a"), &p("backend"), &wrong, colony),
+        Err(TeamRefusal::NotLeadable { ant: p("dev-c"), team: p("backend") })
     );
     assert_eq!(directory, before, "a refusal changes nothing");
     let changed = directory.apply_for_ant(&p("boss"), &p("backend"), &ops[..2], colony).unwrap();
@@ -155,17 +156,20 @@ fn a_lead_changes_the_teams_it_manages_only() {
     assert!(directory.apply_for_ant(&p("boss"), &p("backend"), &ops[..2], colony).unwrap().is_empty());
 
     // Teams beneath: created with an ant on no team or a member moved down, deleted only from the team holding them.
-    let create = [TeamOp::CreateTeam { team: p("db"), lead: p("dev-b"), description: None }];
+    let create = [TeamOp::CreateTeam { team: p("db"), lead: Some(p("dev-b")), description: None }];
     let changed = directory.apply_for_ant(&p("dev-a"), &p("backend"), &create, colony).unwrap();
     assert_eq!(changed[1], "moved dev-b from team backend to team db");
     assert_eq!(directory.holder(&p("db")).unwrap().team, p("backend"));
     assert_eq!(directory.team(&p("db")).unwrap().created_by, p("dev-a"));
-    let lead_itself = [TeamOp::CreateTeam { team: p("cache"), lead: p("dev-a"), description: None }];
-    assert_eq!(
-        directory.apply_for_ant(&p("dev-a"), &p("backend"), &lead_itself, colony),
-        Err(TeamRefusal::RemovesLead { lead: p("dev-a"), team: p("backend") })
+    let unled = [TeamOp::CreateTeam { team: p("cache"), lead: None, description: None }];
+    let changed = directory.apply_for_ant(&p("dev-a"), &p("backend"), &unled, colony).unwrap();
+    assert_eq!(changed[0], "created team cache, without a lead of its own");
+    assert_eq!(directory.lead_of(&p("cache")), Ok(&p("dev-a")), "a team created without a lead takes its creator's");
+    assert_eq!(directory.inherited_by(&p("dev-a")).len(), 1);
+    assert!(
+        directory.apply_for_ant(&p("dev-a"), &p("cache"), &[TeamOp::AddMember { member: p("dev-f") }], colony).is_ok()
     );
-    let elsewhere = [TeamOp::CreateTeam { team: p("cache"), lead: p("dev-c"), description: None }];
+    let elsewhere = [TeamOp::CreateTeam { team: p("cache2"), lead: Some(p("dev-c")), description: None }];
     assert_eq!(
         directory.apply_for_ant(&p("dev-a"), &p("backend"), &elsewhere, colony),
         Err(TeamRefusal::OnTeam { member: p("dev-c"), team: p("web") })
@@ -187,6 +191,37 @@ fn a_lead_changes_the_teams_it_manages_only() {
         Ok(vec!["dev-e leads team backend".to_owned()])
     );
     assert!(!directory.manages(&p("dev-a"), &p("backend")));
+    assert_eq!(
+        directory.apply_for_ant(&p("boss"), &p("backend"), &[TeamOp::ClearLead], colony),
+        Ok(vec!["team backend has no lead of its own".to_owned()])
+    );
+    assert_eq!(directory.lead_of(&p("backend")), Ok(&p("boss")));
+}
+
+#[test]
+fn a_team_without_a_lead_takes_the_nearest_lead_above() {
+    let mut directory = forest();
+    directory.create(Team::unled(p("ops"), p("alice")), Some(&p("backend"))).unwrap();
+    directory.add(&p("ops"), &p("dev-o")).unwrap();
+    assert_eq!(directory.lead_of(&p("ops")), Ok(&p("dev-a")));
+    assert_eq!(directory.lead_source(&p("ops")).unwrap().team, p("backend"));
+    directory.clear_lead(&p("backend")).unwrap();
+    assert_eq!(directory.lead_of(&p("ops")), Ok(&p("boss")), "past a team without one either");
+    assert_eq!(
+        directory.inherited_by(&p("boss")).iter().map(|t| t.team.as_str()).collect::<Vec<_>>(),
+        ["backend", "ops"]
+    );
+    let mut top = TeamDirectory::default();
+    top.create(Team::unled(p("solo"), p("alice")), None).unwrap();
+    assert_eq!(top.lead_of(&p("solo")), Err(TeamRefusal::NoLead { team: p("solo") }));
+    assert_eq!(top.lead_of(&p("ghost")), Err(TeamRefusal::NoSuchTeam { team: p("ghost") }));
+    // The parent's lead moved down into a new team leaves the parent without one.
+    let changed = directory.create(Team::new(p("infra"), p("boss"), p("alice")), Some(&p("eng"))).unwrap();
+    assert_eq!(
+        changed[1..],
+        ["moved boss from team eng to team infra", "team eng has no lead of its own", "added team infra to team eng"]
+    );
+    assert_eq!(directory.lead_of(&p("ops")), Err(TeamRefusal::NoLead { team: p("ops") }));
 }
 
 #[test]
@@ -214,4 +249,10 @@ fn a_member_s_note_names_its_team_and_the_teams_above() {
     assert!(note.contains("Services and their APIs.") && note.contains("- owner: alice (a human)"), "{note}");
     assert!(note.contains("- members: boss, team backend, team web"), "{note}");
     assert!(directory.note_for(&p("dev-z")).is_none());
+    directory.create(Team::unled(p("db"), p("alice")), Some(&p("backend"))).unwrap();
+    directory.add(&p("db"), &p("dev-d")).unwrap();
+    let note = directory.note_for(&p("dev-d")).unwrap();
+    assert!(note.contains("Team db:\n- lead: dev-a, the lead of team backend above it"), "{note}");
+    let lead = directory.note_for(&p("dev-a")).unwrap();
+    assert!(lead.ends_with("without a lead of their own (messages to them come to you): db"), "{lead}");
 }

@@ -973,10 +973,10 @@ mod tests {
         assert_eq!(unknown.to_string(), TeamRefusal::UnknownAnt { name: user("dev-z") }.to_string());
         let human = run(Change { add: vec![bob.clone()], ..Change::default() }).await.unwrap_err();
         assert!(human.to_string().starts_with("bob is a human"), "{human}");
-        let lead = run(Change { remove: vec![user("dev-a")], ..Change::default() }).await.unwrap_err();
-        assert!(lead.to_string().contains("dev-a"), "the lead stays: {lead}");
+        let cleared = run(Change { lead: Some(None), ..Change::default() }).await.unwrap();
+        assert_eq!(cleared.line, "team backend: no lead of its own");
         let set = Change {
-            lead: Some(user("dev-b")),
+            lead: Some(Some(user("dev-b"))),
             owner: Some(Some(bob.clone())),
             description: Some(Some("The API.".to_owned())),
             remove: vec![user("dev-a")],

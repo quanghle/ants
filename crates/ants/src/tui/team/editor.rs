@@ -1,6 +1,6 @@
 //! The team view's editor, which `M` opens over the top of the members tree: a row for each direct member, which `d`
-//! removes (never the lead), then rows to add members (ants or teams on no team), to hand the lead to another direct
-//! ant member, and to set or clear the owner (a human) and the description. Each change runs [`Job::Team`], which
+//! removes (the lead too, leaving the team without a lead of its own), then rows to add members (ants or teams on no
+//! team), to hand the lead to another direct ant member or clear it, and to set or clear the owner (a human) and the description. Each change runs [`Job::Team`], which
 //! writes the directory as `ants team add|remove|set` does; the rows follow the directory as read back.
 
 use std::collections::BTreeSet;
@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use crate::teams::change::Change;
-use crate::teams::{self, parse_name};
+use crate::teams::parse_name;
 use crate::text::excerpt;
 use crate::tui::complete::{self, Candidate, Pick};
 use crate::tui::exec::Job;
@@ -100,16 +100,9 @@ impl Editor {
             }
             Key::Char('d') | Key::Delete | Key::Backspace => {
                 let change = match (team.members.get(at), Self::field(team, at)) {
-                    (Some(member), _) if team.lead.as_ref() == Some(member) => {
-                        let refusal = TeamRefusal::RemovesLead { lead: member.clone(), team: id.clone() };
-                        return Edited::To(Box::new(To::Refused(refusal.to_string())));
-                    }
                     (Some(member), _) => Change { remove: vec![member.clone()], ..Change::default() },
-                    (None, Some(Field::Lead)) => {
-                        return Edited::To(Box::new(To::Refused(format!(
-                            "team {id} keeps a lead: Enter names another of its direct ant members"
-                        ))));
-                    }
+                    (None, Some(Field::Lead)) if team.lead.is_none() => return Edited::Kept,
+                    (None, Some(Field::Lead)) => Change { lead: Some(None), ..Change::default() },
                     (None, Some(Field::Owner)) => Change { owner: Some(None), ..Change::default() },
                     (None, Some(Field::Description)) => Change { description: Some(None), ..Change::default() },
                     (None, Some(Field::Add) | None) => return Edited::Kept,
@@ -320,10 +313,7 @@ impl Editor {
                 }
                 None => spans.push(match field {
                     Field::Add => Span::styled("ants or teams: a or Enter", style::dim()),
-                    Field::Lead => match &team.lead {
-                        Some(lead) => Span::raw(lead.to_string()),
-                        None => Span::styled(teams::lead_label(team), Style::new().fg(style::ERROR)),
-                    },
+                    Field::Lead => super::lead_span(directory, team),
                     Field::Owner => match &team.owner {
                         Some(owner) => Span::raw(owner.to_string()),
                         None => Span::styled("none", style::dim()),
@@ -377,13 +367,13 @@ fn change(field: Field, text: &str, directory: &TeamDirectory, team: &Team, data
         }
         Field::Lead => {
             if text.trim_start_matches('@').is_empty() {
-                return Err(format!("team {} keeps a lead: name another of its direct ant members", team.team));
+                return Ok(Change { lead: Some(None), ..Change::default() });
             }
             let lead = name(text)?;
             if !team.is_member(&lead) || directory.is_team(&lead) {
                 return Err(TeamRefusal::NotLeadable { ant: lead, team: team.team.clone() }.to_string());
             }
-            Change { lead: Some(lead), ..Change::default() }
+            Change { lead: Some(Some(lead)), ..Change::default() }
         }
         Field::Owner => {
             let owner = if text.trim_start_matches('@').is_empty() { None } else { Some(name(text)?) };
@@ -484,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn d_removes_a_member_but_never_the_lead() {
+    fn d_removes_a_member_the_lead_too() {
         let mut m = backend();
         keys(&mut m, [Key::Char('M')]);
         row(&mut m, 1);
@@ -493,15 +483,16 @@ mod tests {
             written(Change { remove: vec![user("dev-b")], ..Change::default() })
         );
         row(&mut m, 0);
-        assert_eq!(keys(&mut m, [Key::Char('d')]), None);
-        let refused = "dev-a leads team backend; name another lead first (`ants team set backend --lead ANT`)";
-        assert_eq!(status(&m), (refused.to_owned(), Tone::Error));
+        assert_eq!(
+            keys(&mut m, [Key::Char('d')]),
+            written(Change { remove: vec![user("dev-a")], ..Change::default() })
+        );
         row(&mut m, 2);
         assert_eq!(keys(&mut m, [Key::Char('d')]), None, "nothing to remove on the add row");
     }
 
     #[test]
-    fn the_lead_is_handed_to_a_direct_ant_member_and_never_cleared() {
+    fn the_lead_is_handed_to_a_direct_ant_member_or_cleared() {
         let mut m = backend();
         keys(&mut m, [Key::Char('M')]);
         row(&mut m, 3);
@@ -511,7 +502,7 @@ mod tests {
         assert_eq!(words(&m), ["@dev-b"], "the other direct ant members");
         keys(&mut m, [Key::Enter]);
         let set = keys(&mut m, [Key::Enter]);
-        assert_eq!(set, written(Change { lead: Some(user("dev-b")), ..Change::default() }));
+        assert_eq!(set, written(Change { lead: Some(Some(user("dev-b"))), ..Change::default() }));
 
         keys(&mut m, [Key::Enter, Key::Ctrl('u')]);
         typed(&mut m, "@dev-c");
@@ -519,8 +510,7 @@ mod tests {
         let refused = "dev-c cannot lead team backend: the lead is one of its direct ant members";
         assert_eq!(status(&m), (refused.to_owned(), Tone::Error));
         keys(&mut m, [Key::Esc]);
-        assert_eq!(keys(&mut m, [Key::Char('d')]), None);
-        assert!(status(&m).0.starts_with("team backend keeps a lead"), "{:?}", status(&m));
+        assert_eq!(keys(&mut m, [Key::Char('d')]), written(Change { lead: Some(None), ..Change::default() }));
     }
 
     #[test]

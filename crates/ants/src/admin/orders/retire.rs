@@ -25,8 +25,7 @@ pub async fn run(nats: &Nats<'_>, ant: &UserId, machine: Option<Machine>, wait: 
 }
 
 /// Send the retire order for `ant`, signed by `admin`, to `machine`, else to the machine that last recorded serving it, and wait up to
-/// `wait` for its outcome: what it did, a line each, or that it is still pending. Fails when the daemon refused it, and
-/// sends nothing while the ant leads a team; once retired, the ant leaves its team in the directory of `js`, of the
+/// `wait` for its outcome: what it did, a line each, or that it is still pending. Fails when the daemon refused it; once retired, the ant leaves its team in the directory of `js`, of the
 /// JetStream domain `js_domain`.
 pub async fn retire(
     admin: &Admin,
@@ -36,7 +35,6 @@ pub async fn retire(
     machine: Option<Machine>,
     wait: Duration,
 ) -> Result<String> {
-    crate::teams::check_retirable_on(js, js_domain, ant).await?;
     let (order, outcome) = match admin.send(js, machine, ant, AdminOp::Retire, wait).await? {
         Sent::Pending(order) => return Ok(super::pending_note(&order)),
         Sent::Refused(order, outcome) => {

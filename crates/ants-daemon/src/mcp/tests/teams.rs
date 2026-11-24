@@ -7,7 +7,8 @@ use super::*;
 use crate::mcp::TeamAccess;
 use crate::teams::Read;
 
-/// eng (lead boss) holding backend (lead dev-a, with dev-b), and orphans, whose lead was revoked.
+/// eng (lead boss) holding backend (lead dev-a, with dev-b) and infra (no lead of its own, with dev-i), and orphans,
+/// whose lead was revoked, with no team above it.
 fn forest() -> TeamDirectory {
     let mut directory = TeamDirectory::default();
     let mut eng = Team::new(user("eng"), user("boss"), UserId::human());
@@ -15,6 +16,8 @@ fn forest() -> TeamDirectory {
     directory.create(eng, None).unwrap();
     directory.create(Team::new(user("backend"), user("dev-a"), UserId::human()), Some(&user("eng"))).unwrap();
     directory.add(&user("backend"), &user("dev-b")).unwrap();
+    directory.create(Team::unled(user("infra"), UserId::human()), Some(&user("eng"))).unwrap();
+    directory.add(&user("infra"), &user("dev-i")).unwrap();
     directory.create(Team::new(user("orphans"), user("gone"), UserId::human()), None).unwrap();
     directory.drop_ant(&user("gone"));
     directory
@@ -64,7 +67,11 @@ async fn a_message_to_a_team_goes_to_its_lead_carrying_the_team() {
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "backend", "text": "?"})).await;
     assert!(!ok && text.starts_with("team backend sends to its lead, this ant;"), "{text}");
     let (ok, text) = call(&client, "ask_ant", serde_json::json!({"to": "orphans", "text": "?"})).await;
-    assert!(!ok && text.starts_with("nothing sent: team orphans has no lead since its lead was revoked"), "{text}");
+    assert!(!ok && text.starts_with("nothing sent: team orphans has no lead, nor has any team above it"), "{text}");
+    let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "infra", "text": "disk"})).await;
+    assert!(ok && text.starts_with("Sent to boss, the lead of team infra, on thread"), "{text}");
+    let out = sent.recv().await.unwrap();
+    assert_eq!((&out.to, &out.team), (&user("boss"), &Some(user("infra"))), "a lead inherited from team eng");
 
     let asking = tokio::spawn(async move {
         let (ok, text) = call(&client, "ask_ant", serde_json::json!({"to": "eng", "text": "when?"})).await;
@@ -136,7 +143,9 @@ team eng (lead boss)
   - team backend (lead dev-a)
     - dev-a (lead): this ant
     - dev-b: idle on m1
-team orphans (lead none, its lead was revoked)";
+  - team infra (lead boss, from team eng)
+    - dev-i: not in the colony
+team orphans (lead none, nor above it)";
     assert_eq!((ok, text.as_str()), (true, forest));
     let (ok, text) = call(&client, "list_teams", serde_json::json!({"team": "@backend"})).await;
     let backend = "Within team eng.\nteam backend (lead dev-a)\n  - dev-a (lead): this ant\n  - dev-b: idle on m1";
@@ -179,8 +188,15 @@ async fn manage_team_asks_for_the_changes_of_a_team_the_ant_manages() {
         (ok, text.as_str()),
         (false, "team eng was not changed: dev-a manages neither team eng nor a team above it")
     );
-    let (ok, text) = call(&client, "manage_team", serde_json::json!({"team": "backend", "remove": ["dev-a"]})).await;
-    assert!(!ok && text.contains("dev-a leads team backend; name another lead first"), "{text}");
+    let unled = serde_json::json!({"team": "backend", "create": {"team": "cache"}});
+    let (ok, text) = call(&client, "manage_team", unled).await;
+    assert!(ok && text.contains("created team cache, without a lead of its own"), "{text}");
+    assert!(text.contains("- team cache (lead dev-a, from team backend)"), "{text}");
+    let both = serde_json::json!({"team": "backend", "lead": "dev-b", "clear_lead": true});
+    let (ok, text) = call(&client, "manage_team", both).await;
+    assert!(!ok && text.contains("not both"), "{text}");
+    let (ok, text) = call(&client, "manage_team", serde_json::json!({"team": "cache", "add": ["dev-e"]})).await;
+    assert!(ok, "a team without a lead of its own is managed from above: {text}");
     let both = serde_json::json!({"team": "backend", "description": "x", "clear_description": true});
     let (ok, text) = call(&client, "manage_team", both).await;
     assert!(!ok && text.contains("not both"), "{text}");

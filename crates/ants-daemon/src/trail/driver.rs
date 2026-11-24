@@ -461,8 +461,8 @@ impl Trails {
         })
     }
 
-    /// The lead of `team`, which an agent(team=) step goes to: an error for no such team, a leaderless one, a bus
-    /// keeping no teams or a directory that cannot be read now.
+    /// The lead of `team`, its own or the nearest one above it, which an agent(team=) step goes to: an error for no
+    /// such team, one with no lead in it nor above it, a bus keeping no teams or a directory that cannot be read now.
     async fn lead_of(&self, team: &str) -> Result<ants_proto::UserId, String> {
         let team: ants_proto::UserId = team.parse().map_err(|e| format!("agent() names no team as {team:?}: {e}"))?;
         let Some(kv) = &self.inner.teams else { return Err("the bus keeps no teams".to_owned()) };

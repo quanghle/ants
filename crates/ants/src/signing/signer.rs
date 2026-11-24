@@ -456,9 +456,6 @@ impl Signer<'_> {
         report: &mut impl FnMut(&AntRequest, &Event),
     ) -> Result<()> {
         let (name, public_key) = (&request.name, Some(request.public_key.as_str()));
-        if let Err(e) = crate::teams::check_retirable_on(approver.hub(), approver.js_domain(), name).await {
-            return self.refuse(approver, request, format!("{e:#}"), report).await;
-        }
         let revoked = match revoke_added(self.dir, name, Some(&request.manager), public_key) {
             Ok(revoked) => revoked,
             Err(e) => return self.refuse(approver, request, format!("{e:#}"), report).await,

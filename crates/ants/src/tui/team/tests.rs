@@ -109,23 +109,27 @@ fn the_view_shows_the_team_above_its_members_tree_with_faces_states_and_the_lead
 }
 
 #[test]
-fn a_leaderless_team_says_messages_to_it_are_refused_and_a_send_to_it_is_refused_so() {
+fn a_team_without_a_lead_takes_the_one_above_and_one_without_any_refuses_a_send() {
     let mut m = backend();
     let mut directory = forest();
     directory.teams.iter_mut().find(|t| t.team == user("backend")).unwrap().lead = None;
+    directory.teams.iter_mut().find(|t| t.team == user("web")).unwrap().lead = None;
     m.read(Read::Teams(Ok(Some(directory))), at(1));
     let shown = team_screen(&m, 120, 20);
-    assert!(shown.contains("lead none (revoked)"), "{shown}");
-    assert!(shown.contains("team backend has no lead since its lead was revoked"), "{shown}");
-    assert!(nav_rows(&m).iter().any(|r| r == "backend 2 ✕ no lead"), "{:?}", nav_rows(&m));
-
+    assert!(shown.contains("lead boss (from team eng)") && !shown.contains("no lead"), "{shown}");
+    assert!(nav_rows(&m).iter().any(|r| r == "backend 2"), "{:?}", nav_rows(&m));
+    assert!(nav_rows(&m).iter().any(|r| r == "web 1 ✕ no lead"), "{:?}", nav_rows(&m));
     m.ui.bar.focused = true;
     typed(&mut m, "@backend deploy");
-    assert_eq!(m.bar_title(), "to team backend, which has no lead on a new thread");
+    assert_eq!(m.bar_title(), "to team backend (lead boss, from team eng) on a new thread");
+    m.ui.bar.clear();
+
+    typed(&mut m, "@web deploy");
+    assert_eq!(m.bar_title(), "to team web, which has no lead on a new thread");
     assert_eq!(m.key(Key::Enter, at(1)), None);
     let status = m.ui.bar.status.as_ref().unwrap();
-    assert!(status.text.starts_with("team backend has no lead since its lead was revoked"), "{}", status.text);
-    assert_eq!((status.tone, m.ui.bar.text()), (Tone::Error, "@backend deploy".to_owned()), "kept to send later");
+    assert!(status.text.starts_with("team web has no lead, nor has any team above it"), "{}", status.text);
+    assert_eq!((status.tone, m.ui.bar.text()), (Tone::Error, "@web deploy".to_owned()), "kept to send later");
 }
 
 #[test]

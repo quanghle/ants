@@ -65,7 +65,7 @@ async fn the_keeper_changes_only_the_teams_an_ant_manages() {
     // A daemon without credentials changes the directory itself, with the same checks.
     let identities = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
     let changer = Changer { client: a.clone(), kv: kv.clone(), identities: Some(identities), signer: false };
-    let create = vec![TeamOp::CreateTeam { team: p("db"), lead: p("dev-b"), description: None }];
+    let create = vec![TeamOp::CreateTeam { team: p("db"), lead: Some(p("dev-b")), description: None }];
     let outcome = changer.change(&p("boss"), &p("backend"), create, None).await.unwrap();
     assert!(matches!(outcome, Some(TeamAdminOutcome::Applied { .. })), "{outcome:?}");
     let (directory, _) = super::super::read_checked(&kv).await.unwrap();

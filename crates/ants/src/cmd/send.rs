@@ -142,8 +142,8 @@ async fn addressee(js: &jetstream::Context, nats: &Nats<'_>, to: Option<UserId>)
 }
 
 /// Where a message to `to` goes: to the lead of the team `to` names, carrying the team
-/// ([`ants_client::sending::addressed`]), refused for a leaderless team; to `to` itself on a bus without teams, or,
-/// with a warning, when the team directory cannot be read.
+/// ([`ants_client::sending::addressed`]), refused for a team with no lead, nor any above it; to `to` itself on a bus
+/// without teams, or, with a warning, when the team directory cannot be read.
 async fn to_team(js: &jetstream::Context, js_domain: Option<&ants_proto::JsDomain>, to: UserId) -> Result<Addressed> {
     match crate::teams::read_of(js, js_domain).await {
         Ok(Some(directory)) => Ok(ants_client::sending::addressed(&directory, to)?),

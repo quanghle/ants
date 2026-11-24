@@ -1,4 +1,5 @@
-//! Teams: whether the team directory keeps its rules, each team has a lead live in the colony, every member is an ant
+//! Teams: whether the team directory keeps its rules, each team has a lead, its own or one above it, each lead is live
+//! in the colony, every member is an ant
 //! of the bus or a team and no team takes the name of an ant or a human; and whether `ants signer` answers each ant's
 //! team changes.
 
@@ -57,8 +58,8 @@ pub(super) async fn check_teams(connected: Option<&Connected>, setup: &Setup, no
     }
 }
 
-/// What is wrong with `directory`, which keeps the rules, one check each: a team without a lead (fail), a lead not
-/// live in `colony` when read (warn), a member neither a team nor an ant of `known` (fail), a team taking the name of
+/// What is wrong with `directory`, which keeps the rules, one check each: a team with no lead, nor any team above it
+/// (warn), a lead not live in `colony` when read (warn, at the team it leads of its own), a member neither a team nor an ant of `known` (fail), a team taking the name of
 /// an ant of `known` or a human of `humans` (fail); else one check telling it is sound.
 pub(super) fn findings(
     directory: &TeamDirectory,
@@ -79,11 +80,12 @@ pub(super) fn findings(
             ));
         }
         match &team.lead {
-            None => checks.push(Check::fail(
+            None if directory.lead_source(id).is_none() => checks.push(Check::warn(
                 CHECK,
-                format!("team {id} has no lead since its lead was revoked: messages to it are refused"),
+                format!("team {id} has no lead, nor has any team above it: messages to it are refused"),
                 vec![format!("ants team set {id} --lead ANT")],
             )),
+            None => {}
             Some(lead) => {
                 let live = colony.map(|c| c.iter().any(|e| e.ant == *lead && ants_daemon::colony::is_live(e, now)));
                 if live == Some(false) {
@@ -109,7 +111,9 @@ pub(super) fn findings(
         let detail = match directory.teams.len() {
             0 => "no teams".to_owned(),
             1 => "1 team, with a lead, every member an ant of the bus or a team".to_owned(),
-            n => format!("{n} teams, each with a lead, every member an ant of the bus or a team"),
+            n => format!(
+                "{n} teams, each with a lead, its own or one above it, every member an ant of the bus or a team"
+            ),
         };
         checks.push(Check::ok(CHECK, detail));
     }

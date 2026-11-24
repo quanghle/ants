@@ -1,7 +1,8 @@
-//! Teams: named groups of ants and teams, each with an ant lead, kept together in one [`TeamDirectory`] under
-//! [`TEAM_DIRECTORY_KEY`] of [`TEAMS_BUCKET`]. Across the bus each ant and each team is a member of at most one team and
-//! no team holds itself, so teams form a forest; a team's id shares the namespace of ants and humans, so `@backend`
-//! may name a team wherever an ant is named, and a message to a team goes to its lead ([`Envelope::team`]).
+//! Teams: named groups of ants and teams, kept together in one [`TeamDirectory`] under [`TEAM_DIRECTORY_KEY`] of
+//! [`TEAMS_BUCKET`]. Across the bus each ant and each team is a member of at most one team and no team holds itself, so
+//! teams form a forest; a team's id shares the namespace of ants and humans, so `@backend` may name a team wherever an
+//! ant is named, and a message to a team goes to its lead ([`Envelope::team`]): its own, else the lead of the nearest
+//! team above it that has one ([`TeamDirectory::lead_of`]).
 //!
 //! Humans write the directory by compare-and-set; ants read it, and change it only through `ants signer`
 //! ([`TeamAdminRequest`]), within what a lead may change of the teams it manages ([`TeamDirectory::apply_for_ant`]).
@@ -22,7 +23,7 @@ pub use admin::{TeamAdminOutcome, TeamAdminReply, TeamAdminRequest, TeamOp};
 /// The key of the one entry of [`TEAMS_BUCKET`], the [`TeamDirectory`].
 pub const TEAM_DIRECTORY_KEY: &str = "directory";
 
-/// A team: a named group of ants and teams with a lead, as the [`TeamDirectory`] holds it.
+/// A team: a named group of ants and teams, with a lead or none, as the [`TeamDirectory`] holds it.
 ///
 /// Readers should treat unknown fields as additions, not errors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,8 +38,8 @@ pub struct Team {
     /// name), in the order they were added.
     #[serde(default)]
     pub members: Vec<UserId>,
-    /// The ant messages to the team go to, one of its direct ant members. None only once the lead was revoked, until a
-    /// human names another: the team is then leaderless ([`Team::leaderless`]).
+    /// The team's own lead, one of its direct ant members, if it has one; without one, the team takes the lead of the
+    /// nearest team above it that has one ([`TeamDirectory::lead_of`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lead: Option<UserId>,
     /// The human the team answers to, if any; only a human sets it.
@@ -71,9 +72,9 @@ impl Team {
         }
     }
 
-    /// Whether the team has lost its lead to a revocation: messages to it are refused until a human names another.
-    pub fn leaderless(&self) -> bool {
-        self.lead.is_none()
+    /// A team with no member and no lead of its own, created by `by` now.
+    pub fn unled(team: UserId, by: UserId) -> Self {
+        Self { members: Vec::new(), lead: None, ..Self::new(team.clone(), team, by) }
     }
 
     pub fn is_member(&self, member: &UserId) -> bool {
@@ -125,12 +126,8 @@ pub enum TeamRefusal {
     NotMember { member: UserId, team: UserId },
     #[error("{ant} cannot lead team {team}: the lead is one of its direct ant members")]
     NotLeadable { ant: UserId, team: UserId },
-    #[error("{lead} leads team {team}; name another lead first (`ants team set {team} --lead ANT`)")]
-    RemovesLead { lead: UserId, team: UserId },
-    #[error(
-        "team {team} has no lead since its lead was revoked; a human names one (`ants team set {team} --lead ANT`)"
-    )]
-    Leaderless { team: UserId },
+    #[error("team {team} has no lead, nor has any team above it (`ants team set {team} --lead ANT` names one)")]
+    NoLead { team: UserId },
     #[error("{ant} manages neither team {team} nor a team above it")]
     NotManager { ant: UserId, team: UserId },
     #[error("team {team} is not a member of team {parent}")]
@@ -173,8 +170,8 @@ impl TeamDirectory {
     }
 
     /// Check the forest: no team twice, no member twice in a team nor on two teams, no team holding itself through its
-    /// member teams, each lead a direct ant member of its team and each description in bounds. A leaderless team
-    /// ([`Team::leaderless`]) breaks nothing here: it is broken for itself alone.
+    /// member teams, each lead a direct ant member of its team and each description in bounds. A team without a lead,
+    /// even with none above it, breaks nothing here.
     pub fn check(&self) -> Result<(), TeamRefusal> {
         let mut ids = BTreeSet::new();
         for team in &self.teams {
@@ -228,9 +225,24 @@ impl TeamDirectory {
         self.team(id).ok_or_else(|| TeamRefusal::NoSuchTeam { team: id.clone() })
     }
 
-    /// The lead a message to the team `team` goes to: refused for no such team and for a leaderless one.
+    /// The lead a message to the team `team` goes to: its own, else the lead of the nearest team above it that has
+    /// one. Refused for no such team and for one with no lead in it nor above it.
     pub fn lead_of(&self, team: &UserId) -> Result<&UserId, TeamRefusal> {
-        self.known(team)?.lead.as_ref().ok_or_else(|| TeamRefusal::Leaderless { team: team.clone() })
+        let from = self.lead_source(team).ok_or_else(|| {
+            if self.is_team(team) {
+                TeamRefusal::NoLead { team: team.clone() }
+            } else {
+                TeamRefusal::NoSuchTeam { team: team.clone() }
+            }
+        })?;
+        Ok(from.lead.as_ref().expect("a team with a lead"))
+    }
+
+    /// The team whose lead leads `team` ([`TeamDirectory::lead_of`]): `team` itself when it has a lead of its own, else
+    /// the nearest team above it that has one; None when none has, or no team is `team`.
+    pub fn lead_source(&self, team: &UserId) -> Option<&Team> {
+        let own = self.team(team)?;
+        std::iter::once(own).chain(self.ancestors(team)).find(|t| t.lead.is_some())
     }
 
     pub fn is_team(&self, id: &UserId) -> bool {
@@ -293,9 +305,15 @@ impl TeamDirectory {
         team == under || self.ancestors(team).iter().any(|t| t.team == *under)
     }
 
-    /// The teams `ant` leads, in order.
+    /// The teams `ant` leads, its own lead, in order.
     pub fn led_by(&self, ant: &UserId) -> Vec<&Team> {
         self.teams.iter().filter(|t| t.lead.as_ref() == Some(ant)).collect()
+    }
+
+    /// The teams without a lead of their own that `ant` leads, its lead inherited from a team above, in order.
+    pub fn inherited_by(&self, ant: &UserId) -> Vec<&Team> {
+        let inherits = |t: &&Team| t.lead.is_none() && self.lead_of(&t.team).is_ok_and(|lead| lead == ant);
+        self.teams.iter().filter(inherits).collect()
     }
 
     /// Whether `ant` manages `team`: it leads the team or a team above it.
@@ -320,30 +338,33 @@ impl TeamDirectory {
         Ok(())
     }
 
-    /// Create `team`, which names its lead as one of its members: as a top-level team, or beneath `parent`. Every
-    /// member is on no team before, and the lead an ant; a lead that is a direct member of `parent`, not its lead, moves
-    /// down into the new team. Returns what changed.
+    /// Create `team`, as a top-level team or beneath `parent`, with its lead, if it has one, among its members. Every
+    /// member is on no team before, and the lead an ant; a lead that is a direct member of `parent` moves down into the
+    /// new team, leaving `parent` without a lead when it led it. Returns what changed.
     pub fn create(&mut self, team: Team, parent: Option<&UserId>) -> Result<Vec<String>, TeamRefusal> {
         let id = team.team.clone();
         if self.is_team(&id) {
             return Err(TeamRefusal::TeamExists { team: id });
         }
-        let Some(lead) = team.lead.clone() else {
-            return Err(TeamRefusal::Invalid { why: format!("team {id} needs a lead") });
-        };
-        if !team.is_member(&lead) || self.is_team(&lead) || lead == id {
-            return Err(TeamRefusal::NotLeadable { ant: lead, team: id });
+        if let Some(lead) = &team.lead
+            && (!team.is_member(lead) || self.is_team(lead) || *lead == id)
+        {
+            return Err(TeamRefusal::NotLeadable { ant: lead.clone(), team: id });
         }
         let mut next = self.clone();
-        let mut changed = vec![format!("created team {id}, led by {lead}")];
-        if let Some(parent) = parent {
+        let mut changed = vec![match &team.lead {
+            Some(lead) => format!("created team {id}, led by {lead}"),
+            None => format!("created team {id}, without a lead of its own"),
+        }];
+        if let (Some(parent), Some(lead)) = (parent, &team.lead) {
             let from = next.team_mut(parent)?;
-            if from.lead.as_ref() == Some(&lead) {
-                return Err(TeamRefusal::RemovesLead { lead, team: parent.clone() });
-            }
-            if from.is_member(&lead) {
-                from.members.retain(|m| *m != lead);
+            if from.is_member(lead) {
+                from.members.retain(|m| m != lead);
                 changed.push(format!("moved {lead} from team {parent} to team {id}"));
+                if from.lead.as_ref() == Some(lead) {
+                    from.lead = None;
+                    changed.push(format!("team {parent} has no lead of its own"));
+                }
             }
         }
         let mut seen = BTreeSet::new();
@@ -391,17 +412,24 @@ impl TeamDirectory {
         Ok(true)
     }
 
-    /// Remove `member` from `team`; the lead is never removed. Returns whether it changed: false when no member.
+    /// Remove `member` from `team`, clearing the team's lead when the member led it. Returns whether it changed: false
+    /// when no member.
     pub fn remove(&mut self, team: &UserId, member: &UserId) -> Result<bool, TeamRefusal> {
-        let own = self.known(team)?;
+        let own = self.team_mut(team)?;
         if !own.is_member(member) {
             return Ok(false);
         }
+        own.members.retain(|m| m != member);
         if own.lead.as_ref() == Some(member) {
-            return Err(TeamRefusal::RemovesLead { lead: member.clone(), team: team.clone() });
+            own.lead = None;
         }
-        self.team_mut(team)?.members.retain(|m| m != member);
         Ok(true)
+    }
+
+    /// Clear the lead of `team`, which then takes the lead of the nearest team above it that has one. Returns whether
+    /// it changed.
+    pub fn clear_lead(&mut self, team: &UserId) -> Result<bool, TeamRefusal> {
+        Ok(self.team_mut(team)?.lead.take().is_some())
     }
 
     /// Make `ant`, a direct ant member of `team`, its lead. Returns whether it changed.
@@ -433,8 +461,8 @@ impl TeamDirectory {
         changed
     }
 
-    /// Take the ant `ant`, retired or revoked, out of its team. A lead leaves its team leaderless, which only a
-    /// revocation does: a retirement is refused before while the ant leads a team. Returns the team it left, if any.
+    /// Take the ant `ant`, retired or revoked, out of its team, clearing the team's lead when it led it. Returns the team
+    /// it left, if any.
     pub fn drop_ant(&mut self, ant: &UserId) -> Option<UserId> {
         let team = self.teams.iter_mut().find(|t| t.is_member(ant))?;
         team.members.retain(|m| m != ant);
@@ -445,10 +473,10 @@ impl TeamDirectory {
     }
 
     /// Apply the `ops` `ant` asks for on `team` ([`TeamAdminRequest`]): the ant must manage the team, leading it or a
-    /// team above it. It may add an ant of the bus (`known_ant`, one with an identity record) or a team that is on no team, remove any member but
-    /// the lead, hand the lead to another direct ant member, set or clear the description, create a team beneath
-    /// `team` and delete a team that is a member of `team`; never set an owner or an avatar. Returns what changed, in
-    /// order, empty when nothing did; on a refusal the directory is unchanged.
+    /// team above it. It may add an ant of the bus (`known_ant`, one with an identity record) or a team that is on no
+    /// team, remove any member, hand the lead to a direct ant member or clear it, set or clear the description, create
+    /// a team beneath `team` and delete a team that is a member of `team`; never set an owner or an avatar. Returns
+    /// what changed, in order, empty when nothing did; on a refusal the directory is unchanged.
     pub fn apply_for_ant(
         &mut self,
         ant: &UserId,
@@ -473,8 +501,17 @@ impl TeamDirectory {
                     }
                 }
                 TeamOp::RemoveMember { member } => {
+                    let led = next.known(team)?.lead.as_ref() == Some(member);
                     if next.remove(team, member)? {
                         changed.push(format!("removed {member} from team {team}"));
+                        if led {
+                            changed.push(format!("team {team} has no lead of its own"));
+                        }
+                    }
+                }
+                TeamOp::ClearLead => {
+                    if next.clear_lead(team)? {
+                        changed.push(format!("team {team} has no lead of its own"));
                     }
                 }
                 TeamOp::SetLead { ant: lead } => {
@@ -494,10 +531,16 @@ impl TeamDirectory {
                     }
                 }
                 TeamOp::CreateTeam { team: new, lead, description } => {
-                    if !known_ant(lead) && next.holder(lead).is_none_or(|t| t.team != *team) {
+                    if let Some(lead) = lead
+                        && !known_ant(lead)
+                        && next.holder(lead).is_none_or(|t| t.team != *team)
+                    {
                         return Err(TeamRefusal::UnknownAnt { name: lead.clone() });
                     }
-                    let mut created = Team::new(new.clone(), lead.clone(), ant.clone());
+                    let mut created = match lead {
+                        Some(lead) => Team::new(new.clone(), lead.clone(), ant.clone()),
+                        None => Team::unled(new.clone(), ant.clone()),
+                    };
                     created
                         .set_description(description.as_deref())
                         .map_err(|e| TeamRefusal::Invalid { why: e.to_string() })?;
@@ -518,8 +561,9 @@ impl TeamDirectory {
     }
 
     /// The note of `ant`'s team and its ancestors that its daemon adds to the first prompt of each session: each one's
-    /// name, description, lead, owner and direct members, the nearest first, and whether the ant leads it. None when
-    /// the ant is on no team.
+    /// name, description, lead (and the team above it comes from, when inherited), owner and direct members, the
+    /// nearest first, and whether the ant leads it; then the teams without a lead of their own that the ant leads from
+    /// above. None when the ant is on no team.
     pub fn note_for(&self, ant: &UserId) -> Option<String> {
         use std::fmt::Write as _;
         let chain = self.ancestors(ant);
@@ -531,18 +575,23 @@ impl TeamDirectory {
         note.push('.');
         for team in &chain {
             let _ = write!(note, "\n\nTeam {}", team.team);
-            if team.lead.as_ref() == Some(ant) {
+            let source = self.lead_source(&team.team);
+            let lead = source.and_then(|t| t.lead.as_ref());
+            if lead == Some(ant) {
                 note.push_str(" (you lead it: messages to the team come to you; hand work on to its members)");
             }
             note.push(':');
             if let Some(description) = &team.description {
                 let _ = write!(note, "\n{description}");
             }
-            match &team.lead {
-                Some(lead) => {
+            match source.zip(lead) {
+                Some((from, lead)) if from.team == team.team => {
                     let _ = write!(note, "\n- lead: {lead}");
                 }
-                None => note.push_str("\n- lead: none (its lead was revoked)"),
+                Some((from, lead)) => {
+                    let _ = write!(note, "\n- lead: {lead}, the lead of team {} above it", from.team);
+                }
+                None => note.push_str("\n- lead: none, nor above it (messages to the team are refused)"),
             }
             if let Some(owner) = &team.owner {
                 let _ = write!(note, "\n- owner: {owner} (a human)");
@@ -553,6 +602,14 @@ impl TeamDirectory {
                 .map(|m| if self.is_team(m) { format!("team {m}") } else { m.to_string() })
                 .collect();
             let _ = write!(note, "\n- members: {}", members.join(", "));
+        }
+        let beneath: Vec<&str> = self.inherited_by(ant).iter().map(|t| t.team.as_str()).collect();
+        if !beneath.is_empty() {
+            let _ = write!(
+                note,
+                "\n\nYou also lead the teams beneath without a lead of their own (messages to them come to you): {}",
+                beneath.join(", ")
+            );
         }
         Some(note)
     }

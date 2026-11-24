@@ -72,7 +72,8 @@ impl Addressed {
 }
 
 /// Where a message to `to` goes, given the team directory `teams`: to the lead of the team `to` names, carrying the
-/// team, else to `to` itself. A leaderless team is refused ([`TeamDirectory::lead_of`]).
+/// team, else to `to` itself: its own lead, else the lead of the nearest team above it that has one; a team with no
+/// lead in it nor above it is refused ([`TeamDirectory::lead_of`]).
 pub fn addressed(teams: &TeamDirectory, to: UserId) -> Result<Addressed, TeamRefusal> {
     if !teams.is_team(&to) {
         return Ok(Addressed { to, team: None });
@@ -180,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn a_message_to_a_team_goes_to_its_lead_carrying_the_team_and_a_leaderless_one_is_refused() {
+    fn a_message_to_a_team_goes_to_its_lead_carrying_the_team_and_one_without_any_lead_is_refused() {
         let mut teams = TeamDirectory::default();
         teams.create(ants_proto::Team::new(p("backend"), p("dev-a"), p("alice")), None).unwrap();
         let to = addressed(&teams, p("backend")).unwrap();
@@ -190,7 +191,9 @@ mod tests {
         assert_eq!((envelope.subject(), envelope.team), ("ants.inbox.dev-a.alice".to_owned(), Some(p("backend"))));
         assert_eq!(addressed(&teams, p("dev-b")).unwrap(), Addressed { to: p("dev-b"), team: None });
 
+        teams.create(ants_proto::Team::unled(p("db"), p("alice")), Some(&p("backend"))).unwrap();
+        assert_eq!(addressed(&teams, p("db")).unwrap(), Addressed { to: p("dev-a"), team: Some(p("db")) }, "inherited");
         assert_eq!(teams.drop_ant(&p("dev-a")), Some(p("backend")));
-        assert_eq!(addressed(&teams, p("backend")).unwrap_err(), TeamRefusal::Leaderless { team: p("backend") });
+        assert_eq!(addressed(&teams, p("db")).unwrap_err(), TeamRefusal::NoLead { team: p("db") });
     }
 }

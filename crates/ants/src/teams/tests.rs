@@ -89,14 +89,8 @@ fn a_team_s_members_are_a_tree_with_its_lead_marked() {
 }
 
 #[test]
-fn a_lead_is_not_retired_and_a_member_must_be_known() {
+fn a_member_must_be_known() {
     let directory = forest();
-    let refused = check_retirable(&directory, &p("dev-a")).unwrap_err().to_string();
-    assert_eq!(
-        refused,
-        "dev-a leads team backend: name another lead first (`ants team set backend --lead ANT`), then retire dev-a"
-    );
-    check_retirable(&directory, &p("dev-b")).unwrap();
     let known = BTreeSet::from([p("dev-x")]);
     check_known(&directory, &known, &[p("dev-x"), p("web")]).unwrap();
     assert_eq!(
@@ -136,7 +130,7 @@ async fn a_human_creates_and_changes_a_team_of_known_ants_only() {
     identities(&js, &["dev-a", "dev-b", "dev-c"]).await;
     let create = |team: &str, lead: &str, members: &[&str]| TeamCommand::Create {
         team: p(team),
-        lead: p(lead),
+        lead: (!lead.is_empty()).then(|| p(lead)),
         members: members.iter().map(|m| p(m)).collect(),
         owner: None,
         description: Some("the services".to_owned()),
@@ -156,49 +150,63 @@ async fn a_human_creates_and_changes_a_team_of_known_ants_only() {
     assert_eq!(forest_of(&directory), [(0, "eng"), (1, "backend")]);
     assert_eq!(directory.team(&p("backend")).unwrap().description.as_deref(), Some("the services"));
 
-    let lead = run(&nats, TeamCommand::Remove { team: p("backend"), names: vec![p("dev-a")] }).await.unwrap_err();
-    assert!(lead.to_string().contains("dev-a"), "{lead}");
     let set = |lead: Option<&str>, no_description: bool| TeamCommand::Set {
         team: p("backend"),
-        lead: lead.map(p),
+        lead: lead.filter(|l| !l.is_empty()).map(p),
+        no_lead: lead == Some(""),
         owner: None,
         no_owner: false,
         description: None,
         no_description,
     };
     assert!(run(&nats, set(None, false)).await.unwrap_err().to_string().starts_with("nothing to change"));
+    run(&nats, set(Some(""), false)).await.unwrap();
+    let directory = directory_of(&js).await;
+    let backend = directory.team(&p("backend")).unwrap();
+    assert_eq!((&backend.lead, directory.lead_of(&p("backend"))), (&None, Ok(&p("dev-c"))));
+    assert_eq!(lead_label(&directory, backend), "dev-c (from team eng)");
     run(&nats, set(Some("dev-b"), true)).await.unwrap();
     run(&nats, TeamCommand::Remove { team: p("backend"), names: vec![p("dev-a")] }).await.unwrap();
     let backend = directory_of(&js).await.team(&p("backend")).unwrap().clone();
     assert_eq!((backend.lead, backend.members, backend.description), (Some(p("dev-b")), vec![p("dev-b")], None));
+    run(&nats, TeamCommand::Remove { team: p("backend"), names: vec![p("dev-b")] }).await.unwrap();
+    assert_eq!(directory_of(&js).await.team(&p("backend")).unwrap().lead, None, "removing the lead clears it");
+    run(&nats, create("ops", "", &[])).await.unwrap();
+    let directory = directory_of(&js).await;
+    let ops = directory.team(&p("ops")).unwrap();
+    assert_eq!((&ops.lead, lead_label(&directory, ops)), (&None, "none".to_owned()));
 
     run(&nats, TeamCommand::Delete { team: p("eng") }).await.unwrap();
-    assert_eq!(forest_of(&directory_of(&js).await), [(0, "backend")]);
+    assert_eq!(forest_of(&directory_of(&js).await), [(0, "backend"), (0, "ops")]);
     assert!(holds_team(&js, None, &p("backend")).await);
     assert!(check_no_team(&js, None, &p("backend")).await.is_err());
 }
 
 #[tokio::test]
-async fn an_ant_dropped_leaves_its_team_and_a_lead_leaves_it_leaderless() {
+async fn an_ant_dropped_leaves_its_team_and_a_lead_leaves_it_to_the_lead_above() {
     let Some(server) = Server::start() else { return };
     let creds = server.creds_as(&p("alice"), Role::Human);
     let (nats, js) = human(&server, &creds).await;
-    identities(&js, &["dev-a", "dev-b"]).await;
-    let create = TeamCommand::Create {
-        team: p("backend"),
-        lead: p("dev-a"),
-        members: vec![p("dev-b")],
+    identities(&js, &["boss", "dev-a", "dev-b"]).await;
+    let create = |team: &str, lead: &str, members: Vec<UserId>| TeamCommand::Create {
+        team: p(team),
+        lead: Some(p(lead)),
+        members,
         owner: None,
         description: None,
     };
-    run(&nats, create).await.unwrap();
-    check_retirable_on(&js, None, &p("dev-b")).await.unwrap();
-    assert!(check_retirable_on(&js, None, &p("dev-a")).await.is_err());
+    run(&nats, create("backend", "dev-a", vec![p("dev-b")])).await.unwrap();
+    run(&nats, create("eng", "boss", vec![p("backend")])).await.unwrap();
 
     assert_eq!(drop_ant_or_say(&js, None, &p("dev-b")).await.as_deref(), Some("took dev-b off team backend"));
     assert_eq!(drop_ant_or_say(&js, None, &p("dev-b")).await, None);
     let line = drop_ant_or_say(&js, None, &p("dev-a")).await.unwrap();
-    assert!(line.starts_with("took dev-a off team backend, which has no lead now"), "{line}");
+    assert_eq!(
+        line,
+        "took dev-a off team backend, which has no lead of its own now: it takes boss, the lead of team eng"
+    );
     let backend = directory_of(&js).await.team(&p("backend")).unwrap().clone();
-    assert!(backend.leaderless() && backend.members.is_empty(), "{backend:?}");
+    assert!(backend.lead.is_none() && backend.members.is_empty(), "{backend:?}");
+    let line = drop_ant_or_say(&js, None, &p("boss")).await.unwrap();
+    assert!(line.starts_with("took boss off team eng, which has no lead now, nor has any team above it"), "{line}");
 }

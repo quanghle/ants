@@ -184,10 +184,7 @@ fn about(directory: &TeamDirectory, team: &Team, width: usize) -> Vec<Line<'stat
         }
         None => vec![Line::styled("no description", style::dim())],
     };
-    let lead = match &team.lead {
-        Some(lead) => Span::raw(lead.to_string()),
-        None => Span::styled(teams::lead_label(team), Style::new().fg(style::ERROR)),
-    };
+    let lead = lead_span(directory, team);
     let owner = team.owner.as_ref().map_or_else(|| "none".to_owned(), UserId::to_string);
     let subteams = directory.subteams(team).len();
     let mut facts = vec![Span::styled("lead ", style::dim()), lead, Span::styled(" · owner ", style::dim())];
@@ -197,11 +194,21 @@ fn about(directory: &TeamDirectory, team: &Team, width: usize) -> Vec<Line<'stat
         facts.push(Span::styled(format!(" · {subteams} {teams} beneath"), style::dim()));
     }
     lines.push(Line::from(facts));
-    if team.leaderless() {
-        let refusal = ants_proto::TeamRefusal::Leaderless { team: team.team.clone() };
+    if let Err(refusal) = directory.lead_of(&team.team) {
         lines.push(Line::styled(refusal.to_string(), Style::new().fg(style::ERROR)));
     }
     lines
+}
+
+/// The lead of `team` as the team view shows it: its own, one taken from a team above it dimmed with that team's
+/// name, or none in the colour of an error.
+fn lead_span(directory: &TeamDirectory, team: &Team) -> Span<'static> {
+    let label = teams::lead_label(directory, team);
+    match directory.lead_source(&team.team) {
+        Some(source) if source.team == team.team => Span::raw(label),
+        Some(_) => Span::styled(label, style::dim()),
+        None => Span::styled(label, Style::new().fg(style::ERROR)),
+    }
 }
 
 /// A row of the members tree: indented by its depth, an ant with its state's mark, its face, its name, the lead's mark
@@ -216,9 +223,13 @@ fn tree_line(row: &Row, data: &Data, now: DateTime<Utc>) -> Line<'static> {
             }
             spans.push(Span::styled(format!("  {state}"), style::dim()));
         }
-        Member::Team { name, lead, .. } => {
+        Member::Team { name, lead, lead_from, .. } => {
             spans.push(Span::styled(format!("team {name}"), Style::new().add_modifier(Modifier::BOLD)));
-            let lead = lead.as_ref().map_or_else(|| "no lead".to_owned(), |l| format!("lead {l}"));
+            let lead = match (lead, lead_from) {
+                (Some(l), Some(from)) => format!("lead {l}, from team {from}"),
+                (Some(l), None) => format!("lead {l}"),
+                (None, _) => "no lead, nor above it".to_owned(),
+            };
             spans.push(Span::styled(format!("  {lead}"), style::dim()));
         }
     }

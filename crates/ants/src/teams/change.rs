@@ -1,5 +1,5 @@
 //! A change of one team as a human writes it, from `ants chat`'s team editor: members added or removed, the lead
-//! handed to another direct ant member, the owner and the description set or cleared, checked as `ants team add`,
+//! handed to another direct ant member or cleared, the owner and the description set or cleared, checked as `ants team add`,
 //! `remove` and `set` check them and written by compare-and-set.
 
 use ants_daemon::records::direct_kv::DirectKv;
@@ -13,10 +13,11 @@ use async_nats::jetstream;
 pub struct Change {
     /// Ants of the bus or teams to add, each on no team.
     pub add: Vec<UserId>,
-    /// Members to remove; never the lead.
+    /// Members to remove; removing the lead clears it.
     pub remove: Vec<UserId>,
-    /// The new lead, one of the team's direct ant members.
-    pub lead: Option<UserId>,
+    /// The new lead, one of the team's direct ant members, or none: the team then takes the lead of the nearest team
+    /// above it with one.
+    pub lead: Option<Option<UserId>>,
     /// The owner, a human, or none.
     pub owner: Option<Option<UserId>>,
     /// The description, or none.
@@ -76,8 +77,10 @@ impl Change {
                     changed.added.push(member.clone());
                 }
             }
-            if let Some(lead) = &self.lead {
-                directory.set_lead(team, lead)?;
+            match &self.lead {
+                Some(Some(lead)) => _ = directory.set_lead(team, lead)?,
+                Some(None) => _ = directory.clear_lead(team)?,
+                None => {}
             }
             let Some(entry) = directory.teams.iter_mut().find(|t| t.team == *team) else {
                 return Err(TeamRefusal::NoSuchTeam { team: team.clone() });
@@ -111,8 +114,10 @@ impl Change {
         if !changed.removed.is_empty() {
             parts.push(format!("removed {}", names(&changed.removed)));
         }
-        if let Some(lead) = &self.lead {
-            parts.push(format!("lead now {lead}"));
+        match &self.lead {
+            Some(Some(lead)) => parts.push(format!("lead now {lead}")),
+            Some(None) => parts.push("no lead of its own".to_owned()),
+            None => {}
         }
         match &self.owner {
             Some(Some(owner)) => parts.push(format!("owner now {owner}")),

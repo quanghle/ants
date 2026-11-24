@@ -868,7 +868,7 @@ pub(crate) async fn revoke_credentials(
 }
 
 /// Take the ants of `revoked`, revoked whole, off their teams, with short-lived credentials signed with the account
-/// key in `dir`: a revoked lead leaves its team leaderless until a human names another.
+/// key in `dir`: a revoked lead leaves its team to the lead of the nearest team above it.
 async fn leave_teams(url: &str, domain: Option<&JsDomain>, dir: &Path, revoked: &[UserId]) {
     let js = match crate::teams::keeper(url, domain, dir, Duration::from_secs(10)).await {
         Ok(js) => js,

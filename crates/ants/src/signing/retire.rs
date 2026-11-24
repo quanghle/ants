@@ -332,9 +332,6 @@ pub async fn retire(
     };
     let left = crate::auth::default_dir()?.join(format!("{name}.creds"));
     let listed = config::load(&path)?.ants.iter().any(|a| a.name == *name);
-    if let Some(js) = colony {
-        crate::teams::check_retirable_on(js, js_domain, name).await?;
-    }
     let (unlisted, creds) = match listed {
         true => {
             let unlisted = unlist(&path, name, None)?;

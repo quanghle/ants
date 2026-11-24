@@ -71,12 +71,15 @@ struct ManageTeam {
     /// Ants of the bus, or teams, each on no team yet, to make members.
     #[serde(default)]
     add: Vec<String>,
-    /// Members to remove, ants or teams, but not the lead; a team removed keeps its members.
+    /// Members to remove, ants or teams; a team removed keeps its members, and removing the lead clears it.
     #[serde(default)]
     remove: Vec<String>,
     /// A direct ant member to hand the lead of `team` to.
     #[serde(default)]
     lead: Option<String>,
+    /// Clear the lead of `team`, which then takes the lead of the nearest team above it that has one.
+    #[serde(default)]
+    clear_lead: bool,
     /// What the team is for: up to 1000 characters, which each member's sessions start with.
     #[serde(default)]
     description: Option<String>,
@@ -92,8 +95,10 @@ struct ManageTeam {
 struct NewTeam {
     /// The new team's name: 1-64 of a-z, 0-9 and '-', no ant's, human's or team's.
     team: String,
-    /// Its lead: an ant of the bus on no team, or a direct member of `team` but its lead, which moves down into it.
-    lead: String,
+    /// Its lead, if any: an ant of the bus on no team, or a direct member of `team`, which moves down into it. Without
+    /// one, the new team takes the lead of `team` (or of the nearest team above with one).
+    #[serde(default)]
+    lead: Option<String>,
     #[serde(default)]
     description: Option<String>,
 }
@@ -121,8 +126,8 @@ impl Hub {
         self.directory().await?.ok_or_else(|| "the bus keeps no teams (`ants init` makes their bucket)".to_owned())
     }
 
-    /// Whom a message to `to` goes to, and the team it was addressed to: a team's lead, refused for a leaderless team,
-    /// and for a team this ant leads, as a message to the ant itself is; any other name as it is. A directory that
+    /// Whom a message to `to` goes to, and the team it was addressed to: a team's lead (its own, else the nearest one
+    /// above it), refused for a team with no lead in it nor above it, and for a team this ant leads, as a message to the ant itself is; any other name as it is. A directory that
     /// cannot be read holds no message back: the name is then taken for an ant's.
     pub(super) async fn addressed(&self, to: &str) -> Result<(UserId, Option<UserId>), String> {
         let to = name(to)?;
@@ -272,7 +277,8 @@ fn ops(args: &ManageTeam) -> Result<Vec<TeamOp>, String> {
     let mut ops = Vec::new();
     if let Some(new) = &args.create {
         let description = new.description.clone().filter(|d| !d.trim().is_empty());
-        ops.push(TeamOp::CreateTeam { team: name(&new.team)?, lead: name(&new.lead)?, description });
+        let lead = new.lead.as_deref().map(name).transpose()?;
+        ops.push(TeamOp::CreateTeam { team: name(&new.team)?, lead, description });
     }
     for added in &args.add {
         ops.push(TeamOp::AddMember { member: name(added)? });
@@ -280,8 +286,11 @@ fn ops(args: &ManageTeam) -> Result<Vec<TeamOp>, String> {
     for removed in &args.remove {
         ops.push(TeamOp::RemoveMember { member: name(removed)? });
     }
-    if let Some(lead) = &args.lead {
-        ops.push(TeamOp::SetLead { ant: name(lead)? });
+    match (&args.lead, args.clear_lead) {
+        (Some(_), true) => return Err("give either lead or clear_lead, not both".to_owned()),
+        (Some(lead), false) => ops.push(TeamOp::SetLead { ant: name(lead)? }),
+        (None, true) => ops.push(TeamOp::ClearLead),
+        (None, false) => {}
     }
     match (&args.description, args.clear_description) {
         (Some(_), true) => return Err("give either description or clear_description, not both".to_owned()),
@@ -318,7 +327,11 @@ impl Shown<'_> {
         let Some(team) = self.directory.team(team) else { return };
         let header = if depth == 0 { String::new() } else { format!("{}- ", "  ".repeat(depth)) };
         let indent = "  ".repeat(depth + 1);
-        let lead = team.lead.as_ref().map_or_else(|| "none, its lead was revoked".to_owned(), UserId::to_string);
+        let lead = match self.directory.lead_source(&team.team) {
+            Some(from) if from.team == team.team => from.lead.as_ref().map_or_default(UserId::to_string),
+            Some(from) => format!("{}, from team {}", from.lead.as_ref().map_or_default(UserId::to_string), from.team),
+            None => "none, nor above it".to_owned(),
+        };
         let owner = team.owner.as_ref().map_or_default(|owner| format!("; owner {owner}, a human"));
         let _ = writeln!(text, "{header}team {} (lead {lead}{owner})", team.team);
         if let Some(description) = &team.description {
@@ -367,7 +380,8 @@ impl Shown<'_> {
 #[tool_router(router = teams_router, vis = "pub(super)")]
 impl Tools {
     #[tool(description = "List the teams: named groups of ants and teams, forming a forest, each ant and team on \
-        one team at most, each team with an ant lead that messages to the team go to. With `team`, only that team \
+        one team at most. Messages to a team go to its lead, a direct ant member, or without one to the lead of the \
+        nearest team above it that has one. With `team`, only that team \
         and the teams beneath it. Each team shows its lead, its human owner, its description and its members, a \
         member ant with its state in the colony. send_message and ask_ant take a team in `to`, reaching its lead; \
         list_ants and route take `team` to keep to its ants, through its member teams.")]
@@ -376,9 +390,10 @@ impl Tools {
     }
 
     #[tool(description = "Manage a team this ant leads, or one beneath it: `create` makes a team as a member of \
-        `team` (its lead an ant on no team, or a direct member of `team` but its lead, moving down into it), `add` \
-        makes ants of the bus or teams on no team members, `remove` takes members out (never the lead), `lead` \
-        hands the lead to another direct ant member, `description` sets what the team is for (`clear_description` \
+        `team` (its lead, if any, an ant on no team or a direct member of `team`, moving down into it; without one \
+        it takes the lead of `team`), `add` makes ants of the bus or teams on no team members, `remove` takes \
+        members out (a lead removed leaves its team without one), `lead` hands the lead to a direct ant member \
+        (`clear_lead` clears it, the team then taking the nearest lead above it), `description` sets what the team is for (`clear_description` \
         clears it) and `delete` deletes a team that is a member of `team`. The changes apply in that order, all \
         or none. `ants signer` makes them, checking that this ant manages the team; the owner and the teams above \
         are a human's to change. Refused on a thread a webhook or schedule started. With only `team` it shows the \

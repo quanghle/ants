@@ -20,6 +20,9 @@ expression: value
       "ant": "dev-b"
     },
     {
+      "op": "clear_lead"
+    },
+    {
       "op": "set_description",
       "description": "Services."
     },
@@ -31,6 +34,10 @@ expression: value
       "team": "infra",
       "lead": "dev-d",
       "description": "Machines."
+    },
+    {
+      "op": "create_team",
+      "team": "cache"
     },
     {
       "op": "delete_team",

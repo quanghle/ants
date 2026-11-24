@@ -531,7 +531,6 @@ impl Dedicated {
         nats: &Nats<'_>,
     ) -> Result<()> {
         let name = &self.name;
-        crate::teams::check_retirable_on(js, nats.domain, name).await?;
         config::write(path, &config::without_ant(path, name)?)?;
         println!(
             "unlisted {name} from {}: the daemon serving it stops it, its prompts in flight ending first",

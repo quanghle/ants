@@ -152,7 +152,7 @@ fn line(
             let indent = "  ".repeat(teams.ancestors(team).len());
             let mut spans = vec![Span::raw(format!("{indent}{team}"))];
             spans.push(Span::styled(count(teams.ants_under(team).len()), style::dim()));
-            if teams.team(team).is_some_and(ants_proto::Team::leaderless) {
+            if teams.lead_of(team).is_err() {
                 spans.push(Span::styled(" ✕ no lead", Style::new().fg(style::ERROR)));
             }
             Line::from(spans)

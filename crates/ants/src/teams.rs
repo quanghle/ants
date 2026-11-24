@@ -2,9 +2,9 @@
 //! names teams share with ants and humans, a message to a team sent on to its lead (`ants ask @TEAM`), and what
 //! retiring or revoking an ant does to its team.
 //!
-//! An ant retired is refused while it leads a team ([`check_retirable`]): a human names another lead first. A
-//! retired or revoked ant leaves its team ([`drop_ant`]); a revoked lead leaves its team leaderless, which messages to
-//! the team and `ants doctor` then refuse until a human names another lead.
+//! A retired or revoked ant leaves its team ([`drop_ant`]); a lead leaving leaves its team without a lead of its own,
+//! so that it takes the lead of the nearest team above it with one. A team with no lead, nor any above it, refuses
+//! messages, and `ants doctor` warns of it, until a human names a lead.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -21,7 +21,7 @@ pub use ants_daemon::teams::open;
 
 pub mod change;
 
-/// How long a lookup that only adds a check ([`holds_team`], [`check_retirable_on`]) waits for the hub.
+/// How long a lookup that only adds a check ([`holds_team`]) waits for the hub.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The team directory of `kv`: None when the bus keeps no `ants_teams`. Fails when the hub is out of reach, or the
@@ -143,55 +143,32 @@ pub async fn keeper(
     Ok(js)
 }
 
-/// Refuse retiring `ant` while it leads a team of `directory`: a human names another lead first.
-pub fn check_retirable(directory: &TeamDirectory, ant: &UserId) -> Result<()> {
-    if let Some(team) = directory.led_by(ant).first() {
-        let team = &team.team;
-        bail!(
-            "{ant} leads team {team}: name another lead first (`ants team set {team} --lead ANT`), then retire {ant}"
-        );
-    }
-    Ok(())
-}
-
-/// [`check_retirable`] on the directory of `js`; a bus without `ants_teams`, or a directory that cannot be read
-/// within a few seconds (said), lets the retirement go ahead.
-pub async fn check_retirable_on(js: &jetstream::Context, js_domain: Option<&JsDomain>, ant: &UserId) -> Result<()> {
-    match tokio::time::timeout(LOOKUP_TIMEOUT, read_of(js, js_domain)).await {
-        Ok(Ok(Some(directory))) => check_retirable(&directory, ant),
-        Ok(Ok(None)) => Ok(()),
-        Ok(Err(e)) => {
-            tracing::warn!("not checking whether {ant} leads a team: {e:#}");
-            Ok(())
-        }
-        Err(_) => {
-            tracing::warn!("not checking whether {ant} leads a team: no answer within {LOOKUP_TIMEOUT:?}");
-            Ok(())
-        }
-    }
-}
-
 /// Take `ant`, retired or revoked, off its team in the directory of `kv`: a line saying so, None when it is on no team
-/// or the bus keeps no `ants_teams`. A lead leaves its team leaderless.
+/// or the bus keeps no `ants_teams`. A lead leaves its team without a lead of its own: it takes the lead of the
+/// nearest team above it with one, should there be one.
 pub async fn drop_ant(kv: &DirectKv, ant: &UserId) -> Result<Option<String>> {
     if teams::read(kv).await?.is_none() {
         return Ok(None);
     }
-    let dropped = teams::modify(kv, |directory| {
+    teams::modify(kv, |directory| {
         let led = directory.led_by(ant).first().map(|t| t.team.clone());
-        Ok(directory.drop_ant(ant).map(|team| (led.as_ref() == Some(&team), team)))
-    })
-    .await?;
-    Ok(dropped.map(|(led, team)| {
-        if led {
-            format!(
-                "took {ant} off team {team}, which has no lead now: messages to it are refused until a human names \
-                 one (`ants team set {team} --lead ANT`)"
-            )
-        } else {
-            format!("took {ant} off team {team}")
+        let Some(team) = directory.drop_ant(ant) else { return Ok(None) };
+        if led.as_ref() != Some(&team) {
+            return Ok(Some(format!("took {ant} off team {team}")));
         }
-    }))
+        Ok(Some(match directory.lead_source(&team) {
+            Some(above) => format!(
+                "took {ant} off team {team}, which has no lead of its own now: it takes {}, the lead of team {}",
+                above.lead.as_ref().map_or_default(UserId::to_string),
+                above.team
+            ),
+            None => format!(
+                "took {ant} off team {team}, which has no lead now, nor has any team above it: messages to it are \
+                 refused until a human names one (`ants team set {team} --lead ANT`)"
+            ),
+        }))
+    })
+    .await
 }
 
 /// [`drop_ant`] on the directory of `js`, a failure said in the line returned, with the command finishing it.
@@ -226,9 +203,16 @@ pub fn team_line(directory: &TeamDirectory, ant: &UserId) -> String {
     line
 }
 
-/// The lead of `team` as shown: its name, or that it has none since its lead was revoked.
-pub fn lead_label(team: &Team) -> String {
-    team.lead.as_ref().map_or_else(|| "none (revoked)".to_owned(), UserId::to_string)
+/// The lead of `team` as shown: its own, `X (from team Y)` when it takes the lead of a team above it, `none` when
+/// neither it nor any team above it has one.
+pub fn lead_label(directory: &TeamDirectory, team: &Team) -> String {
+    match directory.lead_source(&team.team) {
+        Some(source) if source.team == team.team => source.lead.as_ref().map_or_default(UserId::to_string),
+        Some(source) => {
+            format!("{} (from team {})", source.lead.as_ref().map_or_default(UserId::to_string), source.team)
+        }
+        None => "none".to_owned(),
+    }
 }
 
 /// A team as `ants team` prints it after a change: one line, then its description should it have one.
@@ -238,7 +222,12 @@ pub fn describe(directory: &TeamDirectory, team: &Team) -> String {
     let owner = team.owner.as_ref().map_or_default(|o| format!("; owner {o}"));
     let within = directory.holder(&team.team).map_or_default(|t| format!(", within team {}", t.team));
     let description = team.description.as_ref().map_or_default(|d| format!("\ndescription: {d}"));
-    format!("team {}{within}: lead {}; members {}{owner}{description}", team.team, lead_label(team), members.join(", "))
+    format!(
+        "team {}{within}: lead {}; members {}{owner}{description}",
+        team.team,
+        lead_label(directory, team),
+        members.join(", ")
+    )
 }
 
 /// The teams as a table, a forest: each top-level team, then the teams beneath it, indented under it. A DESCRIPTION
@@ -253,7 +242,7 @@ pub fn table(directory: &TeamDirectory) -> String {
     for (depth, team) in forest(directory) {
         let mut row = vec![
             format!("{}{}", "  ".repeat(depth), team.team),
-            lead_label(team),
+            lead_label(directory, team),
             team.members.len().to_string(),
             team.owner.as_ref().map_or_else(|| "-".to_owned(), UserId::to_string),
         ];
@@ -295,8 +284,11 @@ pub enum Member {
     },
     Team {
         name: UserId,
+        /// Its lead, its own or, without one, that of the nearest team above it with one (`lead_from`).
         #[serde(skip_serializing_if = "Option::is_none")]
         lead: Option<UserId>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lead_from: Option<UserId>,
         members: Vec<Member>,
     },
 }
@@ -316,11 +308,15 @@ fn members_of(
     let mut out = Vec::new();
     for member in &team.members {
         match directory.team(member) {
-            Some(sub) if seen.insert(sub.team.clone()) => out.push(Member::Team {
-                name: sub.team.clone(),
-                lead: sub.lead.clone(),
-                members: members_of(directory, sub, state, seen),
-            }),
+            Some(sub) if seen.insert(sub.team.clone()) => {
+                let source = directory.lead_source(&sub.team);
+                out.push(Member::Team {
+                    name: sub.team.clone(),
+                    lead: source.and_then(|t| t.lead.clone()),
+                    lead_from: source.filter(|t| t.team != sub.team).map(|t| t.team.clone()),
+                    members: members_of(directory, sub, state, seen),
+                });
+            }
             Some(_) => {}
             None => out.push(Member::Ant {
                 name: member.clone(),
@@ -343,8 +339,12 @@ pub fn tree_lines(members: &[Member], face: &impl Fn(&UserId) -> String) -> Vec<
                     let lead = if *lead { " ★ lead" } else { "" };
                     out.push(format!("{indent}{}{lead}: {state}", face(name)));
                 }
-                Member::Team { name, lead, members } => {
-                    let lead = lead.as_ref().map_or_else(|| "no lead".to_owned(), |l| format!("lead {l}"));
+                Member::Team { name, lead, lead_from, members } => {
+                    let lead = match (lead, lead_from) {
+                        (Some(l), Some(from)) => format!("lead {l}, from team {from}"),
+                        (Some(l), None) => format!("lead {l}"),
+                        (None, _) => "no lead, nor above it".to_owned(),
+                    };
                     out.push(format!("{indent}team {name} ({lead})"));
                     lines(members, depth + 1, face, out);
                 }

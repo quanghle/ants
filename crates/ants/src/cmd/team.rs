@@ -17,15 +17,16 @@ use crate::teams::{self, parse_name};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum TeamCommand {
-    /// Create a team led by --lead, an ant, which is its first member; fails when a team, an ant or a human holds the
-    /// name. Each ant and each team is on one team at most; `ants team add PARENT TEAM` puts a team under another.
+    /// Create a team, led by --lead, an ant, which is its first member, or, without --lead, by the lead of the team
+    /// above it once it is put under one; fails when a team, an ant or a human holds the name. Each ant and each team is on one team at most; `ants team add PARENT TEAM` puts a team under another.
     Create {
         /// The team: `backend` or `@backend`.
         #[arg(value_parser = parse_name)]
         team: UserId,
-        /// The ant messages to the team go to: an ant of the bus on no team.
+        /// The ant messages to the team go to: an ant of the bus on no team. Without it, the team takes the lead of
+        /// the nearest team above it with one.
         #[arg(long, value_name = "ANT", value_parser = parse_name, add = ArgValueCandidates::new(completions::ants))]
-        lead: UserId,
+        lead: Option<UserId>,
         /// Member, an ant or a team on no team (repeatable, or comma-separated).
         #[arg(long = "member", value_name = "NAME", value_delimiter = ',', value_parser = parse_name, add = ArgValueCandidates::new(completions::ants))]
         members: Vec<UserId>,
@@ -42,8 +43,11 @@ pub(crate) enum TeamCommand {
         #[arg(value_parser = parse_name, add = ArgValueCandidates::new(completions::teams))]
         team: UserId,
         /// The new lead, one of the team's direct ant members.
-        #[arg(long, value_name = "ANT", value_parser = parse_name, add = ArgValueCandidates::new(completions::ants))]
+        #[arg(long, value_name = "ANT", value_parser = parse_name, add = ArgValueCandidates::new(completions::ants), conflicts_with = "no_lead")]
         lead: Option<UserId>,
+        /// Leave the team without a lead of its own: it takes the lead of the nearest team above it with one.
+        #[arg(long)]
+        no_lead: bool,
         /// The human the team answers to.
         #[arg(long, value_name = "HUMAN", value_parser = parse_name, conflicts_with = "no_owner")]
         owner: Option<UserId>,
@@ -67,8 +71,8 @@ pub(crate) enum TeamCommand {
         #[arg(required = true, num_args = 1.., value_name = "NAME", value_parser = parse_name, add = ArgValueCandidates::new(completions::ants))]
         names: Vec<UserId>,
     },
-    /// Remove members, ants or teams, from a team; its lead stays until `ants team set TEAM --lead ANT` names
-    /// another.
+    /// Remove members, ants or teams, from a team; removing its lead leaves it without a lead of its own, taking
+    /// that of the nearest team above it with one.
     Remove {
         /// The team: `backend` or `@backend`.
         #[arg(value_parser = parse_name, add = ArgValueCandidates::new(completions::teams))]
@@ -162,12 +166,12 @@ async fn show(
     if let Some(description) = &team.description {
         println!("  description: {description}");
     }
-    println!("  lead: {}", teams::lead_label(team));
+    println!("  lead: {}", teams::lead_label(&directory, team));
     if let Some(owner) = &team.owner {
         println!("  owner: {owner}");
     }
-    if team.leaderless() {
-        println!("  {}", TeamRefusal::Leaderless { team: id.clone() });
+    if let Err(refusal) = directory.lead_of(id) {
+        println!("  {refusal}");
     }
     println!("members:");
     for line in teams::tree_lines(&tree, &|ant| faces.named(ant)) {
@@ -204,10 +208,13 @@ async fn change(
     let me = nats.me.id.clone();
     let (id, warnings, added) = match command {
         TeamCommand::Create { team, lead, members, owner, description } => {
-            let mut created = Team::new(team.clone(), lead.clone(), me);
+            let mut created = match &lead {
+                Some(lead) => Team::new(team.clone(), lead.clone(), me),
+                None => Team::unled(team.clone(), me),
+            };
             created.set_description(description.as_deref())?;
-            let members: Vec<UserId> = members.into_iter().filter(|m| *m != lead).collect();
-            let named: Vec<&UserId> = std::iter::once(&lead).chain(&members).collect();
+            let members: Vec<UserId> = members.into_iter().filter(|m| Some(m) != lead.as_ref()).collect();
+            let named: Vec<&UserId> = lead.iter().chain(&members).collect();
             let checked = Named::read(nats, js, &named).await?;
             teams::check_team_name(js, nats.domain, &checked.humans, &team).await?;
             if let Some(owner) = &owner {
@@ -218,7 +225,7 @@ async fn change(
             let all: Vec<UserId> = created.members.clone();
             modify(kv, |directory| {
                 teams::check_known(directory, &checked.known, &all)?;
-                if directory.is_team(&lead) {
+                if let Some(lead) = lead.as_ref().filter(|l| directory.is_team(l)) {
                     return Err(TeamRefusal::NotLeadable { ant: lead.clone(), team: team.clone() });
                 }
                 directory.create(created.clone(), None)
@@ -226,8 +233,8 @@ async fn change(
             .await?;
             (team, Vec::new(), all)
         }
-        TeamCommand::Set { team, lead, owner, no_owner, description, no_description } => {
-            set(nats, js, kv, &team, lead, (owner, no_owner), (description, no_description)).await?;
+        TeamCommand::Set { team, lead, no_lead, owner, no_owner, description, no_description } => {
+            set(nats, js, kv, &team, (lead, no_lead), (owner, no_owner), (description, no_description)).await?;
             (team, Vec::new(), Vec::new())
         }
         TeamCommand::Add { team, names } => {
@@ -297,12 +304,12 @@ async fn set(
     js: &async_nats::jetstream::Context,
     kv: &ants_daemon::records::direct_kv::DirectKv,
     team: &UserId,
-    lead: Option<UserId>,
+    (lead, no_lead): (Option<UserId>, bool),
     (owner, no_owner): (Option<UserId>, bool),
     (description, no_description): (Option<String>, bool),
 ) -> Result<()> {
-    if lead.is_none() && owner.is_none() && !no_owner && description.is_none() && !no_description {
-        bail!("nothing to change: give --lead, --owner, --no-owner, --description or --no-description");
+    if lead.is_none() && !no_lead && owner.is_none() && !no_owner && description.is_none() && !no_description {
+        bail!("nothing to change: give --lead, --no-lead, --owner, --no-owner, --description or --no-description");
     }
     if let Some(description) = &description {
         Team::new(team.clone(), team.clone(), team.clone()).set_description(Some(description))?;
@@ -315,6 +322,9 @@ async fn set(
     modify(kv, |directory| {
         if let Some(lead) = &lead {
             directory.set_lead(team, lead)?;
+        }
+        if no_lead {
+            directory.clear_lead(team)?;
         }
         let Some(entry) = directory.teams.iter_mut().find(|t| t.team == *team) else {
             return Err(TeamRefusal::NoSuchTeam { team: team.clone() });

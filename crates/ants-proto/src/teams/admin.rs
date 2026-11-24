@@ -26,15 +26,19 @@ pub enum TeamOp {
     SetLead {
         ant: UserId,
     },
+    /// Clear the lead: the team then takes the lead of the nearest team above it that has one.
+    ClearLead,
     SetDescription {
         description: String,
     },
     ClearDescription,
-    /// Create the team `team` as a member of the request's team, led by `lead`: an ant of the bus on no team, or a
-    /// direct member of the request's team but its lead, which moves down into the new team.
+    /// Create the team `team` as a member of the request's team, led by `lead`, if given: an ant of the bus on no team,
+    /// or a direct member of the request's team, which moves down into the new team. Without one, the new team takes
+    /// the lead of the request's team, or of the nearest team above with one.
     CreateTeam {
         team: UserId,
-        lead: UserId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lead: Option<UserId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
@@ -50,9 +54,10 @@ impl TeamOp {
     pub fn ant_added(&self) -> Option<&UserId> {
         match self {
             Self::AddMember { member } => Some(member),
-            Self::CreateTeam { lead, .. } => Some(lead),
+            Self::CreateTeam { lead, .. } => lead.as_ref(),
             Self::RemoveMember { .. }
             | Self::SetLead { .. }
+            | Self::ClearLead
             | Self::SetDescription { .. }
             | Self::ClearDescription
             | Self::DeleteTeam { .. } => None,

@@ -257,9 +257,15 @@ fn teams() {
         TeamOp::AddMember { member: user("dev-b") },
         TeamOp::RemoveMember { member: user("dev-c") },
         TeamOp::SetLead { ant: user("dev-b") },
+        TeamOp::ClearLead,
         TeamOp::SetDescription { description: "Services.".to_owned() },
         TeamOp::ClearDescription,
-        TeamOp::CreateTeam { team: user("infra"), lead: user("dev-d"), description: Some("Machines.".to_owned()) },
+        TeamOp::CreateTeam {
+            team: user("infra"),
+            lead: Some(user("dev-d")),
+            description: Some("Machines.".to_owned()),
+        },
+        TeamOp::CreateTeam { team: user("cache"), lead: None, description: None },
         TeamOp::DeleteTeam { team: user("infra") },
     ];
     snap(

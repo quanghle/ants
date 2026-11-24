@@ -1,4 +1,4 @@
-//! Tests of the doctor's team checks: a leaderless team, a lead not live, an unknown member and a team taking the name
+//! Tests of the doctor's team checks: a team with no lead, nor any above it, a lead not live, an unknown member and a team taking the name
 //! of an ant or a human; and whether `ants signer` answers each ant's team changes.
 
 use std::collections::BTreeSet;
@@ -36,7 +36,7 @@ fn a_sound_directory_is_ok_and_an_empty_one_too() {
 }
 
 #[test]
-fn a_leaderless_team_an_unknown_member_and_a_taken_name_fail_and_a_lead_not_live_warns() {
+fn an_unknown_member_and_a_taken_name_fail_and_a_team_with_no_lead_and_a_lead_not_live_warn() {
     let now = chrono::Utc::now();
     let mut directory = backend();
     directory.create(Team::new(p("human"), p("dev-c"), p("alice")), None).unwrap();
@@ -48,7 +48,7 @@ fn a_leaderless_team_an_unknown_member_and_a_taken_name_fail_and_a_lead_not_live
     assert_eq!(
         details,
         [
-            (Status::Fail, "team backend has no lead since its lead was revoked: messages to it are refused"),
+            (Status::Warn, "team backend has no lead, nor has any team above it: messages to it are refused"),
             (Status::Fail, "team backend holds dev-b, neither an ant of the bus nor a team"),
             (Status::Fail, "the name human is both a team and a human: messages to human go to the team's lead"),
             (Status::Warn, "dev-c, the lead of team human, is not live in the colony: messages to human wait"),
@@ -56,6 +56,21 @@ fn a_leaderless_team_an_unknown_member_and_a_taken_name_fail_and_a_lead_not_live
     );
     assert_eq!(checks[0].fix, ["ants team set backend --lead ANT"]);
     assert_eq!(checks[1].fix, ["ants team remove backend dev-b"]);
+}
+
+#[test]
+fn a_team_taking_the_lead_above_is_sound() {
+    let now = chrono::Utc::now();
+    let mut directory = backend();
+    directory.create(Team::unled(p("db"), p("alice")), Some(&p("backend"))).unwrap();
+    let known = BTreeSet::from([p("dev-a"), p("dev-b")]);
+    let colony = [entry("dev-a", 60, 2, now)];
+    let checks = findings(&directory, &known, None, Some(&colony), now);
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    assert_eq!(
+        (checks[0].status, checks[0].detail.as_str()),
+        (Status::Ok, "2 teams, each with a lead, its own or one above it, every member an ant of the bus or a team")
+    );
 }
 
 #[test]
