@@ -134,7 +134,8 @@ impl Permissions {
     /// What `ants signer` also allows itself, on the machine holding the account key, to change teams for the ants that
     /// manage them ([`TeamAdminRequest`]): hearing every such request ([`subject::ALL_TEAMADM_REQUESTS`]); reading the
     /// team directory and the ants' identity records by direct gets naming no subject, as every ant does, to check
-    /// that an ant added is one; putting the directory, which only it does for an ant, once it found the ant manages the team and the
+    /// that an ant added is one, and the humans' entries ([`HUMANS_BUCKET`]) by direct gets naming their key, to check
+    /// that a team created takes the name of neither an ant nor a human; putting the directory, which only it does for an ant, once it found the ant manages the team and the
     /// change keeps the forest; and answering on the ant's own [`subject::teamadm_reply`]. The replies of its JetStream
     /// requests come under [`ENROLL_INBOX`], as those of [`Permissions::for_enroll_approver`], with which it is issued.
     pub fn for_team_keeper() -> Self {
@@ -142,6 +143,7 @@ impl Permissions {
             publish: vec![
                 format!("$JS.API.DIRECT.GET.{}", kv_stream(TEAMS_BUCKET)),
                 format!("$JS.API.DIRECT.GET.{}", kv_stream(IDENTITIES_BUCKET)),
+                subject::kv_get(HUMANS_BUCKET, "*"),
                 subject::kv(TEAMS_BUCKET, TEAM_DIRECTORY_KEY),
                 subject::ALL_TEAMADM_REPLIES.to_owned(),
             ],

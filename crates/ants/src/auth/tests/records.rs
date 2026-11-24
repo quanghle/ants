@@ -472,4 +472,11 @@ async fn humans_and_the_signer_write_the_team_directory_and_ants_read_it() {
     let keeper = DirectKv::whole(approver.hub(), None, TEAMS_BUCKET).await.unwrap().past_relays();
     assert!(keeper.update(TEAM_DIRECTORY_KEY, serde_json::to_vec(&directory).unwrap(), last).await.unwrap());
     assert!(!written.update(TEAM_DIRECTORY_KEY, b"{}".to_vec(), last).await.unwrap(), "compare-and-set");
+
+    // The signer reads a human's entry, which the name of a team a lead creates must not be.
+    let humans = h_js.create_key_value(ants_daemon::hub::humans_config()).await.unwrap();
+    let entry = ants_proto::HumanEntry::new(human.clone());
+    humans.put(human.as_str(), serde_json::to_vec(&entry).unwrap().into()).await.unwrap();
+    let entries = DirectKv::new(approver.hub(), None, ants_proto::HUMANS_BUCKET).await.unwrap();
+    assert!(matches!(entries.lookup(human.as_str()).await.unwrap(), Lookup::Value(_)));
 }

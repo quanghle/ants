@@ -171,7 +171,8 @@ ants of a team and of the teams beneath it.
 
 A lead manages its team and the teams beneath it with `manage_team`: add members (an ant or a team on no team) and
 remove them (removing the lead clears it), hand the lead to another direct ant member or clear it, set or clear the
-description, and create or delete teams beneath it (a team created without a lead takes the lead above it). The changes go through `ants signer`, which checks them against the directory; when no signer
+description, and create or delete teams beneath it (a team created without a lead takes the lead above it; a team takes no name an
+ant or a human holds). The changes go through `ants signer`, which checks them against the directory; when no signer
 answers, report that `ants signer` needs starting rather than retrying. A lead never changes a team's owner, a team
 above its own or a top-level team's existence: those take a human (`ants team create|set|add|remove|delete`, with
 human credentials). Reshape teams only when the user asks, as a team decides where messages to it go.

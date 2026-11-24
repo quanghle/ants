@@ -63,6 +63,14 @@ impl TeamOp {
             | Self::DeleteTeam { .. } => None,
         }
     }
+
+    /// The team the operation creates, if any, whose name an ant, a human or a reserved name may hold already.
+    pub fn team_created(&self) -> Option<&UserId> {
+        match self {
+            Self::CreateTeam { team, .. } => Some(team),
+            _ => None,
+        }
+    }
 }
 
 /// An ant's request to change a team it manages, on [`subject::teamadm`]: core NATS, not stored. Only `ants signer`

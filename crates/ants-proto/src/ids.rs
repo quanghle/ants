@@ -126,6 +126,17 @@ impl UserId {
     pub fn signer() -> Self {
         Self("signer".to_owned())
     }
+
+    /// Whether the name is one no ant, human or team may take: a [`BuiltinAnt`]'s, [`UserId::channel_manager`],
+    /// [`UserId::signer`], [`crate::REVOKED_DEVICES`] (the revocation records of the devices bucket) or
+    /// [`crate::BOOTSTRAP_USER`] (the public bootstrap credentials).
+    pub fn is_reserved(&self) -> bool {
+        BuiltinAnt::from_id(&self.0).is_some()
+            || *self == Self::channel_manager()
+            || *self == Self::signer()
+            || self.0 == crate::REVOKED_DEVICES
+            || self.0 == crate::BOOTSTRAP_USER
+    }
 }
 
 /// An ant provisioned by ants itself, with an ID unavailable to ordinary users and ants.

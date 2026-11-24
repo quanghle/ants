@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::{
-    IDENTITIES_BUCKET, JsDomain, TEAMADM_REPEAT, TEAMADM_WAIT, TeamAdminOutcome, TeamAdminReply, TeamAdminRequest,
-    TeamRefusal, UserId, Uuid, subject,
+    HUMANS_BUCKET, IDENTITIES_BUCKET, JsDomain, TEAMADM_REPEAT, TEAMADM_WAIT, TeamAdminOutcome, TeamAdminReply,
+    TeamAdminRequest, TeamRefusal, UserId, Uuid, subject,
 };
 #[cfg(doc)]
 use ants_proto::{TEAMS_BUCKET, TeamDirectory};
@@ -39,13 +39,32 @@ async fn known_ants(identities: Option<&DirectKv>, names: &[&UserId]) -> Result<
     Ok(known)
 }
 
+/// Refuse `name` for a new team when an ant (of `identities`), a human (of `humans`, [`HUMANS_BUCKET`]) or a reserved
+/// name holds it: teams share the names of ants and humans. Fails when a bucket is unreachable, or not given.
+async fn check_team_name(
+    identities: Option<&DirectKv>,
+    humans: Option<&DirectKv>,
+    name: &UserId,
+) -> Result<Result<(), TeamRefusal>> {
+    let (Some(identities), Some(humans)) = (identities, humans) else {
+        bail!("no ants and humans to check the name of team {name} against");
+    };
+    let taken = name.is_reserved()
+        || !known_ants(Some(identities), &[name]).await?.is_empty()
+        || matches!(humans.lookup(name.as_str()).await?, Lookup::Value(_));
+    Ok(if taken { Err(TeamRefusal::NameTaken { name: name.clone() }) } else { Ok(()) })
+}
+
 /// The answer to `request`, made on `kv`, [`TEAMS_BUCKET`] as credentials writing the directory reach it, an ant
 /// added checked in `identities` ([`IDENTITIES_BUCKET`], read by direct gets naming no subject; with none, every ant
-/// added is refused): the change made when the ant may make it and the directory is still the one the ant read, else
-/// [`TeamAdminOutcome::Changed`]. Fails only when a bucket is unreachable, for the ant to ask again.
+/// added is refused), and a team created refused under the name of an ant, a human of `humans` ([`HUMANS_BUCKET`]) or
+/// a reserved name ([`TeamRefusal::NameTaken`]): the change made when the ant may make it and the directory is still
+/// the one the ant read, else [`TeamAdminOutcome::Changed`]. Fails only when a bucket is unreachable, for the ant to
+/// ask again.
 pub async fn answer(
     kv: &DirectKv,
     identities: Option<&DirectKv>,
+    humans: Option<&DirectKv>,
     request: &TeamAdminRequest,
 ) -> Result<TeamAdminOutcome> {
     let refused = |refusal: TeamRefusal| Ok(TeamAdminOutcome::Refused { refusal });
@@ -63,6 +82,11 @@ pub async fn answer(
         Ok(directory) => directory,
         Err(refusal) => return refused(refusal),
     };
+    for created in request.ops.iter().filter_map(ants_proto::TeamOp::team_created) {
+        if let Err(refusal) = check_team_name(identities, humans, created).await? {
+            return refused(refusal);
+        }
+    }
     let named: Vec<&UserId> = request.ops.iter().filter_map(ants_proto::TeamOp::ant_added).collect();
     let known = known_ants(identities, &named).await?;
     let changed = match directory.apply_for_ant(&request.ant, &request.team, &request.ops, |a| known.contains(a)) {
@@ -89,12 +113,13 @@ pub async fn answer(
 pub async fn serve(client: async_nats::Client, js: jetstream::Context, js_domain: Option<JsDomain>) -> Result<()> {
     let kv = super::open(&js, js_domain.as_ref()).await?;
     let identities = DirectKv::whole(&js, js_domain.as_ref(), IDENTITIES_BUCKET).await?;
+    let humans = DirectKv::new(&js, js_domain.as_ref(), HUMANS_BUCKET).await?;
     let requests = relayed::queue_subscribe(&client, subject::ALL_TEAMADM_REQUESTS, QUEUE.to_owned())
         .await
         .context("subscribing to team changes")?;
     let answered = Arc::new(Mutex::new(VecDeque::new()));
     // One at a time: each change is checked against the directory the one before it wrote.
-    requests.for_each(|msg| respond(&client, &kv, &identities, &answered, msg)).await;
+    requests.for_each(|msg| respond(&client, &kv, &identities, &humans, &answered, msg)).await;
     bail!("the subscription to team changes ended")
 }
 
@@ -102,6 +127,7 @@ async fn respond(
     client: &async_nats::Client,
     kv: &DirectKv,
     identities: &DirectKv,
+    humans: &DirectKv,
     answered: &Mutex<VecDeque<(Uuid, UserId, TeamAdminOutcome)>>,
     msg: async_nats::Message,
 ) {
@@ -122,7 +148,7 @@ async fn respond(
     let first = answered.lock().await.iter().find(|(id, ant, _)| *id == request.id && *ant == request.ant).cloned();
     let outcome = match first {
         Some((.., outcome)) => outcome,
-        None => match answer(kv, Some(identities), &request).await {
+        None => match answer(kv, Some(identities), Some(humans), &request).await {
             Ok(outcome) => {
                 let mut answered = answered.lock().await;
                 if answered.len() == MAX_ANSWERED {
@@ -194,6 +220,8 @@ pub struct Changer {
     pub client: async_nats::Client,
     pub kv: DirectKv,
     pub identities: Option<DirectKv>,
+    /// The humans' entries ([`HUMANS_BUCKET`]), which a team created must not be named after.
+    pub humans: Option<DirectKv>,
     /// Whether the signer writes: the daemon connected with credentials, which write nothing of [`TEAMS_BUCKET`].
     pub signer: bool,
 }
@@ -216,7 +244,7 @@ impl Changer {
             let outcome = if self.signer {
                 request(&self.client, &ask).await?
             } else {
-                Some(answer(&self.kv, self.identities.as_ref(), &ask).await?)
+                Some(answer(&self.kv, self.identities.as_ref(), self.humans.as_ref(), &ask).await?)
             };
             if !matches!(outcome, Some(TeamAdminOutcome::Changed)) {
                 return Ok(outcome);

@@ -491,12 +491,14 @@ async fn teams(mcp: &Mcp, bus: Bus<'_>) {
         }
     };
     let signer = config.connection.creds.is_some();
-    let identities = if signer {
-        None
+    let (identities, humans) = if signer {
+        (None, None)
     } else {
-        crate::records::direct_kv::DirectKv::whole(js, domain, ants_proto::IDENTITIES_BUCKET).await.ok()
+        use crate::records::direct_kv::DirectKv;
+        let identities = DirectKv::whole(js, domain, ants_proto::IDENTITIES_BUCKET).await.ok();
+        (identities, DirectKv::new(js, domain, ants_proto::HUMANS_BUCKET).await.ok())
     };
-    let changer = crate::teams::keeper::Changer { client: client.clone(), kv, identities, signer };
+    let changer = crate::teams::keeper::Changer { client: client.clone(), kv, identities, humans, signer };
     mcp.with_teams(crate::mcp::nats_teams(changer, config.ant.clone()));
 }
 
