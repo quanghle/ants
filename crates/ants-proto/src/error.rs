@@ -32,10 +32,10 @@ pub enum Error {
          characters reordering text"
     )]
     InvalidTitle(String),
-    #[error("a channel's description of {0} characters is too long: at most {MAX_CHANNEL_DESCRIPTION}")]
+    #[error("a description of {0} characters is too long: at most {MAX_CHANNEL_DESCRIPTION}")]
     LongDescription(usize),
     #[error(
-        "invalid channel description {0:?}: use text without control characters but whitespace, or \
+        "invalid description {0:?}: use text without control characters but whitespace, or \
          characters reordering text"
     )]
     InvalidDescription(String),
