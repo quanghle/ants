@@ -274,3 +274,54 @@ fn a_request_is_checked_and_its_entry_loads_as_the_ant_checked() {
     let err = format!("{:#}", parse_all(&listed).unwrap_err());
     assert!(err.contains("manager lead-docs was added from a template"), "{err}");
 }
+
+#[test]
+fn the_turn_budget_is_the_ant_s_else_its_template_s_else_the_top_level_one() {
+    let text = |top: &str, template: &str| {
+        format!(
+            "{top}\nsage = \"system-sage\"\n[[ant_template]]\nname = \"worker\"\nmanagers = [\"lead\"]\nmax_ants = 2\n\
+             workdirs = [\".\"]\nharnesses = [\"copilot\"]\n{template}\n\
+             [[ant]]\nname = \"lead\"\nworkdir = \".\"\n\
+             [[ant]]\nname = \"dev-a\"\nworkdir = \".\"\nturn_budget = 3\n\
+             [[ant]]\nname = \"lead-a\"\ntemplate = \"worker\"\nadded_by = \"lead\"\n"
+        )
+    };
+    let budgets = |text: &str| {
+        let ants = parse_all(text).unwrap().ants;
+        let budget = |ant: &Ant| config(ant.clone()).unwrap().policy.escalation.turn_budget;
+        ants.iter().map(|ant| (ant.name.as_str().to_owned(), ant.turn_budget, budget(ant))).collect::<Vec<_>>()
+    };
+    let own = |name: &str, set: Option<u32>, budget: u32| (name.to_owned(), set, budget);
+    assert_eq!(
+        budgets(&text("", "")),
+        [
+            own("lead", None, ants_proto::DEFAULT_TURN_BUDGET),
+            own("dev-a", Some(3), 3),
+            own("lead-a", None, ants_proto::DEFAULT_TURN_BUDGET),
+            own("system-messenger", None, ants_proto::DEFAULT_TURN_BUDGET),
+            own("system-sage", None, ants_proto::DEFAULT_TURN_BUDGET),
+        ],
+        "unset everywhere: 8"
+    );
+    assert_eq!(
+        budgets(&text("turn_budget = 20", "")),
+        [
+            own("lead", Some(20), 20),
+            own("dev-a", Some(3), 3),
+            own("lead-a", Some(20), 20),
+            own("system-messenger", Some(20), 20),
+            own("system-sage", Some(20), 20),
+        ],
+        "the top-level one reaches every ant setting none, the built-in ones too"
+    );
+    let templated = budgets(&text("turn_budget = 20", "turn_budget = 5"));
+    assert_eq!(templated[2], own("lead-a", Some(5), 5), "the template's over the top-level one");
+    assert_eq!(templated[0], own("lead", Some(20), 20));
+
+    for (top, template, ant) in [("turn_budget = 0", "", ""), ("", "turn_budget = 0", ""), ("", "", "turn_budget = 0")]
+    {
+        let text = text(top, template).replace("turn_budget = 3", ant);
+        let e = format!("{:#}", parse_all(&text).unwrap_err());
+        assert!(e.contains("turn_budget must be at least 1"), "{e}");
+    }
+}

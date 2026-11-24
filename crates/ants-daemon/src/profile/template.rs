@@ -121,6 +121,8 @@ pub struct AntTemplate {
     pub max_daily_cost: Option<f64>,
     #[serde(default = "default_max_harnesses")]
     pub max_harnesses: usize,
+    /// The `turn_budget` of its ants; unset: the top-level one.
+    pub turn_budget: Option<u32>,
     #[serde(default = "default_prompt_timeout", deserialize_with = "ants_proto::duration::deserialize")]
     pub prompt_timeout: Duration,
     #[serde(default = "default_max_tool_calls")]
@@ -306,6 +308,9 @@ impl AntTemplate {
         if self.spend_warn_percent >= 100 {
             bail!("{}: spend_warn_percent must be below 100 (0 for no warning)", at());
         }
+        if self.turn_budget == Some(0) {
+            bail!("{}: turn_budget must be at least 1", at());
+        }
         crate::harness::validate_env(&self.env).with_context(at)?;
         crate::permission::Allowlist::parse(&self.allow).with_context(|| format!("{}: allow", at()))?;
         for (set, rules) in &self.allow_sets {
@@ -408,6 +413,7 @@ impl AntTemplate {
             max_daily_tokens: ceiling.cap("max_daily_tokens", request.max_daily_tokens, self.max_daily_tokens)?,
             max_daily_cost: ceiling.cap("max_daily_cost", request.max_daily_cost, self.max_daily_cost)?,
             spend_warn_percent: self.spend_warn_percent,
+            turn_budget: self.turn_budget,
             worktree_base: self.worktree_base,
             publish: self.publish,
             escalate_to: vec![manager.clone()],
