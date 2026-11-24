@@ -57,6 +57,7 @@ pub(super) async fn ant_mcp_sending(
         workers: DEFAULT_WORKERS,
         notes: notes.clone(),
         saves: SaveThrough::Bucket,
+        pause: ants_daemon::pause::Pause::new(false),
     };
     let trails = Trails::new(conducting).await.unwrap();
     let mcp = Mcp::start(user, &dir.join(name), outbox, colony, notes, humans, None).await.unwrap();

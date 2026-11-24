@@ -1,7 +1,7 @@
 //! A run from its start to its end: its steps to ants and humans, the reply to one answering it, a human's own or
 //! their assistant's, a re-ask for a reply matching a schema; started by a human or a schedule's firing; stopped and
 //! resumed, by a human or an admin order, asked at once or not stored, and the steps a run counts across them; a step
-//! to a team going to its lead.
+//! to a team going to its lead; a paused conductor starting none and holding its steps.
 
 use super::*;
 
@@ -749,4 +749,35 @@ async fn admin_orders_stop_and_resume_a_run_once_the_conductor_s_daemon_is_back(
     }
     drop(conducted);
     taking.abort();
+}
+
+/// A paused conductor starts no run, naming how to resume it, and holds the steps of its runs until it resumes.
+#[tokio::test]
+async fn a_paused_conductor_starts_no_run_and_holds_its_runs_steps_until_resumed() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let script = r#"[await agent("one", ant="dev"), await agent("two", ant="dev")]"#;
+    let run = lead.start(script, TrailLimits::default()).await;
+    let first = lead.step().await;
+    lead.pause.replace(&ants_daemon::pause::Pause::new(true));
+    assert!(lead.reply(&first, "1").await, "a reply waiting is taken");
+    assert!(lead.sends_no_step(Duration::from_millis(500)).await, "no step goes out while paused");
+    let human = ants_test_support::human();
+    let start = StartRun {
+        trail: TrailSource::Script(format!("{META}{script}")),
+        args: Value::Null,
+        owner: Some(human.clone()),
+        origin: Origin { by: Starter::Human { user: human }, channel: None },
+        thread: ThreadId::generate(),
+        limits: TrailLimits::default(),
+        spends_from: None,
+    };
+    let refused = lead.trails.start(start).await.unwrap_err();
+    assert!(refused.contains("is paused") && refused.contains("'ants resume lead'"), "{refused}");
+    lead.pause.replace(&ants_daemon::pause::Pause::new(false));
+    let second = lead.step().await;
+    assert_eq!(second.text, "two");
+    assert!(lead.reply(&second, "2").await);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(["1", "2"]) });
 }

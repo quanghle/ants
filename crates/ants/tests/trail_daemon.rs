@@ -86,6 +86,8 @@ struct Conductor {
     /// Set, the next message the conductor sends fails, and is not sent.
     failing: Arc<std::sync::atomic::AtomicBool>,
     serving: JoinHandle<()>,
+    /// Whether the conductor is paused.
+    pause: ants_daemon::pause::Pause,
 }
 
 /// Thread notes in memory.
@@ -192,6 +194,7 @@ async fn conductor_refusing(
     refused: Option<UserId>,
 ) -> Conductor {
     let lead = ant("lead");
+    let pause = ants_daemon::pause::Pause::new(false);
     let (client, js) = ants_daemon::bus::connect(&server.url, None, None, &lead, "conductor").await.unwrap();
     let attempts = ants_daemon::bus::ensure_attempts(&js, None, &lead).await.unwrap();
     let (tx, sent) = mpsc::unbounded_channel();
@@ -232,6 +235,7 @@ async fn conductor_refusing(
         workers: ants_daemon::trail::DEFAULT_WORKERS,
         notes: notes.clone(),
         saves: ants_daemon::trail::SaveThrough::Bucket,
+        pause: pause.clone(),
     };
     let trails = Trails::new(conducting).await.unwrap();
     trails.restore().await;
@@ -239,7 +243,7 @@ async fn conductor_refusing(
         let trails = trails.clone();
         async move { trails.serve().await }
     });
-    Conductor { trails, js, client, sent, told: Vec::new(), invited: Vec::new(), notes, failing, serving }
+    Conductor { trails, js, client, sent, told: Vec::new(), invited: Vec::new(), notes, failing, serving, pause }
 }
 
 fn ants_binary() -> PathBuf {

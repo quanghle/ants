@@ -676,6 +676,11 @@ the longest wall time, so a finished run stays at least 30 days. The full layout
   while a resume is under way stops the resumed run. A run continued from its records, by a firing delivered again or
   after a restart, is continued one at a time with these too, so a resume beside it resumes it once. An admin's `ants ant resume-trail ANT RUN`
   resumes it by admin order the same way, limit flags included.
+- **Paused conductor:** a conductor paused ([config.md](config.md#pausing-an-ant)) starts no run: `ants trail run`,
+  `run_trail` and a schedule's trail firing that reaches it are refused with `ANT is paused and starts no trail run:
+  'ants resume ANT' resumes it`. Its runs make no pass while it is paused, so none sends a step; the replies already
+  taken wait, and each run woken meanwhile makes its pass once the conductor resumes. A pass under way as it pauses
+  ends first. Wall time keeps running while paused.
 
 ```sh
 ants trail runs

@@ -52,6 +52,10 @@ impl Trails {
 
     pub(super) async fn start_as(&self, run: RunId, start: StartRun) -> Result<RunId, String> {
         let StartRun { trail, args, owner, origin, thread, mut limits, spends_from } = start;
+        if self.inner.pause.get().is_some() {
+            let ant = &self.inner.ant;
+            return Err(format!("{ant} is paused and starts no trail run: 'ants resume {ant}' resumes it"));
+        }
         limits.check().map_err(|e| e.to_string())?;
         let _answering = match &spends_from {
             Some(_) => Some(self.inner.answering.lock().await),

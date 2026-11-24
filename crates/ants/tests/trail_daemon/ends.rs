@@ -78,6 +78,7 @@ async fn conductor_failing(server: &NatsServer, fails: usize) -> (Conductor, Arc
         }
     });
     let notes = Arc::new(MemoryNotes::default());
+    let pause = ants_daemon::pause::Pause::new(false);
     let colony: ants_daemon::mcp::Colony = Arc::new(|| Box::pin(async { Ok(Vec::new()) }));
     let conducting = Conducting {
         js: js.clone(),
@@ -93,6 +94,7 @@ async fn conductor_failing(server: &NatsServer, fails: usize) -> (Conductor, Arc
         workers: ants_daemon::trail::DEFAULT_WORKERS,
         notes: notes.clone(),
         saves: ants_daemon::trail::SaveThrough::Bucket,
+        pause: pause.clone(),
     };
     let trails = Trails::new(conducting).await.unwrap();
     trails.restore().await;
@@ -110,6 +112,7 @@ async fn conductor_failing(server: &NatsServer, fails: usize) -> (Conductor, Arc
         notes,
         failing: Default::default(),
         serving,
+        pause,
     };
     (conductor, tried)
 }

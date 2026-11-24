@@ -327,7 +327,8 @@ pub struct Firing {
     pub thread: Option<ThreadId>,
     pub reason: String,
     pub at: DateTime<Utc>,
-    /// The firing it replaces: the same watcher's last, whose wake is withdrawn while it still waits in the queue.
+    /// The firing it replaces: the same watcher's last, or the firing a refire follows, whose wake is withdrawn while
+    /// it still waits in the queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
     /// Whether it is a watcher's last, its check having reported it done: its delivery retires the watcher.
@@ -338,7 +339,7 @@ pub struct Firing {
 impl Firing {
     /// Whether it is a watcher's.
     pub fn watched(&self) -> bool {
-        self.replaces.is_some() || self.last || self.reason.starts_with(WATCH_REASON)
+        self.last || self.reason.starts_with(WATCH_REASON)
     }
 }
 
@@ -504,7 +505,8 @@ pub async fn prepare_firing(
 }
 
 /// Confirm an actual successful wake. A retry of the same confirmation is a no-op; an older id cannot confirm a
-/// newer firing. Initial delivery is followed by at most three refires, each an hour after successful delivery.
+/// newer firing. Initial delivery is followed by at most three refires, each an hour after successful delivery and
+/// replacing the firing before it ([`Firing::replaces`]).
 pub async fn confirm_delivered(
     items: &dyn Items,
     id: &ItemId,
@@ -767,7 +769,9 @@ async fn prepare(
     now: DateTime<Utc>,
     reason: &str,
 ) -> Result<Firing, StoreError> {
-    prepare_as(items, item, reminder, now, reason, None, false).await
+    // A refire replaces the occurrence's firing before it, withdrawn if it still waits in the ant's queue.
+    let replaces = reminder.delivered.as_ref().filter(|_| reminder.occurrence_firings > 0).map(|d| d.id.clone());
+    prepare_as(items, item, reminder, now, reason, replaces, false).await
 }
 
 /// [`prepare`] a firing replacing the firing `replaces`, the last of its watcher with `last`.

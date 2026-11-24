@@ -536,7 +536,8 @@ conflict returns the current item.
 `sense_remind` records a time, condition or watch trigger and supports acknowledgment, postponement, renewal and
 dropping.
 Time triggers accept an absolute time, a relative delay, or a recurring daily or weekly UTC time. An unacknowledged
-firing fires again at most three times, an hour apart; a retried delivery or a daemon taking over never fires it twice.
+firing fires again at most three times, an hour apart, each refire replacing the one before it: one still waiting in the
+ant's queue is withdrawn, so a busy ant is prompted once. A retried delivery or a daemon taking over never fires it twice.
 
 For example, `{"action":"create","title":"Check CI","trigger":{"kind":"after","seconds":600}}` creates a relative
 reminder. Other triggers are `{"kind":"at","at":"2026-12-01T12:00:00Z"}`,
@@ -551,7 +552,9 @@ representable, is refused with `invalid_trigger`.
 The active daemon fires reminders; a standby fires none until it takes the ant over, then goes on with the stored
 schedule and any firing pending. Between firings the schedule sleeps until the next is due or a call to sense changes
 the ant's items: a call only reading them, or changing another ant's, leaves it asleep. While the ant's identity is
-dormant nothing fires. A firing wakes the ant ([Wake requests](architecture.md#wake-requests)) with the reminder's text
+dormant, or the ant is paused ([config.md](config.md#pausing-an-ant)), nothing fires: no reminder, watcher check or
+dream, nor a firing left pending; each one due meanwhile fires once on its revival or resuming, its refires counting
+from then. A firing wakes the ant ([Wake requests](architecture.md#wake-requests)) with the reminder's text
 and why it fired, on its source thread, or a new thread when no source thread remains. A firing whose wake fails stays
 pending and is tried again a minute later, the firings after it with it, while memory maintenance and dreams go on.
 

@@ -73,6 +73,7 @@ impl Conductor {
             workers: ants_daemon::trail::DEFAULT_WORKERS,
             notes,
             saves: ants_daemon::trail::SaveThrough::Bucket,
+            pause: ants_daemon::pause::Pause::new(false),
         };
         let trails = Trails::new(conducting).await.unwrap();
         trails.restore().await;

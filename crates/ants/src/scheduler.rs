@@ -8,7 +8,8 @@
 //! its key `<schedule>.<unix time>` in [`ants_proto::WEBHOOKS_BUCKET`] and its `Nats-Msg-Id`. A firing goes out up to
 //! [`GRACE`] late, for a daemon restarted or a hub briefly away. One missed by more is skipped, unless the schedule
 //! sets `catch_up`: then, once a daemon runs and reaches the hub again, the latest firing missed goes out late, under
-//! the same key, and the older ones are skipped.
+//! the same key, and the older ones are skipped. A firing for an ant paused, as its colony entry says, is missed
+//! alike: skipped, or with `catch_up` held, a later one held in its place, until the ant resumes and it goes out late.
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -53,27 +54,75 @@ pub async fn run(schedule: Schedule) -> Result<()> {
     let grace = TimeDelta::from_std(GRACE)?;
     let now = Utc::now();
     let mut cursor = now - grace;
+    // The firing waiting for its paused ant to resume, with `catch_up`.
+    let mut held = None;
     if let Some(missed) = missed(&schedule, DateTime::<Utc>::MIN_UTC, now) {
-        send(&bus, &schedule, missed).await;
+        held = send_unless_paused(&bus, &schedule, missed).await;
     }
     loop {
         let Some(due) = schedule.when.next_after(cursor) else {
+            if let Some(held) = held {
+                tracing::warn!(schedule = %name, due = %held, "the schedule fires no more; its firing held waits for the ant to resume");
+                while paused(&bus, &schedule).await {
+                    tokio::time::sleep(NAP).await;
+                }
+                send(&bus, &schedule, held).await;
+            }
             tracing::warn!(schedule = %name, "the schedule fires no more");
             return Ok(());
         };
+        if let Some(waiting) = held {
+            // Looking again every nap whether the ant resumed, until the next firing is due.
+            if Utc::now() < due {
+                tokio::time::sleep((due - Utc::now()).to_std().unwrap_or_default().min(NAP)).await;
+            }
+            if !paused(&bus, &schedule).await {
+                send(&bus, &schedule, waiting).await;
+                held = None;
+            }
+            if Utc::now() < due {
+                continue;
+            }
+        }
         sleep_until(due).await;
         let now = Utc::now();
         if now - due > grace {
             match missed(&schedule, cursor, now) {
-                Some(missed) => send(&bus, &schedule, missed).await,
+                Some(missed) => held = send_unless_paused(&bus, &schedule, missed).await.or(held),
                 None => tracing::warn!(schedule = %name, %due, "skipping a firing missed by more than {GRACE:?}"),
             }
             cursor = due.max(now - grace);
             continue;
         }
-        send(&bus, &schedule, due).await;
+        held = send_unless_paused(&bus, &schedule, due).await.or(held);
         cursor = due;
     }
+}
+
+/// Send the firing due at `due` unless the schedule's ant is paused: then return it to hold with `catch_up`, else
+/// skip it.
+async fn send_unless_paused(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    if !paused(bus, schedule).await {
+        send(bus, schedule, due).await;
+        return None;
+    }
+    let name = &schedule.name;
+    if schedule.catch_up {
+        tracing::info!(schedule = %name, %due, "holding a firing until its ant resumes");
+        return Some(due);
+    }
+    tracing::warn!(schedule = %name, %due, "skipping a firing: its ant is paused");
+    None
+}
+
+/// Whether the ant the schedule sends to is paused; a schedule to a channel never waits. An entry that cannot be read
+/// counts as not paused.
+async fn paused(bus: &Bus, schedule: &Schedule) -> bool {
+    let ants_proto::Destination::Ant(ant) = &schedule.destination else { return false };
+    bus.paused(ant).await.unwrap_or_else(|e| {
+        tracing::debug!(schedule = %schedule.name, error = format!("{e:#}"), "reading whether the ant is paused");
+        false
+    })
 }
 
 /// With `catch_up`, the last firing after `after` and up to `now` (looking back [`WEBHOOK_RETENTION`] at most, so its

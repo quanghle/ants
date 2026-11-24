@@ -137,6 +137,7 @@ pub(super) async fn trails(bus: Bus<'_>, services: &Services) -> Option<Trails> 
             Some(_) => crate::trail::SaveThrough::Signer,
             None => crate::trail::SaveThrough::Bucket,
         },
+        pause: config.pause.clone(),
     };
     match Trails::new(conducting).await {
         Ok(trails) => {

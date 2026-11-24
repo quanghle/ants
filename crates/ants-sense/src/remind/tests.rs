@@ -79,7 +79,7 @@ async fn a_malformed_reminder_hides_itself_alone_from_listings() {
 }
 
 #[tokio::test]
-async fn refires_are_hour_apart_capped_at_three_and_snooze_uses_a_new_id() {
+async fn refires_are_hour_apart_capped_at_three_replace_the_one_before_and_snooze_uses_a_new_id() {
     let (sense, items) = fixture(SharedLog::default()).await;
     let id = create(&sense, json!({"kind":"after","seconds":60})).await;
     let first_due = now() + Duration::minutes(1);
@@ -88,6 +88,9 @@ async fn refires_are_hour_apart_capped_at_three_and_snooze_uses_a_new_id() {
         let at = first_due + Duration::hours(firing - 1);
         let prepared = prepare_firing(&*items, &id, at, "time").await.unwrap().unwrap();
         assert_eq!(prepared.id, format!("{id}:{firing}"));
+        let replaced = (firing > 1).then(|| format!("{id}:{}", firing - 1));
+        assert_eq!(prepared.replaces, replaced, "a refire replaces the firing before it");
+        assert!(!prepared.watched());
         confirm_delivered(&*items, &id, &prepared.id, at).await.unwrap();
         assert!(prepare_firing(&*items, &id, at, "early").await.unwrap().is_none());
     }
