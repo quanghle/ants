@@ -202,6 +202,12 @@ impl NatsServer {
         Self::spawn("127.0.0.1:-1", conf)
     }
 
+    /// Like [`spawn_with`](Self::spawn_with), listening on `port` of 127.0.0.1 (see [`free_port`]), so that a client
+    /// connected to it reconnects after [`stop`](Self::stop) and [`start_again`](Self::start_again).
+    pub fn spawn_on(port: u16, conf: impl FnOnce(&Path) -> String) -> Option<Self> {
+        Self::spawn(&format!("127.0.0.1:{port}"), conf)
+    }
+
     fn spawn(listen: &str, conf: impl FnOnce(&Path) -> String) -> Option<Self> {
         if !have("nats-server") {
             return None;

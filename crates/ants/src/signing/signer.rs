@@ -17,7 +17,8 @@
 //! renews the credentials such registrations granted ([`crate::signing::registrar`]), and answers the enrollment requests a
 //! machine's daemon sends carrying an admin's order to add or retire an ant there ([`ordered`]). Each time it connects,
 //! it records its machine as the one holding the account key ([`AccountHolder`]), for `ants chat` and `ants machines`
-//! elsewhere to name it.
+//! elsewhere to name it. While connected, it creates the buckets held in memory again when a restart of
+//! nats-server dropped them, as no ant's daemon or web page may create a bucket.
 //!
 //! The signer trusts only what it can check itself: the request is signed by the manager's credentials of the team's
 //! account, and its template is read from the signer's own config file ([`config::signer_templates`]), never taken
@@ -62,6 +63,10 @@ const MAX_WAITING: usize = 3;
 pub const TICK: Duration = Duration::from_secs(1);
 /// Least time a request must have left for a human to be asked about it.
 const LEAST_ASKING: Duration = Duration::from_secs(10);
+/// Every how many ticks the signer creates the buckets held in memory that a restart of nats-server dropped
+/// ([`ants_daemon::hub::IN_MEMORY`]): at [`TICK`], twice per heartbeat of a presence
+/// ([`ants_proto::PRESENCE_HEARTBEAT`]), so a web page's is stored again at its next heartbeat or the one after.
+const BUCKET_TICKS: u32 = 5;
 
 /// How `ants signer` runs.
 pub struct Options<'a> {
@@ -72,7 +77,8 @@ pub struct Options<'a> {
     pub approval_timeout: Duration,
     /// How long it stays connected with one set of the credentials it issues itself ([`crate::credentials::approver::AUTO_RECONNECT`]).
     pub reconnect: Duration,
-    /// How often it looks for decisions ([`TICK`]).
+    /// How often it looks for decisions ([`TICK`]); every few ticks, it creates the buckets held in memory found
+    /// missing.
     pub tick: Duration,
 }
 
@@ -184,6 +190,7 @@ pub async fn serve(
                 tracing::warn!("answering trail saves until the next reconnect: {e:#}");
             }
         }));
+        let _buckets = AbortOnDrop(tokio::spawn(keep_in_memory(approver.hub().clone(), options.tick * BUCKET_TICKS)));
         approver.client.flush().await?;
         let until = tokio::time::sleep(options.reconnect);
         let mut ticks = tokio::time::interval(options.tick);
@@ -246,6 +253,20 @@ async fn record_holder(approver: &Approver, js_domain: Option<&JsDomain>, holder
             error = format!("{e:#}"),
             "recording where the account key is failed; `ants init` creates the {MACHINES_BUCKET} bucket"
         );
+    }
+}
+
+/// Create the buckets held in memory that are missing ([`ants_daemon::hub::ensure_in_memory`]) now and again every
+/// `every`, for the heartbeats of daemons and web pages, whose credentials create no bucket, to be stored again after a
+/// restart of nats-server. Its own task, so that a hub slow to answer holds up no request.
+async fn keep_in_memory(hub: async_nats::jetstream::Context, every: Duration) {
+    let mut ticks = tokio::time::interval(every);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticks.tick().await;
+        if let Err(e) = Box::pin(ants_daemon::hub::ensure_in_memory(&hub)).await {
+            tracing::debug!(error = format!("{e:#}"), "creating the buckets held in memory");
+        }
     }
 }
 
@@ -816,6 +837,43 @@ mod tests {
         assert_eq!(crate::ants::machines::list(&h_js).await.unwrap(), [], "the record is no machine's");
         let as_human = DirectKv::new(&h_js, None, MACHINES_BUCKET).await.unwrap();
         assert!(as_human.put(ACCOUNT_HOLDER_KEY, b"{}".to_vec()).await.is_err(), "a human only reads it");
+    }
+
+    /// The buckets held in memory, which a restart of nats-server drops, the signer creates again: a web page, whose
+    /// credentials create no bucket, has its presence stored once the server is back, and daemons their colony
+    /// entries.
+    #[tokio::test]
+    async fn the_signer_creates_the_buckets_a_restart_of_the_server_dropped() {
+        use ants_proto::{Following, PRESENCE_BUCKET, presence_key};
+        let Some(mut server) = Server::start_restartable() else { return };
+        let config = server.dir().join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        let alice = p("alice");
+        let (page, device) = crate::test_support::presence::page(&server, &alice).await;
+        let subject = format!("$KV.{PRESENCE_BUCKET}.{}", presence_key(&alice, &device, Following::Inbox));
+        let put = async || match page.publish(subject.clone(), "{}".into()).await {
+            Ok(ack) => ack.await.is_ok(),
+            Err(_) => false,
+        };
+        assert!(!put().await, "no bucket, and a page creates none");
+
+        let options = Options { config: &config, approval_timeout: WAIT, reconnect: WAIT * 3, tick: REPEAT };
+        let (url, team) = (server.url.clone(), server.dir().join("auth"));
+        let serving = Box::pin(serve(&url, &team, None, &options, |_, _| {}, pending()));
+        let check = async {
+            crate::test_support::eventually("the page's presence stored", put).await;
+            server.stop();
+            server.start_again();
+            let restarted = "the page's presence stored after the restart";
+            ants_test_support::eventually_within(WAIT, restarted, put).await;
+            let (_, h_js) = server.connect_as(&alice, Role::Human).await;
+            let colony = h_js.get_key_value(ants_proto::COLONY_BUCKET).await;
+            assert!(colony.is_ok(), "the colony bucket is back: {:?}", colony.err());
+        };
+        tokio::select! {
+            r = serving => panic!("the signer stopped: {r:?}"),
+            () = check => {}
+        }
     }
 
     #[tokio::test]
