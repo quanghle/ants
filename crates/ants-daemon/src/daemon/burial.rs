@@ -24,6 +24,7 @@ impl Inbox<'_> {
     /// ([`Inbox::hold_junk`]), as does one whose dead letter went to the machine's outbox: it is counted then, and
     /// terminated once the hub's stream holds its dead letter.
     pub(super) async fn bury_unanswerable(&self, msg: &jetstream::Message, error: &str) {
+        let error = &*self.redactor.redact(error);
         tracing::warn!(error, subject = %msg.subject, "dead-lettering a message without answering it");
         let kept = self.holds.junk.release(msg);
         let buried = if kept {
@@ -71,6 +72,7 @@ impl Inbox<'_> {
     /// default human), and terminate it. A channel post names its thread's owner ([`Inbox::admit_post`]), and its
     /// envelope does too. The dead letter of a channel post keeps its payload.
     pub(super) async fn bury(&self, incoming: &Incoming, msg: &jetstream::Message, error: &str) -> Result<()> {
+        let error = &*self.redactor.redact(error);
         let envelope = incoming.post.is_none().then_some(&incoming.envelope);
         let dead = dead::letter_for(self.ant, msg, envelope, error, bus::max_payload(self.client))?;
         self.bury_letter(incoming, msg, &dead, Letter::New).await

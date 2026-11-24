@@ -311,6 +311,9 @@ impl Fake {
             log.locked().doomed_failed += 1;
             return responder.respond_with_internal_error("doomed");
         }
+        if text.split_whitespace().any(|w| w == "leaks") {
+            return responder.respond_with_internal_error(format!("failed on: {text}"));
+        }
         if text.starts_with("flaky") {
             let mut log = log.locked();
             if !log.flaky_failed.contains(&text) {

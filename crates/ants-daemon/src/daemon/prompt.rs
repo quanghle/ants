@@ -281,7 +281,7 @@ impl Inbox<'_> {
         let text = [reply.text, notice].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
         let text = fit_to(self.redactor.redact(&text).into_owned(), reply_room(self.client));
         // Taken while the turn lasts, and kept with the answer, so a retry's reply carries them too.
-        let title = self.mcp.and_then(|mcp| mcp.take_title(thread));
+        let title = self.mcp.and_then(|mcp| mcp.take_title(thread)).map(|t| self.redactor.redact(&t).into_owned());
         let files = self.mcp.and_then(|mcp| mcp.take_reply_files(thread));
         let files = files.map(|(dir, paths)| GivenFiles { dir, paths, stored: None });
         let given = Given { text, limit, unanswered, tokens: measured.tokens, title, files };
