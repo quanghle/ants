@@ -19,7 +19,7 @@ use super::delivery::reply_id;
 use super::holds::Stalled;
 use super::queue::{Place, Retry, queued_message};
 use super::steering::Requeue;
-use super::{Handling, InHand, Inbox, Incoming, MAX_ATTEMPTS, MAX_DELIVER};
+use super::{Handling, InHand, Inbox, Incoming, MAX_ATTEMPTS, MAX_DELIVER, Steered};
 
 /// Who withdrew a message before the ant was prompted with it.
 struct Withdrawal {
@@ -335,7 +335,8 @@ impl Inbox<'_> {
     /// unless no reply can go to it: a webhook's goes to the thread's owner, and one to an ant out of turns, or to a
     /// channel post, to the human who withdrew it. The human an assistant withdrew a message for by a record of its own
     /// is told too, unless the notice goes to it. What a failed attempt kept on the machine for the retry, the harness's
-    /// answer or its reply, is forgotten.
+    /// answer or its reply, is forgotten. The ant goes idle on the thread then, unless the message joined a prompt
+    /// running there.
     async fn withdrawn(&self, Handling { incoming, msg, seq }: Handling<'_>, withdrawal: &Withdrawal) -> Result<()> {
         let (by, on_behalf_of) = (&withdrawal.by, withdrawal.on_behalf_of.as_ref());
         let envelope = &incoming.envelope;
@@ -386,6 +387,10 @@ impl Inbox<'_> {
         }
         self.done(msg, seq).await?;
         self.marks.answered.forget_kept(envelope).await;
+        // A message joining a prompt leaves the thread to it; any other was the thread's turn, which ends here.
+        if incoming.steered != Steered::Joining {
+            status::state(self.client, self.ant, thread, State::Idle);
+        }
         Ok(())
     }
 

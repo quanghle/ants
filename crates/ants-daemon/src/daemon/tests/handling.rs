@@ -207,6 +207,43 @@ async fn a_queued_message_is_listed_and_withdrawn_while_the_running_prompt_goes_
     assert!(matches!(withdraw(&bus, &c).await, Some(MessageMark::Finished { .. })), "c is answered already");
 }
 
+/// A message told it waits, then withdrawn, ends its turn with the ant idle on the thread: the clients that heard its
+/// turn come take the thread for one at work until then.
+#[tokio::test]
+async fn a_message_withdrawn_after_it_was_told_it_waits_ends_with_the_ant_idle() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    let mut replies = bus.replies().await;
+    let (launch, log, gate) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let t1 = ThreadId::generate();
+    let mut statuses = bus.client.subscribe(subject::status(&bus.dev, &t1)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    bus.send(&t1, "hold a").await;
+    let (b, _) = bus.send_ant(&t1, "b").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let mut next = async || {
+            let msg = timeout(WAIT, statuses.next()).await.expect("no status").unwrap();
+            serde_json::from_slice::<StatusEvent>(&msg.payload).unwrap().update
+        };
+        while next().await != (StatusUpdate::Queued { message: b.id, ahead: 1 }) {}
+        until("the prompt to run", || log.locked().prompted == 1).await;
+        assert_eq!(withdraw(&bus, &b).await, None, "b is withdrawn");
+        gate.add_permits(1);
+        assert_eq!(next_reply(&mut replies).await, (t1.clone(), "hold a".to_owned()));
+        let notice = next_envelope(&mut replies).await;
+        assert_eq!((notice.text.as_str(), notice.in_reply_to), (WITHDRAWN, Some(b.id)));
+        while next().await != (StatusUpdate::Queued { message: b.id, ahead: 0 }) {}
+        let idle = StatusUpdate::State { state: State::Idle };
+        assert_eq!(next().await, idle, "b's turn ends with the ant idle on the thread");
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    assert_eq!(log.locked().answered, ["hold a"], "b never reached the harness");
+    assert_eq!(bus.unacked().await, 0);
+}
+
 #[tokio::test]
 async fn a_message_awaiting_its_retry_is_listed_ahead_of_its_thread_and_withdrawn_before_it() {
     use ants_proto::MessageMark;
