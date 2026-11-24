@@ -10,6 +10,9 @@
 //! `post_channel` starts a channel thread the ant creates: its escalations go up the ant's chain, whichever ant
 //! gets stuck on it (see [`ants_proto::Escalation::new_from`]).
 //! `manage_channel` asks the channel manager to change a channel the ant owns (see [`crate::chanadm`]).
+//! `list_teams` shows the teams, and `manage_team` changes a team the ant manages through `ants signer` (see
+//! [`crate::teams::keeper`]); `send_message` and `ask_ant` to a team reach its lead, and `list_ants` and `route` keep
+//! to a team's ants when given one (see `teams`).
 //! `react` adds or removes the ant's reaction to a message, by default the one being handled, and `list_reactions`
 //! lists the reactions to a message the ant reads (see [`crate::records::reactions`]).
 //! `suggest_thread_title` has the turn's reply on the thread suggest a title for it ([`Envelope::title`],
@@ -75,6 +78,7 @@ mod reactions;
 mod routing;
 mod saving;
 mod serve;
+mod teams;
 mod tips;
 mod tools;
 mod trails;
@@ -96,6 +100,7 @@ pub use reactions::{ReactionAsker, local_reaction_asker, nats_reaction_asker};
 pub(crate) use routing::why_unserved;
 pub use routing::{Colony, ColonyLookup, jetstream_colony, jetstream_lookup};
 pub use serve::bridge_stdio;
+pub use teams::{TeamAccess, nats_teams};
 pub use tools::own_names;
 pub use turn::{Completed, Turn};
 
@@ -169,6 +174,7 @@ impl Mcp {
             humans,
             escalator,
             channels: OnceLock::new(),
+            teams: OnceLock::new(),
             lookup: OnceLock::new(),
             admin: OnceLock::new(),
             requester: OnceLock::new(),
@@ -207,6 +213,13 @@ impl Mcp {
     /// Serve `post_channel` through `channels`; without them it is refused.
     pub fn with_channels(&self, channels: ChannelAccess) {
         let _ = self.hub.channels.set(channels);
+    }
+
+    /// Read and change the teams through `teams`, for messages to a team, `list_teams`, `manage_team` and the team
+    /// arguments of `list_ants` and `route`; without them every name is an ant's or a human's, and the team tools are
+    /// refused.
+    pub fn with_teams(&self, teams: TeamAccess) {
+        let _ = self.hub.teams.set(teams);
     }
 
     /// Look recipients up through `lookup` before `send_message` and `ask_ant` reach them; without it no
@@ -449,6 +462,7 @@ struct Hub {
     humans: Registry,
     escalator: Option<Arc<Escalator>>,
     channels: OnceLock<ChannelAccess>,
+    teams: OnceLock<TeamAccess>,
     lookup: OnceLock<ColonyLookup>,
     admin: OnceLock<Arc<dyn Admin>>,
     requester: OnceLock<AntRequester>,

@@ -67,6 +67,15 @@ impl Inbox<'_> {
             }
             None => text,
         };
+        let text = match envelope.team.as_ref().filter(|_| incoming.post.is_none()) {
+            Some(team) => format!(
+                "{}
+
+{text}",
+                team_line(&envelope.from, team)
+            ),
+            None => text,
+        };
         let text = match self.answer_line(envelope, humans).await {
             Some(line) => format!("{line}\n\n{text}"),
             None if let Some(spent) = own => {
@@ -198,6 +207,15 @@ fn summary_note(summary: &SummaryRequest) -> String {
     format!(
         "[ants] A human asks for {what}. Answer with at most 120 words of plain text; use no tools and message no \
          one: the reply is the summary."
+    )
+}
+
+/// The `[ants]` line opening the prompt of a message `from` sent to `team`, which reached the ant as the team's lead.
+pub(in crate::daemon) fn team_line(from: &UserId, team: &UserId) -> String {
+    format!(
+        "[ants] {from} sent this message to team {team}, which this ant leads. Hand the work on to the team's members \
+         (list_teams shows them) with send_message, ask_ant or route with team {team}, or answer it directly; the \
+         answer goes to {from}."
     )
 }
 

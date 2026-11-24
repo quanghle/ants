@@ -746,3 +746,43 @@ async fn the_first_prompt_of_a_session_carries_the_provider_s_brief_asked_with_t
     assert_eq!((&context.thread, context.harness.as_str(), context.machine.as_str()), (&t1, "test", "test-machine"));
     assert_eq!(context.origin, Origin { by: Starter::Human { user: UserId::human() }, channel: None });
 }
+
+/// A member's first prompt of a session opens with the note of its team, read as the session starts, and a message
+/// sent to the team it leads opens with the line telling so; a later prompt of the session has neither.
+#[tokio::test]
+async fn a_member_s_session_starts_with_its_team_note_and_a_message_to_its_team_says_so() {
+    let Some((bus, mut to_human)) = Bus::start().await else { return };
+    bus.js.create_stream(crate::hub::teams_config()).await.unwrap();
+    let kv = crate::teams::open(&bus.js, None).await.unwrap();
+    let backend: UserId = "backend".parse().unwrap();
+    let mut directory = ants_proto::TeamDirectory::default();
+    directory.create(ants_proto::Team::new(backend.clone(), bus.dev.clone(), UserId::human()), None).unwrap();
+    assert!(crate::teams::write(&kv, &directory, 0).await.unwrap());
+    let (launch, log, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let dev_b: UserId = "dev-b".parse().unwrap();
+    let mut to_dev_b = bus.client.subscribe(subject::inbox_of(&dev_b)).await.unwrap();
+    bus.client.flush().await.unwrap();
+    let thread = ThreadId::generate();
+    let asked = Envelope::on_thread(thread.clone(), dev_b.clone(), bus.dev.clone(), "build it");
+    let asked = Envelope { team: Some(backend.clone()), ..asked };
+    bus::publish_json(&bus.js, asked.subject(), &asked, None).await.unwrap();
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        next_envelope(&mut to_dev_b).await;
+        bus.send(&thread, "and now?").await;
+        next_envelope(&mut to_human).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    let answered = log.locked().answered.clone();
+    let note = directory.note_for(&bus.dev).unwrap();
+    assert!(note.starts_with("[ants] You are a member of team backend."), "{note}");
+    assert!(answered[0].starts_with(&format!("{note}\n\n")), "{}", answered[0]);
+    let line = super::super::prompt::text::team_line(&dev_b, &backend);
+    assert!(line.starts_with("[ants] dev-b sent this message to team backend, which this ant leads."), "{line}");
+    assert!(answered[0].contains(&format!("{line}\n\nbuild it")), "{}", answered[0]);
+    let later = &answered[1];
+    assert!(!later.contains("member of team") && !later.contains("sent this message to team"), "{later}");
+}

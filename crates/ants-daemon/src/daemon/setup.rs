@@ -469,12 +469,35 @@ async fn connect_mcp(mcp: &mut Mcp, bus: Bus<'_>, redactor: &std::sync::Arc<Reda
         mcp.with_requester(requester.clone());
     }
     mcp.manage_channels(crate::chanadm::nats_admin(client.clone(), js.clone()));
+    teams(mcp, bus).await;
     providers.assign(&config.ant, &config.provider);
     if let Some(provider) = providers.of(&config.ant).await {
         mcp.with_provider(provider);
     }
     assist(mcp, bus).await;
     Ok(())
+}
+
+/// Serve the team tools on `mcp`, changing teams through `ants signer` when the daemon connected with credentials, else
+/// as it would; with a warning, none when the team directory cannot be named.
+async fn teams(mcp: &Mcp, bus: Bus<'_>) {
+    let Bus { config, client, js, .. } = bus;
+    let domain = config.connection.js_domain.as_ref();
+    let kv = match crate::teams::open(js, domain).await {
+        Ok(kv) => kv,
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "serving no team tools");
+            return;
+        }
+    };
+    let signer = config.connection.creds.is_some();
+    let identities = if signer {
+        None
+    } else {
+        crate::records::direct_kv::DirectKv::whole(js, domain, ants_proto::IDENTITIES_BUCKET).await.ok()
+    };
+    let changer = crate::teams::keeper::Changer { client: client.clone(), kv, identities, signer };
+    mcp.with_teams(crate::mcp::nats_teams(changer, config.ant.clone()));
 }
 
 /// How the ant's harnesses start.

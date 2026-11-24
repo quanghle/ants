@@ -77,6 +77,9 @@ pub struct Prompt {
     /// What the channel of the prompt's thread is for, added to the prompt only when it is the first of a session
     /// that started, was loaded or was rebuilt, as the brief is: a session keeps the description it started with.
     pub channel: Option<String>,
+    /// The note of the ant's team, read and added to the prompt only when it is the first of a session, as the brief
+    /// is, before the channel's description: a session keeps the note it started with.
+    pub team: Option<crate::teams::Note>,
     /// Receives when the prompt got its thread's harness, once any wait for a free one is over: before the harness
     /// starts, when it must.
     pub began: Option<oneshot::Sender<tokio::time::Instant>>,
@@ -111,6 +114,7 @@ impl Prompt {
             steering: None,
             brief: None,
             channel: None,
+            team: None,
             began: None,
         }
     }

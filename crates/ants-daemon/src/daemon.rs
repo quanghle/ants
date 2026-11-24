@@ -298,6 +298,7 @@ async fn serve(
         holds: holds::Holds { mcp_sign_ins: services.mcp_sign_ins.clone(), ..holds::Holds::default() },
         provider,
         trails: trails(shared, &services).await,
+        teams: crate::teams::open(&js, config.connection.js_domain.as_ref()).await.ok(),
     };
     let beside = Beside { config, stop, registration: &registration, storage: &storage };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, beside)).await?;
@@ -625,6 +626,8 @@ struct Inbox<'a> {
     /// The trails the ant conducts, which take the replies to their steps ([`Inbox::arrived`]); None when the bus
     /// keeps no runs.
     trails: Option<Trails>,
+    /// The team directory, whose note of the ant's team opens the first prompt of each session.
+    teams: Option<crate::records::direct_kv::DirectKv>,
 }
 
 impl Inbox<'_> {

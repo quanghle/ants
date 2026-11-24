@@ -1,6 +1,7 @@
 //! A run from its start to its end: its steps to ants and humans, the reply to one answering it, a human's own or
 //! their assistant's, a re-ask for a reply matching a schema; started by a human or a schedule's firing; stopped and
-//! resumed, by a human or an admin order, asked at once or not stored, and the steps a run counts across them.
+//! resumed, by a human or an admin order, asked at once or not stored, and the steps a run counts across them; a step
+//! to a team going to its lead.
 
 use super::*;
 
@@ -299,6 +300,41 @@ async fn a_run_its_firing_continues_beside_a_resume_or_a_stop_of_it_is_continued
     assert!(third.reply(&second, &second.text.to_uppercase()).await);
     assert_eq!(third.ended(&run).await, RunState::Done { result: json!(["A", "B"]) });
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// agent(team=) sends the step to the team's lead, marked as addressed to the team; a team with no such name, or named
+/// beside an ant, raises in the script.
+#[tokio::test]
+async fn a_step_to_a_team_goes_to_its_lead() {
+    let Some(server) = NatsServer::start() else { return };
+    init(&server).await;
+    let (_, js) = ants_daemon::bus::connect(&server.url, None, None, &UserId::human(), "teams").await.unwrap();
+    js.create_stream(hub::teams_config()).await.unwrap();
+    let kv = ants_daemon::teams::open(&js, None).await.unwrap();
+    let mut directory = ants_proto::TeamDirectory::default();
+    directory.create(ants_proto::Team::new(ant("reviewers"), ant("reviewer"), UserId::human()), None).unwrap();
+    assert!(ants_daemon::teams::write(&kv, &directory, 0).await.unwrap());
+    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
+    let script = r#"
+out = []
+try:
+    out.append(await agent("x", team="nobody"))
+except RuntimeError as e:
+    out.append(str(e))
+try:
+    out.append(await agent("x", team="reviewers", ant="dev"))
+except RuntimeError as e:
+    out.append(str(e))
+out.append(await agent("review it", team="reviewers"))
+out
+"#;
+    let run = lead.start(script, TrailLimits::default()).await;
+    let step = lead.step().await;
+    assert_eq!((step.to.as_str(), step.text.as_str()), ("reviewer", "review it"));
+    assert_eq!(step.team, Some(ant("reviewers")), "the step says it came through the team");
+    assert!(lead.reply(&step, "fine").await);
+    let refused = json!(["no team nobody", "agent() takes team= alone, without ant= or capability=", "fine"]);
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: refused });
 }
 
 #[tokio::test]

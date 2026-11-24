@@ -2,7 +2,9 @@
 //! read by direct gets naming no subject past a message a stream relayed onto its key, and written by compare-and-set
 //! on the stream sequence of the key's last message.
 
-use ants_proto::{JsDomain, TEAM_DIRECTORY_KEY, TEAMS_BUCKET, TeamDirectory, TeamRefusal};
+use std::time::Duration;
+
+use ants_proto::{JsDomain, TEAM_DIRECTORY_KEY, TEAMS_BUCKET, TeamDirectory, TeamRefusal, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream;
 
@@ -12,6 +14,8 @@ pub mod keeper;
 
 /// How often [`modify`] reads the directory again when another writer changed it meanwhile.
 const TRIES: usize = 10;
+/// How long a read for a prompt or a tool may take before it goes without the directory.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The directory as read: what it holds, a directory breaking the rules read as [`TeamRefusal::Unreadable`], and the
 /// stream sequence of its key's last message, which [`write()`] expects (0 for none).
@@ -56,6 +60,39 @@ pub async fn read_checked(kv: &DirectKv) -> Result<(TeamDirectory, u64)> {
 pub async fn write(kv: &DirectKv, directory: &TeamDirectory, last: u64) -> Result<bool> {
     directory.check()?;
     kv.update(TEAM_DIRECTORY_KEY, serde_json::to_vec(directory)?, last).await
+}
+
+/// The directory of `kv` within [`READ_TIMEOUT`], for a prompt or a tool going on without it: None when the bus keeps
+/// no [`TEAMS_BUCKET`], the directory breaks the rules or cannot be read in time, which is logged.
+pub async fn read_quickly(kv: &DirectKv) -> Option<TeamDirectory> {
+    let read = match tokio::time::timeout(READ_TIMEOUT, read(kv)).await {
+        Ok(Ok(read)) => read?,
+        Ok(Err(e)) => {
+            tracing::warn!(error = format!("{e:#}"), "reading the team directory");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!("reading the team directory: no answer within {READ_TIMEOUT:?}");
+            return None;
+        }
+    };
+    read.directory.map_err(|e| tracing::warn!(error = %e, "reading the team directory")).ok()
+}
+
+/// What the first prompt of each session of a member ant adds: the note of its team and that team's ancestors
+/// ([`TeamDirectory::note_for`]), read only when a session starts, is loaded or is rebuilt, so a change of the
+/// directory reaches new sessions only.
+#[derive(Clone)]
+pub struct Note {
+    pub kv: DirectKv,
+    pub ant: UserId,
+}
+
+impl Note {
+    /// The note as the directory stands now: None when the ant is on no team or the directory cannot be read.
+    pub async fn text(&self) -> Option<String> {
+        read_quickly(&self.kv).await?.note_for(&self.ant)
+    }
 }
 
 /// Change the directory of `kv` with `change` and store it by compare-and-set, reading it again and changing it anew
