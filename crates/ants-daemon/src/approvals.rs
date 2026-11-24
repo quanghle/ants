@@ -414,6 +414,7 @@ impl NatsApprover {
         let mut listening = Listening { decisions, inbox, consents, withdrawals, from_chain };
         self.waiting.locked().insert(request.id, (request.clone(), chain_decided));
         // Leaves the waiting map once decided, expired or given up.
+        let _waiting = crate::monitoring::metrics::ant(&self.ant).asking();
         let _pending = DropGuard::new(request.id, |id| {
             self.waiting.locked().remove(&id);
         });

@@ -4,7 +4,8 @@
 //!
 //! The daemon's counters ([`Ant`]) are kept per ant in one registry ([`ant`]) whether or not anything listens: a few
 //! atomics each. The JetStream storage usage [`crate::monitoring::storage`] last measured is kept beside them ([`stored`]), and so
-//! is the system memory `crate::limits::pressure` last read ([`memory_available`]).
+//! is the system memory `crate::limits::pressure` last read ([`memory_available`]), and the firings of the schedules
+//! `ants daemon` serves ([`fired`]).
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -26,6 +27,7 @@ use tokio::task::JoinHandle;
 
 use crate::colony::Workload;
 use crate::sync::MutexExt as _;
+use crate::trail::Trails;
 
 /// Content type of the Prometheus text exposition format.
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -244,6 +246,23 @@ pub fn memory_available(bytes: u64) {
     *MEMORY_AVAILABLE.locked() = Some(bytes);
 }
 
+/// What became of a schedule's firing ([`fired`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Firing {
+    /// The hub took it.
+    Sent,
+    /// It was missed by more than its grace, or the hub did not take it in time.
+    Skipped,
+}
+
+/// The firings of each schedule by what became of them.
+static FIRINGS: Mutex<BTreeMap<(UserId, Firing), u64>> = Mutex::new(BTreeMap::new());
+
+/// Count a firing of schedule `schedule` as `outcome`.
+pub fn fired(schedule: &UserId, outcome: Firing) {
+    *FIRINGS.locked().entry((schedule.clone(), outcome)).or_default() += 1;
+}
+
 /// Whether this process connected an ant once ([`Ant::connected`]): until then, its health waits for one.
 static CONNECTED_ONCE: AtomicBool = AtomicBool::new(false);
 
@@ -261,6 +280,23 @@ pub struct Ant {
     dead_letters: AtomicU64,
     tokens: AtomicU64,
     cost: Mutex<f64>,
+    /// The UTC day (`YYYY-MM-DD`) the ant's daily or pool spend cap was last found reached, holding all its threads.
+    capped_on: Mutex<Option<String>>,
+    tool_requests_waiting: AtomicU64,
+    wakes: AtomicU64,
+    /// Trail runs ended done and failed.
+    runs_ended: [AtomicU64; 2],
+    /// The trails the ant conducts, while it does ([`Ant::conducting`]).
+    trails: Mutex<Option<Trails>>,
+}
+
+/// A conductor's trail runs, held in memory, by state, and the questions their `human()` steps sent wait on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Runs {
+    pub running: usize,
+    pub waiting: usize,
+    pub stopped: usize,
+    pub questions: usize,
 }
 
 /// An ant's connection and workload while it is connected.
@@ -286,6 +322,24 @@ pub struct Connected(Arc<Ant>);
 impl Drop for Connected {
     fn drop(&mut self) {
         *self.0.live.locked() = None;
+    }
+}
+
+/// A tool request counted waiting while alive ([`Ant::asking`]).
+pub struct Asking(Arc<Ant>);
+
+impl Drop for Asking {
+    fn drop(&mut self) {
+        self.0.tool_requests_waiting.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Trails reported while alive ([`Ant::conducting`]).
+pub struct Conducting(Arc<Ant>);
+
+impl Drop for Conducting {
+    fn drop(&mut self) {
+        *self.0.trails.locked() = None;
     }
 }
 
@@ -319,6 +373,53 @@ impl Ant {
         self.prompts.fetch_add(1, Ordering::Relaxed);
         self.prompts_in_flight.fetch_add(1, Ordering::Relaxed);
         Prompting(self)
+    }
+
+    /// Count a tool request waiting for a decision until the guard drops.
+    pub fn asking(self: &Arc<Self>) -> Asking {
+        self.tool_requests_waiting.fetch_add(1, Ordering::Relaxed);
+        Asking(self.clone())
+    }
+
+    /// Report the runs of `trails` until the guard drops.
+    pub fn conducting(self: &Arc<Self>, trails: Trails) -> Conducting {
+        *self.trails.locked() = Some(trails);
+        Conducting(self.clone())
+    }
+
+    /// Count a trail run ended in `state`; a run not ended counts nothing.
+    pub fn run_ended(&self, state: &ants_proto::RunState) {
+        use ants_proto::RunState;
+        let at = match state {
+            RunState::Done { .. } => 0,
+            RunState::Failed { .. } => 1,
+            RunState::Running | RunState::Waiting | RunState::Stopped { .. } => return,
+        };
+        self.runs_ended[at].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count a message a provider's wake request sent the ant.
+    pub fn woken(&self) {
+        self.wakes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Note whether the ant's daily or pool spend cap is reached on the UTC day `day` (`YYYY-MM-DD`).
+    pub fn capped(&self, day: &str, reached: bool) {
+        let mut capped = self.capped_on.locked();
+        if reached {
+            *capped = Some(day.to_owned());
+        } else if capped.as_deref().is_some_and(|on| on <= day) {
+            *capped = None;
+        }
+    }
+
+    /// Whether the ant's daily or pool spend cap was found reached today, UTC: it holds every thread until 00:00 UTC.
+    fn is_capped(&self) -> bool {
+        self.capped_on.locked().as_deref() == Some(crate::limits::caps::today().as_str())
+    }
+
+    fn runs(&self) -> Runs {
+        self.trails.locked().as_ref().map_or_else(Runs::default, Trails::measured)
     }
 
     /// Count a failed attempt handed back for redelivery.
@@ -391,49 +492,123 @@ impl Source for Daemon {
     }
 
     fn render(&self, out: &mut Exposition) {
-        fn load(n: &AtomicU64) -> f64 {
-            n.load(Ordering::Relaxed) as f64
-        }
-        fn workload(ant: &Ant, of: fn(&Workload) -> usize) -> f64 {
-            ant.live.locked().as_ref().map_or(0.0, |live| of(&live.workload) as f64)
-        }
-        type Family = (&'static str, Kind, &'static str, fn(&Ant) -> f64);
-        let families: [Family; 10] = [
-            ("ants_nats_connected", Kind::Gauge, "Whether the ant's NATS connection is up.", |a| {
-                flag(a.is_connected())
-            }),
-            ("ants_harnesses", Kind::Gauge, "Harness processes alive.", |a| workload(a, Workload::harnesses)),
-            (
-                "ants_memory_low",
-                Kind::Gauge,
-                "Whether memory is low, so idle harnesses stop at once and fewer run.",
-                |a| workload(a, |w| usize::from(w.memory_low().is_some())),
-            ),
-            (
-                "ants_messages_in_hand",
-                Kind::Gauge,
-                "Messages being handled: prompting, or waiting for their thread or a harness.",
-                |a| workload(a, Workload::handling),
-            ),
-            ("ants_prompts_in_flight", Kind::Gauge, "Prompts running in a harness.", |a| load(&a.prompts_in_flight)),
-            ("ants_prompts_total", Kind::Counter, "Prompts started.", |a| load(&a.prompts)),
-            ("ants_retries_total", Kind::Counter, "Failed attempts handed back for redelivery.", |a| load(&a.retries)),
-            ("ants_dead_letters_total", Kind::Counter, "Messages stored as dead letters.", |a| load(&a.dead_letters)),
-            ("ants_spend_tokens_total", Kind::Counter, "Tokens the harnesses reported.", |a| load(&a.tokens)),
-            (
-                "ants_spend_cost_total",
-                Kind::Counter,
-                "Cost the harnesses reported, in their currency (usually USD).",
-                |a| *a.cost.locked(),
-            ),
-        ];
         let serving = Self::serving();
-        for (name, kind, help, read) in families {
+        for (name, kind, help, read) in families() {
             out.family(name, kind, help);
             for (ant, counters) in &serving {
                 out.sample(name, &[("ant", ant.as_str())], read(counters));
             }
         }
+        render_holds(out, &serving);
+        render_runs(out, &serving);
+        let help = "Schedule firings `ants daemon` sent (the hub took them) or skipped (missed, or not taken in time).";
+        out.family("ants_schedule_firings_total", Kind::Counter, help);
+        for ((schedule, outcome), n) in FIRINGS.locked().iter() {
+            let outcome = match outcome {
+                Firing::Sent => "sent",
+                Firing::Skipped => "skipped",
+            };
+            out.sample(
+                "ants_schedule_firings_total",
+                &[("schedule", schedule.as_str()), ("outcome", outcome)],
+                *n as f64,
+            );
+        }
+        Self::render_storage(out);
+    }
+}
+
+/// A family of one sample per ant: its name, kind, help and how to read an ant's sample.
+type Family = (&'static str, Kind, &'static str, fn(&Ant) -> f64);
+
+/// The families of one sample per ant.
+fn families() -> [Family; 13] {
+    fn load(n: &AtomicU64) -> f64 {
+        n.load(Ordering::Relaxed) as f64
+    }
+    fn workload(ant: &Ant, of: fn(&Workload) -> usize) -> f64 {
+        ant.live.locked().as_ref().map_or(0.0, |live| of(&live.workload) as f64)
+    }
+    [
+        ("ants_nats_connected", Kind::Gauge, "Whether the ant's NATS connection is up.", |a| flag(a.is_connected())),
+        ("ants_harnesses", Kind::Gauge, "Harness processes alive.", |a| workload(a, Workload::harnesses)),
+        ("ants_memory_low", Kind::Gauge, "Whether memory is low, so idle harnesses stop at once and fewer run.", |a| {
+            workload(a, |w| usize::from(w.memory_low().is_some()))
+        }),
+        (
+            "ants_messages_in_hand",
+            Kind::Gauge,
+            "Messages being handled: prompting, or waiting for their thread or a harness.",
+            |a| workload(a, Workload::handling),
+        ),
+        ("ants_prompts_in_flight", Kind::Gauge, "Prompts running in a harness.", |a| load(&a.prompts_in_flight)),
+        ("ants_prompts_total", Kind::Counter, "Prompts started.", |a| load(&a.prompts)),
+        ("ants_retries_total", Kind::Counter, "Failed attempts handed back for redelivery.", |a| load(&a.retries)),
+        ("ants_dead_letters_total", Kind::Counter, "Messages stored as dead letters.", |a| load(&a.dead_letters)),
+        ("ants_spend_tokens_total", Kind::Counter, "Tokens the harnesses reported.", |a| load(&a.tokens)),
+        (
+            "ants_spend_cost_total",
+            Kind::Counter,
+            "Cost the harnesses reported, in their currency (usually USD).",
+            |a| *a.cost.locked(),
+        ),
+        ("ants_tool_requests_waiting", Kind::Gauge, "Tool requests waiting for a decision.", |a| {
+            load(&a.tool_requests_waiting)
+        }),
+        ("ants_questions_waiting", Kind::Gauge, "Questions trail runs' human() steps asked and wait on.", |a| {
+            a.runs().questions as f64
+        }),
+        ("ants_provider_wakes_total", Kind::Counter, "Messages provider wake requests sent the ant.", |a| {
+            load(&a.wakes)
+        }),
+    ]
+}
+
+/// `ants_held`: each hold of each ant, 1 while it holds the ant back.
+fn render_holds(out: &mut Exposition, serving: &[(UserId, Arc<Ant>)]) {
+    type Hold = (&'static str, fn(&Workload) -> bool);
+    const HOLDS: [Hold; 5] = [
+        ("paused", |w| w.paused().is_some()),
+        ("signed_out", |w| w.signed_out().is_some()),
+        ("limited", |w| w.limited().is_some()),
+        ("failing", |w| w.failing().is_some()),
+        ("fallback", |w| w.fallback().is_some()),
+    ];
+    let help = "Whether a hold keeps the ant back: paused, signed_out, limited (rate-limited or out of quota), \
+                failing, fallback (a fallback harness answers) or capped (a daily or pool spend cap reached today, UTC).";
+    out.family("ants_held", Kind::Gauge, help);
+    for (ant, counters) in serving {
+        let live = counters.live.locked();
+        for (hold, of) in HOLDS {
+            let on = live.as_ref().is_some_and(|live| of(&live.workload));
+            out.sample("ants_held", &[("ant", ant.as_str()), ("hold", hold)], flag(on));
+        }
+        drop(live);
+        out.sample("ants_held", &[("ant", ant.as_str()), ("hold", "capped")], flag(counters.is_capped()));
+    }
+}
+
+/// `ants_trail_runs` by state and `ants_trail_runs_ended_total` by how they ended.
+fn render_runs(out: &mut Exposition, serving: &[(UserId, Arc<Ant>)]) {
+    let (held, ended) = ("ants_trail_runs", "ants_trail_runs_ended_total");
+    out.family(held, Kind::Gauge, "Trail runs the ant conducts, by state: running, waiting (on humans) or stopped.");
+    for (ant, counters) in serving {
+        let runs = counters.runs();
+        for (state, n) in [("running", runs.running), ("waiting", runs.waiting), ("stopped", runs.stopped)] {
+            out.sample(held, &[("ant", ant.as_str()), ("state", state)], n as f64);
+        }
+    }
+    out.family(ended, Kind::Counter, "Trail runs the ant conducted that ended, by state: done or failed.");
+    for (ant, counters) in serving {
+        for (state, n) in ["done", "failed"].into_iter().zip(&counters.runs_ended) {
+            out.sample(ended, &[("ant", ant.as_str()), ("state", state)], n.load(Ordering::Relaxed) as f64);
+        }
+    }
+}
+
+impl Daemon {
+    /// JetStream storage and system memory.
+    fn render_storage(out: &mut Exposition) {
         if let Some(bytes) = *MEMORY_AVAILABLE.locked() {
             let help = "Bytes of system memory available at the latest check of memory pressure.";
             out.single("ants_memory_available_bytes", Kind::Gauge, help, bytes as f64);
@@ -575,6 +750,44 @@ mod tests {
         assert_eq!(Daemon::disconnected(&both()), Vec::<UserId>::new(), "served again, it is starting");
     }
 
+    /// The holds of the colony entry are read from the ant's workload while it is connected; a spend cap found reached
+    /// holds it for the rest of the UTC day.
+    #[tokio::test]
+    async fn the_holds_of_an_ant_are_reported_and_a_spend_cap_holds_it_for_the_day() {
+        let Some(server) = ants_test_support::NatsServer::start() else { return };
+        let name: UserId = "metrics-holds".parse().unwrap();
+        let ant = ant(&name);
+        let _serving = ant.serving();
+        let held = |hold: &str| {
+            let mut out = Exposition::default();
+            Daemon.render(&mut out);
+            let line = format!("ants_held{{ant=\"metrics-holds\",hold=\"{hold}\"}} ");
+            let text = out.into_string();
+            let found = text.lines().find_map(|l| l.strip_prefix(&line).map(str::to_owned));
+            found.unwrap_or_else(|| panic!("no {line:?} in\n{text}"))
+        };
+        assert_eq!(held("paused"), "0", "not connected, nothing holds");
+        let workload = Arc::new(Workload::default());
+        workload.set_paused(Some(ants_proto::Paused { since: chrono::Utc::now(), by: None }));
+        let client = async_nats::connect(&server.url).await.unwrap();
+        let connected = ant.connected(client, workload.clone());
+        let holds = || ["paused", "signed_out", "limited", "failing", "fallback", "capped"].map(held);
+        assert_eq!(holds(), ["1", "0", "0", "0", "0", "0"]);
+
+        let today = crate::limits::caps::today();
+        ant.capped(&today, true);
+        assert_eq!(held("capped"), "1");
+        ant.capped("2000-01-01", false);
+        assert_eq!(held("capped"), "1", "an earlier day's check clears nothing");
+        ant.capped(&today, false);
+        assert_eq!(held("capped"), "0", "the cap no longer reached, as with a raised one");
+        ant.capped("2000-01-01", true);
+        assert_eq!(held("capped"), "0", "an earlier day's cap holds nothing today");
+        workload.set_paused(None);
+        assert_eq!(held("paused"), "0");
+        drop(connected);
+    }
+
     #[test]
     fn an_ant_is_reported_while_served_with_its_counters() {
         let name: UserId = "metrics-unit".parse().unwrap();
@@ -591,6 +804,21 @@ mod tests {
         ant.buried();
         ant.spent(120, 0.5);
         ant.spent(30, 0.25);
+        let (asked, _asking) = (ant.asking(), ant.asking());
+        drop(asked);
+        ant.woken();
+        for state in [
+            ants_proto::RunState::Done { result: serde_json::Value::Null },
+            ants_proto::RunState::Failed { error: "no".to_owned(), limit: None },
+            ants_proto::RunState::Failed { error: "no".to_owned(), limit: None },
+            ants_proto::RunState::Waiting,
+        ] {
+            ant.run_ended(&state);
+        }
+        let schedule: UserId = "nightly-report".parse().unwrap();
+        for outcome in [Firing::Sent, Firing::Sent, Firing::Skipped] {
+            fired(&schedule, outcome);
+        }
         let text = rendered();
         for line in [
             "ants_nats_connected{ant=\"metrics-unit\"} 0",
@@ -602,6 +830,16 @@ mod tests {
             "ants_dead_letters_total{ant=\"metrics-unit\"} 1",
             "ants_spend_tokens_total{ant=\"metrics-unit\"} 150",
             "ants_spend_cost_total{ant=\"metrics-unit\"} 0.75",
+            "ants_tool_requests_waiting{ant=\"metrics-unit\"} 1",
+            "ants_questions_waiting{ant=\"metrics-unit\"} 0",
+            "ants_provider_wakes_total{ant=\"metrics-unit\"} 1",
+            "ants_held{ant=\"metrics-unit\",hold=\"paused\"} 0",
+            "ants_held{ant=\"metrics-unit\",hold=\"capped\"} 0",
+            "ants_trail_runs{ant=\"metrics-unit\",state=\"waiting\"} 0",
+            "ants_trail_runs_ended_total{ant=\"metrics-unit\",state=\"done\"} 1",
+            "ants_trail_runs_ended_total{ant=\"metrics-unit\",state=\"failed\"} 2",
+            "ants_schedule_firings_total{schedule=\"nightly-report\",outcome=\"sent\"} 2",
+            "ants_schedule_firings_total{schedule=\"nightly-report\",outcome=\"skipped\"} 1",
         ] {
             assert!(text.lines().any(|l| l == line), "no {line:?} in\n{text}");
         }

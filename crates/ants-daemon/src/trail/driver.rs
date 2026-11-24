@@ -307,7 +307,9 @@ impl Trails {
         // Listed until the end is told, so that a restart tells it otherwise.
         self.tell_end(&header).await;
         self.inner.store.list(&header.run, false).await?;
-        locked(&self.inner.runs).remove(&header.run);
+        if locked(&self.inner.runs).remove(&header.run).is_some() {
+            crate::monitoring::metrics::ant(&self.inner.ant).run_ended(&header.state);
+        }
         self.forget(&header.run);
         for call in pending.iter().filter(|call| call.sent) {
             self.report_step(&header, call, StepStage::Dropped);

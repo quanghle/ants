@@ -382,10 +382,10 @@ impl Ledger {
         let spent = self.thread(thread).await?;
         let mut day = self.day.lock().await;
         let daily = self.load_day(&mut day, today).await?;
-        if let Some(reached) = self.check(&spent, daily) {
-            return Ok(Some(reached));
-        }
-        Ok(self.pool_spent(daily, today).await.and_then(|(pool, spent, _)| check_pool(pool, spent)))
+        let pool = self.pool_spent(daily, today).await;
+        let all = self.day_check(daily).or_else(|| pool.and_then(|(pool, spent, _)| check_pool(pool, spent)));
+        crate::monitoring::metrics::ant(&self.ant).capped(today, all.is_some());
+        Ok(self.thread_check(&spent).or(all))
     }
 
     /// [`Ledger::record`] on the UTC day `today` (`YYYY-MM-DD`). Counted whether or not the ant has caps, so
@@ -432,8 +432,9 @@ impl Ledger {
         } else {
             self.pool_spent(daily, today).await
         };
-        let reached = self.check(&spent, daily).or_else(|| pool.and_then(|(pool, spent, _)| check_pool(pool, spent)));
-        Ok(Recorded { reached, warnings, cost })
+        let all = self.day_check(daily).or_else(|| pool.and_then(|(pool, spent, _)| check_pool(pool, spent)));
+        crate::monitoring::metrics::ant(&self.ant).capped(today, all.is_some());
+        Ok(Recorded { reached: self.thread_check(&spent).or(all), warnings, cost })
     }
 
     /// What the ant's pool spent on `today`, `own` being the ant's share, and the pool's warnings given by any member.
@@ -509,17 +510,24 @@ impl Ledger {
         Ok(&mut day.as_mut().expect("loaded").1)
     }
 
-    fn check(&self, thread: &ThreadSpend, day: &DaySpend) -> Option<String> {
+    /// The thread cap `thread` reached, if any.
+    fn thread_check(&self, thread: &ThreadSpend) -> Option<String> {
         let caps = &self.caps;
         let since = "since a human's last message";
-        let resets = "today; resets at 00:00 UTC";
-        let ant = &self.ant;
         if let Some(cap) = caps.thread_tokens.filter(|cap| thread.tokens >= *cap) {
             return Some(format!("Thread token cap reached ({} of {cap} tokens {since})", thread.tokens));
         }
         if let Some(cap) = caps.thread_cost.filter(|cap| thread.cost >= *cap) {
             return Some(format!("Thread cost cap reached ({:.2} of {cap:.2} {since})", thread.cost));
         }
+        None
+    }
+
+    /// The daily cap of the ant `day` reached, if any, holding all its threads.
+    fn day_check(&self, day: &DaySpend) -> Option<String> {
+        let caps = &self.caps;
+        let resets = "today; resets at 00:00 UTC";
+        let ant = &self.ant;
         if let Some(cap) = caps.daily_tokens.filter(|cap| day.tokens >= *cap) {
             return Some(format!("Daily token cap of {ant} reached ({} of {cap} tokens {resets})", day.tokens));
         }

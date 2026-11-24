@@ -13,6 +13,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use ants_daemon::monitoring::metrics::{self, Firing};
 use ants_daemon::schedule::Schedule;
 use ants_proto::{JsDomain, WEBHOOK_RETENTION, webhook_seen_key};
 use anyhow::{Context as _, Result};
@@ -66,7 +67,10 @@ pub async fn run(schedule: Schedule) -> Result<()> {
         if now - due > grace {
             match missed(&schedule, cursor, now) {
                 Some(missed) => send(&bus, &schedule, missed).await,
-                None => tracing::warn!(schedule = %name, %due, "skipping a firing missed by more than {GRACE:?}"),
+                None => {
+                    tracing::warn!(schedule = %name, %due, "skipping a firing missed by more than {GRACE:?}");
+                    metrics::fired(name, Firing::Skipped);
+                }
             }
             cursor = due.max(now - grace);
             continue;
@@ -107,6 +111,7 @@ async fn send(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>) {
         match fire(bus, schedule, due, late).await {
             Ok(Delivered { thread, duplicate: false }) => {
                 tracing::info!(schedule = %name, %due, late, thread = ?thread, "schedule fired");
+                metrics::fired(name, Firing::Sent);
                 return;
             }
             Ok(Delivered { thread, duplicate: true }) => {
@@ -118,6 +123,7 @@ async fn send(bus: &Bus, schedule: &Schedule, due: DateTime<Utc>) {
                     .is_some_and(|deadline| Utc::now() + TimeDelta::from_std(RETRY).unwrap_or_default() > deadline) =>
             {
                 tracing::warn!(schedule = %name, %due, error = format!("{e:#}"), "skipping a firing the hub did not take in time");
+                metrics::fired(name, Firing::Skipped);
                 return;
             }
             Err(e) => {

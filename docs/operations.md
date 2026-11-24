@@ -140,6 +140,13 @@ The page of the web client is built by the repo ants-web and embedded in a binar
 | `ants_messages_in_hand`, `ants_prompts_in_flight` | gauge | `ant` | Messages held by daemon; active harness prompts |
 | `ants_prompts_total`, `ants_retries_total`, `ants_dead_letters_total` | counter | `ant` | Prompts started, redelivery retries, dead letters (max-deliveries backstop included in the process running it; `ants dead watch` exports these alone) |
 | `ants_spend_tokens_total`, `ants_spend_cost_total` | counter | `ant` | Reported tokens and cost ([config.md](config.md#spend-report)) |
+| `ants_held` | gauge | `ant`, `hold` | `1` while a hold keeps the ant back, else `0`, one sample per hold: `paused`, `signed_out` (the harness needs a sign-in), `limited` (rate-limited, out of quota or out of files), `failing`, `fallback` (a fallback harness answers), as `ants colony` shows them, and `capped` (its daily or pool spend cap found reached today, UTC, holding every thread; back to `0` at 00:00 UTC). Thread caps hold one thread and show in no sample |
+| `ants_tool_requests_waiting` | gauge | `ant` | Tool requests waiting for a decision (`ants tools list`) |
+| `ants_questions_waiting` | gauge | `ant` | Questions the `human()` steps of the ant's trail runs asked, waiting for an answer. A question of `ask_human` waits on nothing: its answer comes as a message |
+| `ants_trail_runs` | gauge | `ant`, `state` | Trail runs the ant conducts, by `state`: `running`, `waiting` (only on humans) or `stopped` |
+| `ants_trail_runs_ended_total` | counter | `ant`, `state` | Trail runs ended `done` or `failed` since the daemon started |
+| `ants_provider_wakes_total` | counter | `ant` | Messages provider wake requests sent the ant ([wake requests](architecture.md#wake-requests)) |
+| `ants_schedule_firings_total` | counter | `schedule`, `outcome` | Firings of the `[[schedule]]` entries `ants daemon` serves: `sent` (the hub took it), `skipped` (missed by more than its grace, or not taken in time). A firing another daemon sent first counts in neither |
 | `ants_jetstream_bytes`, `ants_jetstream_limit_bytes` | gauge | `domain`, `store` | Account JetStream storage used and limit ([architecture.md](architecture.md#jetstream-storage)) |
 | `ants_webhook_requests_in_flight` | gauge | — | Active HTTP webhook requests |
 | `ants_webhook_events_total` | counter | `webhook`, `outcome` | `delivered`, `duplicate`, `refused` (4xx), `failed` (503, request timeout included) |
