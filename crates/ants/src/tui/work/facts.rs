@@ -16,7 +16,8 @@ use super::super::model::Data;
 pub enum ThreadState {
     /// A tool request, an unread message to the human, or an ant's answer to the human's request.
     WaitingOnMe,
-    /// Escalated to a human, or a message on it given up on, and no human said anything since.
+    /// Escalated to a human, or a message on it given up on, and no human said anything since; or an ant's harness
+    /// could not serve it, and the ant answered nothing since.
     Stuck,
     /// An ant is busy on it.
     Working,
@@ -107,6 +108,11 @@ pub struct Fact {
     ended: HashMap<UserId, Uuid>,
     /// The last escalation to each user, but for tool requests, which [`crate::live::State::approvals`] holds.
     escalated: HashMap<UserId, Alert>,
+    /// The last notice of each ant whose harness could not serve, its messages waiting ([`waits`]), with the user it
+    /// reached.
+    waiting: HashMap<UserId, (UserId, Alert)>,
+    /// Each user's last message, post or note on it, or prompt ended with no reply sent.
+    answered: HashMap<UserId, u64>,
     /// The last message given up on.
     dead: Option<Alert>,
     pub latest: Option<Said>,
@@ -153,7 +159,9 @@ impl Facts {
                 // letter was replayed or dropped already, and the thread is held no more.
                 let gave_up = notice == NoticeKind::GaveUp && entry.in_reply_to.is_some();
                 let dead = fact.dead.as_ref().filter(|_| gave_up).map(|d| d.seq);
-                if notice.holds_thread() && (!gave_up || dead.is_some()) {
+                if let (true, Some(from)) = (waits(notice), &entry.from) {
+                    fact.waiting.insert(from.clone(), (to.clone(), alert(None)));
+                } else if notice.holds_thread() && (!gave_up || dead.is_some()) {
                     fact.escalated.insert(to.clone(), alert(dead));
                 }
             }
@@ -163,6 +171,7 @@ impl Facts {
             && matches!(entry.kind, Kind::Message | Kind::Post | Kind::Note)
         {
             fact.sent.insert(from.clone(), entry.seq);
+            fact.answered.insert(from.clone(), entry.seq);
             fact.turns = entry.turns.or(fact.turns);
         }
         match (entry.kind, &entry.from, &entry.to) {
@@ -190,6 +199,7 @@ impl Facts {
                 if let Some(end) = &entry.no_reply {
                     fact.ended.insert(ant.clone(), end.message);
                 }
+                fact.answered.insert(ant.clone(), entry.seq);
             }
             _ => {}
         }
@@ -208,18 +218,28 @@ impl Facts {
     }
 }
 
+/// Whether a notice of `kind` tells of an ant's harness unable to serve, its messages waiting until it serves again.
+fn waits(kind: NoticeKind) -> bool {
+    matches!(kind, NoticeKind::SignedOut | NoticeKind::Quota | NoticeKind::Failing | NoticeKind::NoFallback)
+}
+
 impl Data {
     fn last_human(&self, fact: &Fact) -> u64 {
         fact.sent.iter().filter(|(u, _)| self.is_human(u)).map(|(_, seq)| *seq).max().unwrap_or(0)
     }
 
     /// Why the thread is stuck: its latest escalation to a human or dead letter that no human said anything after, but
-    /// a dead letter replayed or dropped here, and the notice of it.
+    /// a dead letter replayed or dropped here, and the notice of it; or its latest notice to a human of an ant's harness
+    /// unable to serve that neither a human nor that ant said anything after, the ant answering once it serves again.
     pub fn stuck(&self, thread: &ThreadId) -> Option<&Alert> {
         let fact = self.facts.get(thread)?;
         let after = self.last_human(fact);
         let escalated = fact.escalated.iter().filter(|(to, _)| self.is_human(to)).map(|(_, a)| a);
-        escalated.chain(&fact.dead).filter(|a| a.seq > after && !self.cleared(a)).max_by_key(|a| a.seq)
+        let waiting = fact.waiting.iter().filter(|(ant, (to, a))| {
+            self.is_human(to) && fact.answered.get(*ant).is_none_or(|answered| *answered < a.seq)
+        });
+        let held = escalated.chain(&fact.dead).filter(|a| !self.cleared(a));
+        held.chain(waiting.map(|(_, (_, a))| a)).filter(|a| a.seq > after).max_by_key(|a| a.seq)
     }
 
     /// The latest dead letter read on the thread, unless replayed or dropped here.

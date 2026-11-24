@@ -447,6 +447,36 @@ mod tests {
     }
 
     #[test]
+    fn a_harness_unable_to_serve_holds_the_thread_until_its_ant_answers_on_it() {
+        let thread = ThreadId::generate();
+        let notice = |seq: u64, ant: &str, kind| {
+            let envelope = Envelope {
+                thread_id: thread.clone(),
+                ..Envelope::new(user(ant), user("alice"), "[ants] cannot answer").as_notice(kind)
+            };
+            let payload = serde_json::to_vec(&envelope).unwrap();
+            let subject = subject::inbox(&user("alice"), &user(ant));
+            Parser::default().entry(seq, at(seq.cast_signed()), &subject, &payload).unwrap()
+        };
+        let mut m = model();
+        m.stored(
+            vec![message(1, &thread, "alice", "dev-a", "deploy"), message(2, &thread, "alice", "dev-b", "test")],
+            at(2),
+        );
+        m.stored(vec![notice(3, "dev-a", ants_proto::NoticeKind::SignedOut)], at(3));
+        m.stored(vec![notice(4, "dev-b", ants_proto::NoticeKind::Quota)], at(4));
+        assert_eq!(m.data.stuck(&thread).map(|a| a.seq), Some(4));
+        m.stored(vec![message(5, &thread, "dev-b", "alice", "tested")], at(5));
+        assert_eq!(m.data.stuck(&thread).map(|a| a.seq), Some(3), "dev-a's messages still wait");
+        m.stored(vec![message(6, &thread, "dev-a", "alice", "deployed")], at(6));
+        assert_ne!(state(&m, &thread), ThreadState::Stuck, "dev-a served again");
+        m.stored(vec![notice(7, "dev-a", ants_proto::NoticeKind::Failing)], at(7));
+        assert_eq!(state(&m, &thread), ThreadState::Stuck);
+        m.stored(vec![message(8, &thread, "bob", "dev-a", "retry")], at(8));
+        assert_ne!(state(&m, &thread), ThreadState::Stuck, "a human spoke since");
+    }
+
+    #[test]
     fn assistant_activity_is_listed_apart_from_the_work_and_its_counts() {
         use super::super::nav;
         let (work, acts) = (ThreadId::generate(), ThreadId::activity(&user("alice"), at(0).date_naive()));
