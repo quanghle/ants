@@ -200,7 +200,7 @@ impl Inbox<'_> {
     /// Restart the ant's harnesses on each admin order to ([`crate::admin::restart`]) for as long as the daemon serves:
     /// the idle ones stop at once, the working ones once their prompt ends, cancelled first on an order to restart now.
     pub(super) async fn hear_restarts(&self) {
-        let mut listening = self.restarts.listen(self.ant);
+        let mut listening = self.restarts.listen(self.ant, Some(self.client));
         loop {
             let request = listening.next().await;
             let restarting = self.pool.restart();

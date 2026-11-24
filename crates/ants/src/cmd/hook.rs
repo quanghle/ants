@@ -25,7 +25,8 @@ use crate::connection::Nats;
 pub(crate) enum HookCommand {
     /// Run CMD once per event of one kind, with the event's JSON document on its stdin, until stopped. Stored
     /// events (tool requests, verdicts, dead letters) are read through the credentials' own consumer, from where it
-    /// left off, and acked once CMD ends, whatever its exit; live ones (escalations, status, colony) from now on.
+    /// left off, and acked once CMD ends, whatever its exit; live ones (escalations, questions, decided, runs, orders,
+    /// teams, status, colony) from now on.
     /// Failures and timeouts are logged.
     Run {
         /// The kind of event.
@@ -65,6 +66,12 @@ pub enum Event {
     /// A tool request settled by a human, an ant of the requester's chain or its expiry (a `StatusEvent` of type
     /// `decided`).
     Decided,
+    /// A trail run done, failed or stopped (a `StatusEvent` of type `run_ended`).
+    Run,
+    /// An admin order applied or refused (a `StatusEvent` of type `order_settled`).
+    Order,
+    /// A team created, changed or deleted (a `StatusEvent` of type `team_changed`).
+    Team,
     /// Every live status update of every ant (a `StatusEvent`).
     Status,
     /// A colony entry written: an ant starting, stopping or reporting in (a `ColonyEntry`).
@@ -78,7 +85,14 @@ impl Event {
             Self::ApprovalRequest => Some(Feed::ApprovalRequests),
             Self::ApprovalDecision => Some(Feed::ApprovalDecisions),
             Self::DeadLetter => Some(Feed::DeadLetters),
-            Self::Escalation | Self::Question | Self::Decided | Self::Status | Self::Colony => None,
+            Self::Escalation
+            | Self::Question
+            | Self::Decided
+            | Self::Run
+            | Self::Order
+            | Self::Team
+            | Self::Status
+            | Self::Colony => None,
         }
     }
 
@@ -99,13 +113,16 @@ impl Event {
                     bail!("a dead letter of {} read on {subject}", dead.ant);
                 }
             }
-            Self::Escalation | Self::Question | Self::Decided | Self::Status => {
+            Self::Escalation | Self::Question | Self::Decided | Self::Run | Self::Order | Self::Team | Self::Status => {
                 let event: StatusEvent = serde_json::from_slice(payload)?;
                 event.check_subject(subject)?;
                 let kind = match event.update {
                     StatusUpdate::Escalated { .. } => Self::Escalation,
                     StatusUpdate::Asked { .. } => Self::Question,
                     StatusUpdate::Decided { .. } => Self::Decided,
+                    StatusUpdate::RunEnded { .. } => Self::Run,
+                    StatusUpdate::OrderSettled { .. } => Self::Order,
+                    StatusUpdate::TeamChanged { .. } => Self::Team,
                     _ => Self::Status,
                 };
                 return Ok(self == kind || self == Self::Status);
@@ -315,5 +332,33 @@ mod tests {
         assert!(!Event::Escalation.accepts(&working.subject(), &asked).unwrap());
         assert!(!Event::Question.accepts(&working.subject(), &json).unwrap());
         assert!(Event::Status.accepts(&subject::status(&"dev-c".parse().unwrap(), &thread), &json).is_err());
+
+        let ended = StatusUpdate::RunEnded {
+            run: "r1".parse().unwrap(),
+            trail: None,
+            parent: None,
+            state: ants_proto::RunEnd::Done,
+            error: None,
+            limit: None,
+            by: None,
+            steps: 1,
+            turns: 1,
+        };
+        let ended = serde_json::to_vec(&StatusEvent::new(working.ant.clone(), thread, ended)).unwrap();
+        let alice: UserId = "alice".parse().unwrap();
+        let team: ThreadId = "backend".parse().unwrap();
+        let changed = StatusUpdate::TeamChanged {
+            team: "backend".parse().unwrap(),
+            change: ants_proto::TeamChange::Deleted,
+            entry: None,
+            parent: None,
+        };
+        let changed = serde_json::to_vec(&StatusEvent::new(alice.clone(), team.clone(), changed)).unwrap();
+        let kinds = |on: &str, event: &[u8]| {
+            [Event::Run, Event::Order, Event::Team, Event::Status].map(|e| e.accepts(on, event).unwrap())
+        };
+        assert_eq!(kinds(&working.subject(), &ended), [true, false, false, true]);
+        assert_eq!(kinds(&subject::status(&alice, &team), &changed), [false, false, true, true], "a human's change");
+        assert!(!Event::Run.accepts(&working.subject(), &json).unwrap(), "a message is no run's end");
     }
 }

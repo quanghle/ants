@@ -141,7 +141,8 @@ impl Permissions {
     /// but purges a removed trail's.
     ///
     /// Every ant and human reads the team directory ([`TEAMS_BUCKET`]) by direct gets naming no subject; a human
-    /// creates the bucket and puts the directory by compare-and-set (`team_rights`). The directory is one entry for
+    /// creates the bucket and puts the directory by compare-and-set (`team_rights`), telling what it changed on its own
+    /// status subjects ([`subject::status_of`]), as an ant tells its progress. The directory is one entry for
     /// every team, so no subject can hold an ant to the teams it manages: an ant writes none of it, but asks
     /// `ants signer` to change a team it manages ([`crate::TeamAdminRequest`], on [`subject::teamadm`],
     /// [`Permissions::for_team_keeper`]).
@@ -258,7 +259,7 @@ impl Permissions {
         publish.extend(human_reaction_rights(user));
         publish.extend(device_directory_rights(user));
         publish.extend(trail_rights());
-        publish.extend(team_rights());
+        publish.extend(team_rights(user));
         publish.extend(rollup_denial_rights());
         subscribe.extend([subject::ALL.to_owned(), subject::max_deliveries_advisories()]);
     }

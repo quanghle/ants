@@ -303,6 +303,7 @@ impl Trails {
         self.save_header(slot).await?;
         let pending = std::mem::take(&mut slot.book().pending);
         let header = slot.header();
+        self.report_ended(&header);
         // Listed until the end is told, so that a restart tells it otherwise.
         self.tell_end(&header).await;
         self.inner.store.list(&header.run, false).await?;

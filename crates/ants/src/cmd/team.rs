@@ -1,10 +1,10 @@
 //! `ants team`: create, change, list, show and delete teams, as a human writing the team directory by
-//! compare-and-set.
+//! compare-and-set, and telling observers what it changed on the human's status ([`ants_daemon::teams::tell`]).
 
 use std::collections::BTreeSet;
 
 use ants_daemon::teams::modify;
-use ants_proto::{Team, TeamDirectory, TeamRefusal, UserId};
+use ants_proto::{Team, TeamChange, TeamDirectory, TeamRefusal, UserId};
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
@@ -106,7 +106,7 @@ pub(crate) enum TeamCommand {
 }
 
 pub(crate) async fn run(nats: &Nats<'_>, command: TeamCommand) -> Result<()> {
-    let (_, js) = nats.connect("ants-cli").await?;
+    let (client, js) = nats.connect("ants-cli").await?;
     let kv = teams::open(&js, nats.domain).await?;
     match command {
         TeamCommand::List { json } => list(&kv, json).await,
@@ -119,7 +119,29 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TeamCommand) -> Result<()> {
                     nats.me.id
                 );
             }
-            change(nats, &js, &kv, command).await
+            let changes = command.changes();
+            change(nats, &js, &kv, command).await?;
+            if let Some(directory) = ants_daemon::teams::read_quickly(&kv).await {
+                ants_daemon::teams::tell(&client, &nats.me.id, &directory, &changes);
+                if let Err(e) = client.flush().await {
+                    tracing::debug!(error = %e, "telling the team change");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+impl TeamCommand {
+    /// The team the command changes, and how.
+    fn changes(&self) -> Vec<(UserId, TeamChange)> {
+        match self {
+            Self::Create { team, .. } => vec![(team.clone(), TeamChange::Created)],
+            Self::Set { team, .. } | Self::Add { team, .. } | Self::Remove { team, .. } => {
+                vec![(team.clone(), TeamChange::Changed)]
+            }
+            Self::Delete { team } => vec![(team.clone(), TeamChange::Deleted)],
+            Self::List { .. } | Self::Show { .. } => Vec::new(),
         }
     }
 }

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
-use ants_proto::{AdminOrder, AdminOutcome, UserId};
+use ants_proto::{AdminOrder, AdminOutcome, StatusUpdate, UserId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
@@ -57,6 +57,9 @@ struct Entry {
     served: usize,
     /// Where the daemon serving its inbox hears restarts.
     listening: Option<mpsc::UnboundedSender<Request>>,
+    /// The connection of that daemon, as the ant, which tells the orders settled on its status
+    /// ([`Restarts::settled`]).
+    client: Option<async_nats::Client>,
     /// Where it hears the snapshots clones of it ask for ([`crate::clone`]).
     cloning: Option<mpsc::UnboundedSender<crate::clone::Request>>,
     /// Where it hears the orders about its MCP servers ([`crate::admin::mcp`]).
@@ -87,12 +90,26 @@ impl Restarts {
         Served { restarts: self.clone(), ant: ant.clone() }
     }
 
-    /// Hear the restarts of `ant` until the guard drops.
+    /// Hear the restarts of `ant` until the guard drops, with `client`, the daemon's connection as the ant, telling the
+    /// orders settled meanwhile, if given.
     #[must_use]
-    pub fn listen(&self, ant: &UserId) -> Listening {
+    pub fn listen(&self, ant: &UserId, client: Option<&async_nats::Client>) -> Listening {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.0.locked().entry(ant.clone()).or_default().listening = Some(tx.clone());
+        let mut restarts = self.0.locked();
+        let entry = restarts.entry(ant.clone()).or_default();
+        (entry.listening, entry.client) = (Some(tx.clone()), client.cloned());
         Listening { restarts: self.clone(), ant: ant.clone(), tx, rx }
+    }
+
+    /// Tell `outcome`, an order to an ant the process serves the inbox of, applied or refused, on the ant's status
+    /// ([`StatusUpdate::order_settled`]): nothing for an ant served without, or one pending or held.
+    pub fn settled(&self, outcome: &AdminOutcome) {
+        let Some((thread, update)) = StatusUpdate::order_settled(outcome) else { return };
+        let client = match self.0.locked().get(&outcome.ant) {
+            Some(Entry { served: 1.., client: Some(client), .. }) => client.clone(),
+            _ => return,
+        };
+        crate::monitoring::status::publish(&client, &outcome.ant, &thread, update);
     }
 
     /// Whether the daemon serving `ant` serves its inbox, hearing its restarts.
@@ -256,7 +273,7 @@ impl Drop for Listening {
         if let Some(entry) = self.restarts.0.locked().get_mut(&self.ant)
             && entry.listening.as_ref().is_some_and(|tx| tx.same_channel(&self.tx))
         {
-            entry.listening = None;
+            (entry.listening, entry.client) = (None, None);
         }
     }
 }
@@ -280,7 +297,7 @@ mod tests {
         let alice: UserId = "alice".parse().unwrap();
         let idle = restarts.restart(&dev_a, alice.clone(), true).await;
         assert_eq!(idle, Some(Restarted::default()), "no inbox served, no harness");
-        let mut listening = restarts.listen(&dev_a);
+        let mut listening = restarts.listen(&dev_a, None);
         let daemon = async {
             let request = listening.next().await;
             assert_eq!((&request.by, request.now), (&alice, true));

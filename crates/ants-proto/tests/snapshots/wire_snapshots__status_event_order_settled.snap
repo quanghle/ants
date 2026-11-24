@@ -1,0 +1,17 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "thread_id": "019a7d2c-0000-7000-8000-000000000001",
+  "type": "order_settled",
+  "order": "019a7d2e-0000-7000-8000-000000000014",
+  "machine": "studio",
+  "op": "restart",
+  "admin": "pa",
+  "on_behalf_of": "alice",
+  "state": "refused",
+  "reason": "denied by alice",
+  "at": "2025-01-01T12:00:00Z"
+}

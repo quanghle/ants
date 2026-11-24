@@ -199,6 +199,7 @@ async fn review(
             },
         };
         machines.put(&outcome_key, serde_json::to_vec(&outcome)?).await?;
+        orders.restarts.settled(&outcome);
         tracing::info!(
             key = outcome_key,
             admin = %order.admin,

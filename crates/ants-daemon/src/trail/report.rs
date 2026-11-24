@@ -1,8 +1,9 @@
 //! Where a run reports what it does, on its own thread: its start, what its script reports (phase(), log()), its route
 //! at each goto() and what arrives on its steps' threads answering no call, as thread notes of the conductor; each step
 //! starting and ending and each leg starting, as status events of the conductor on the run's thread
-//! ([`StatusUpdate::Step`], [`StatusUpdate::Leg`]); and its end, as a message to its owner, or, for a child run, whose
-//! parent reports, as a note. Reports are best effort: one that fails is logged, never failing the run.
+//! ([`StatusUpdate::Step`], [`StatusUpdate::Leg`]); and its end, as a status event there ([`StatusUpdate::RunEnded`])
+//! and as a message to its owner, or, for a child run, whose parent reports, as a note. Reports are best effort: one
+//! that fails is logged, never failing the run.
 
 use std::fmt::Write as _;
 
@@ -59,6 +60,13 @@ impl Trails {
         let update =
             StatusUpdate::Leg { run: run.run.clone(), leg: index, trail: leg.trail.clone(), waypoint: leg.at.clone() };
         crate::monitoring::status::publish(&self.inner.client, &self.inner.ant, &run.thread, update);
+    }
+
+    /// Tell the end of `run`, done, failed or stopped, on the run's thread, once, as it ends.
+    pub(super) fn report_ended(&self, run: &TrailRun) {
+        if let Some(update) = StatusUpdate::run_ended(run) {
+            crate::monitoring::status::publish(&self.inner.client, &self.inner.ant, &run.thread, update);
+        }
     }
 
     pub(super) async fn report_resumed(&self, run: &TrailRun, by: &UserId) {

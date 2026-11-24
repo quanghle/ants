@@ -22,10 +22,13 @@ fn every_human_has_the_human_rights_and_only_humans_write_the_humans_bucket() {
         "$KV.ants_humans.alice.>",
         "$JS.API.CONSUMER.CREATE.ANTS.inbox-alice.ants.inbox.alice.>",
         "$JS.API.CONSUMER.CREATE.ANTS.notes-alice.ants.notes.>",
+        // What `ants team` changed, on its own status subjects only.
+        "ants.status.alice.*",
     ] {
         assert!(alice.publish.iter().any(|have| have == s), "{s} missing from {:?}", alice.publish);
     }
     assert!(alice.subscribe.iter().any(|s| s == subject::ALL));
+    assert!(!alice.publish.iter().any(|s| s == subject::ALL_STATUS), "no status of others");
 
     let reads = [
         "$JS.API.STREAM.INFO.KV_ants_humans",

@@ -71,13 +71,15 @@ pub(super) fn trail_rights() -> [String; 13] {
 }
 
 /// What a human's credentials need of [`TEAMS_BUCKET`]: creating it and looking it up, and putting the team
-/// directory, by compare-and-set on its one key; every user reads it by direct gets naming no subject.
-pub(super) fn team_rights() -> [String; 3] {
+/// directory, by compare-and-set on its one key; every user reads it by direct gets naming no subject. And telling
+/// observers what it changed, on its own status subjects ([`subject::status_of`]).
+pub(super) fn team_rights(human: &UserId) -> [String; 4] {
     let teams = kv_stream(TEAMS_BUCKET);
     [
         format!("$JS.API.STREAM.CREATE.{teams}"),
         format!("$JS.API.STREAM.INFO.{teams}"),
         subject::kv(TEAMS_BUCKET, TEAM_DIRECTORY_KEY),
+        subject::status_of(human),
     ]
 }
 

@@ -329,7 +329,11 @@ async fn a_restart_order_restarts_the_harnesses_of_an_ant_its_machine_serves() {
     );
 
     let _served = restarts.serve(&dev_a);
-    let mut listening = restarts.listen(&dev_a);
+    let (as_dev_a, _) = server.connect_as(&dev_a, Role::Ant).await;
+    let (observer, _) = server.connect_as(&bob, Role::Human).await;
+    let mut status = observer.subscribe(ants_proto::subject::status_of(&dev_a)).await.unwrap();
+    observer.flush().await.unwrap();
+    let mut listening = restarts.listen(&dev_a, Some(&as_dev_a));
     let daemon = async {
         let request = listening.next().await;
         assert_eq!((&request.by, request.now), (&alice, true));
@@ -337,6 +341,7 @@ async fn a_restart_order_restarts_the_harnesses_of_an_ant_its_machine_serves() {
     };
     let (sent, ()) = tokio::join!(send(&admin, &js, None, &dev_a, restart, WAIT), daemon);
     let (order, applied) = sent.unwrap();
+    let id = order.id;
     let applied = applied.expect("the daemon decides once the restart is under way");
     assert_eq!((applied.state, applied.reason.as_deref()), (OrderState::Applied, None));
     let told = crate::admin::restart::told(Sent::of(order, Some(applied))).unwrap();
@@ -344,6 +349,13 @@ async fn a_restart_order_restarts_the_harnesses_of_an_ant_its_machine_serves() {
         told,
         "restarting dev-a on m1: 1 idle harness stopped, 1 working stops once the prompt ends (1 cancelled)"
     );
+    let settled = tokio::time::timeout(WAIT, futures::StreamExt::next(&mut status)).await.unwrap().unwrap();
+    let settled: ants_proto::StatusEvent = serde_json::from_slice(&settled.payload).unwrap();
+    assert_eq!((&settled.ant, settled.thread_id.to_string()), (&dev_a, id.to_string()), "on the order's own thread");
+    let ants_proto::StatusUpdate::OrderSettled { order, op, admin, state, .. } = settled.update else {
+        panic!("{settled:?}")
+    };
+    assert_eq!((order, op.as_deref(), admin, state), (id, Some("restart"), Some(alice), OrderState::Applied));
     drop(ants);
     tokio::time::timeout(WAIT, task).await.unwrap().unwrap().unwrap();
 }

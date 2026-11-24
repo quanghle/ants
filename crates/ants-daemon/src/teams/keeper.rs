@@ -199,8 +199,9 @@ pub struct Changer {
 }
 
 impl Changer {
-    /// Change the team `team` for `ant` with `ops`, read again and asked anew while the directory changes meanwhile.
-    /// The outcome, None when no signer answered.
+    /// Change the team `team` for `ant` with `ops`, read again and asked anew while the directory changes meanwhile,
+    /// telling observers what changed on the ant's status ([`super::tell`]). The outcome, None when no signer
+    /// answered.
     pub async fn change(
         &self,
         ant: &UserId,
@@ -218,6 +219,12 @@ impl Changer {
             } else {
                 Some(answer(&self.kv, self.identities.as_ref(), &ask).await?)
             };
+            if let Some(TeamAdminOutcome::Applied { changed, .. }) = &outcome
+                && !changed.is_empty()
+                && let Some(directory) = super::read_quickly(&self.kv).await
+            {
+                super::tell(&self.client, ant, &directory, &super::changes_of(team, &ops));
+            }
             if !matches!(outcome, Some(TeamAdminOutcome::Changed)) {
                 return Ok(outcome);
             }

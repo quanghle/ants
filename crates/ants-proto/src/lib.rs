@@ -161,7 +161,9 @@ pub use shared::{
     INCARNATION_KEY, SETTINGS_SIGNING_CONTEXT, SHARED_FIELDS, SettingsError, SharedSettings, incarnation,
     is_shared_field,
 };
-pub use status::{DecidedBy, MAX_TOOL_PATHS, PlanStep, State, StatusEvent, StatusUpdate, StepStage};
+pub use status::{
+    DecidedBy, MAX_RUN_ERROR, MAX_TOOL_PATHS, PlanStep, RunEnd, State, StatusEvent, StatusUpdate, StepStage, TeamChange,
+};
 pub use teams::{
     TEAM_DIRECTORY_KEY, Team, TeamAdminOutcome, TeamAdminReply, TeamAdminRequest, TeamDirectory, TeamOp, TeamRefusal,
 };

@@ -288,6 +288,10 @@ log("built")
     let result = "```json\n{\n  \"built\": \"done\",\n  \"count\": 2\n}\n```";
     assert!(told.text.starts_with(&format!("Run {run}")), "{}", told.text);
     assert!(told.text.ends_with(&format!(" is done (1 steps, 1 turns):\n\n{result}")), "{}", told.text);
+    let ended = run_ended(&mut status).await;
+    assert_eq!((&ended.ant, &ended.thread_id), (&ant("lead"), &thread));
+    let StatusUpdate::RunEnded { run: of, state, error, by, steps, turns, .. } = ended.update else { unreachable!() };
+    assert_eq!((of, state, error, by, steps, turns), (run, RunEnd::Done, None, None, 1, 1));
 }
 
 #[tokio::test]

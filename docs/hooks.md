@@ -48,6 +48,9 @@ Event payloads can still contain prompt or tool text:
 | `escalation` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `escalated` |
 | `question` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `asked` |
 | `decided` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `decided` |
+| `run` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` of type `run_ended` |
+| `order` | `ants.status.<ant>.<order id>` | Live (core NATS) | `StatusEvent` of type `order_settled` |
+| `team` | `ants.status.<ant or human>.<team>` | Live (core NATS) | `StatusEvent` of type `team_changed` |
 | `status` | `ants.status.<ant>.<thread>` | Live (core NATS) | `StatusEvent` |
 | `colony` | `$KV.ants_colony.<ant>` | Live (KV watch) | `ColonyEntry` |
 
@@ -116,7 +119,7 @@ holds its first 4096 bytes. Check: `subject == "ants.dead." + ant`.
 ### `StatusEvent` on `ants.status.<ant>.<thread>`
 
 Live progress of an ant on a thread, from its daemon: `ant`, `thread_id`, `at`, and the fields of one update, named by
-`type`:
+`type`. A human's own status carries only what `ants team` changed (`team_changed`), so `ant` may name a human:
 
 | `type` | Fields | Meaning |
 |---|---|---|
@@ -132,6 +135,9 @@ Live progress of an ant on a thread, from its daemon: `ant`, `thread_id`, `at`, 
 | `decided` | `request_id`, `verdict`, `by`, `decider`?, `via`? | A tool request was settled (below) |
 | `step` | `run`, `call`, `label`?, `to`, `step_thread`, `stage` (`started`, `answered`, `failed`, `dropped`) | A trail run's step, on the conductor's status of the run's thread |
 | `leg` | `run`, `leg`, `trail`?, `waypoint`? | A trail run's leg starting (0-based `leg` in its route; the first at the run's start), on the conductor's status of the run's thread |
+| `run_ended` | `run`, `trail`?, `parent`?, `state` (`done`, `failed`, `stopped`), `error`?, `limit`?, `by`?, `steps`, `turns` | A trail run ended or stopped (below) |
+| `order_settled` | `order`, `machine`, `op`?, `admin`?, `on_behalf_of`?, `state` (`applied`, `refused`), `reason`? | An admin order to the ant was settled (below) |
+| `team_changed` | `team`, `change` (`created`, `changed`, `deleted`), `entry`?, `parent`? | A team was changed (below) |
 
 Check: `subject == "ants.status." + ant + "." + thread_id`.
 
@@ -190,6 +196,54 @@ counting as `reject`. `by` is `human`, `chain` (an ant of the requester's `escal
 human and the human confirmed or pre-allowed ([auth.md](auth.md#confirming-an-assistants-acts)) is `by: human` with
 the human in `decider` and the assistant in `via`; no `ApprovalDecision` is stored for it.
 
+#### Trail runs ended
+
+Each trail run's end is told once as a `run_ended` update on the status of its conductor, on the run's thread, as the
+run ends (`done`, `failed`) or stops (`stopped`, which a human may resume, ending it later again); a child run's too,
+naming its parent run in `parent`. `trail` is the saved trail the run started on, absent for an inline script.
+
+```json
+{"ant": "lead", "thread_id": "019a7d2c-…", "type": "run_ended", "run": "019a7d2f-…", "trail": "release",
+ "state": "failed", "error": "ValueError: no tests", "limit": "turns", "steps": 4, "turns": 9,
+ "at": "2025-01-01T12:00:00Z"}
+```
+
+A failed run carries its `error`, cut to 500 characters, and the `limit` it broke, if one (`steps`, `turns`, `wall`,
+`compute`, `session`, `memory`); a stopped run who stopped it in `by`. `steps` and `turns` are what the run spent.
+`ants trail show RUN` has the rest, the result included.
+
+#### Admin orders settled
+
+Each [admin order](auth.md#admin-orders) applied or refused is told as an `order_settled` update on the status of the
+ant it was sent to, on the thread its id names, once the daemon of the machine stored its outcome; a held order of an
+assistant once its human's consent, denial or expiry settled it. Only a daemon serving the ant's inbox tells it, so an
+order to an ant whose inbox the machine does not serve then (an `add`, a `retire`, an ant not running) has none:
+`ants ant orders ANT` lists every outcome.
+
+```json
+{"ant": "dev-a", "thread_id": "019a7d2e-…", "type": "order_settled", "order": "019a7d2e-…", "machine": "studio",
+ "op": "restart", "admin": "pa", "on_behalf_of": "alice", "state": "refused", "reason": "denied by alice",
+ "at": "2025-01-01T12:00:00Z"}
+```
+
+`op` is the order's kind (`set`, `pause`, `restart`, …), with nothing of its arguments or result; `admin` sent it, for
+`on_behalf_of`, its human, when an assistant did. Check also: `thread_id == order`.
+
+#### Teams changed
+
+Each change of a team is told as a `team_changed` update on the status of whoever made it, on the thread the team
+names: the ant whose daemon changed a team it manages (`manage_team`, through `ants signer`), or the human running
+`ants team`. A change of `team` that creates or deletes a member team tells that team's `created` or `deleted` too.
+
+```json
+{"ant": "lead", "thread_id": "backend", "type": "team_changed", "team": "backend", "change": "created",
+ "entry": {"team": "backend", "members": ["dev-a"], "lead": "dev-a", "created_by": "lead",
+ "created_at": "2025-01-01T12:00:00Z"}, "parent": "eng", "at": "2025-01-01T12:00:00Z"}
+```
+
+`entry` is the team as the directory holds it after the change, as `ants team show --json` prints its fields, absent
+once deleted; `parent` the team holding it, if any. Check also: `thread_id == team`.
+
 ### `Timeline` on `ants.timeline.<thread>.<ant>`
 
 Stored in `ANTS`: part of the tool-call timeline of an ant's prompt on a thread, so a thread's history shows the calls
@@ -238,7 +292,8 @@ with the event's document and a newline on its stdin, until stopped. Its stdout 
   the feed, from where it left off: on the first run, from the next event stored. Each event is acked once `CMD` ends,
   whatever its exit status, so a failing command does not stall the feed; an event whose `CMD` was still running when
   `ants hook run` stopped is handed on again. The consumer is removed after 7 days without a reader.
-- **Live feeds** (`escalation`, `question`, `decided`, `status`, `colony`) take events from now on.
+- **Live feeds** (`escalation`, `question`, `decided`, `run`, `order`, `team`, `status`, `colony`) take events from
+  now on.
 - At most `--concurrency` (default 4) runs at once; a run lasting past `--timeout` (default `60s`) is killed. Failed
   runs, timeouts and documents that are forged or unreadable (skipped) are logged.
 

@@ -106,8 +106,11 @@ impl Permissions {
                 .any(|prefix| s.starts_with(prefix))
         };
         let marks_of_its_own = |s: &str| own_marks.iter().any(|k| s.ends_with(k.as_str()));
+        // Its own status subjects, which it has as an ant.
+        let own_status = subject::status_of(assistant);
         as_human.retain(|s| {
-            !devices_only.contains(s)
+            *s != own_status
+                && !devices_only.contains(s)
                 && !notify.contains(s)
                 && !unattributed.contains(s)
                 && !withheld(s)

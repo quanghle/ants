@@ -377,6 +377,9 @@ async fn decide_taken(
                 if outcome.state == OrderState::Held {
                     orders.hold.added();
                 }
+                if recorded {
+                    orders.restarts.settled(&outcome);
+                }
                 tracing::info!(
                     key,
                     recorded,
