@@ -3,4 +3,4 @@
 # page is built for, which has to be the binary's. `scripts/web.sh --pin` writes this line; `scripts/web.sh` puts the
 # pinned bundle in target/web, where crates/ants/build.rs takes it, and the build fails on a bundle of another digest
 # or built for another ants version.
-2f60a07312daa3e9242b097c2b199cbcd43150390403102a64f74a6bcdc679a8  ants-web 00db0db for ants 0.3.0
+a82ce44c6917b18fdd7797f656fd06e51040c1aa9ee30b1192960086bba21924  ants-web a60bb9b for ants 0.4.0
