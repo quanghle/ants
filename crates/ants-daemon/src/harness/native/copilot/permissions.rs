@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::schema::{ToolCallLocation, ToolCallUpdate, ToolCallUpdateFields, ToolKind};
-use github_copilot_sdk as sdk;
+use copilot_sdk as sdk;
 use sdk::handler::PermissionResult;
 use sdk::types::{PermissionRequestKind, RequestId};
 use sdk::{PermissionRequestData, SessionId};

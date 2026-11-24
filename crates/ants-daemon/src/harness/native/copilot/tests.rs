@@ -1,4 +1,4 @@
-//! The copilot-sdk translator against a Copilot CLI server played here ([`Played`]) with the shapes Copilot CLI 1.0.112
+//! The copilot-sdk translator against a Copilot CLI server played here ([`Played`]) with the shapes Copilot CLI 1.0.114
 //! sends: the definition's command is a relay script passing its stdio through two FIFOs, so the SDK speaks to the
 //! played server as to `copilot --server --stdio`.
 
@@ -52,11 +52,11 @@ type Script = Box<dyn FnMut(&str, &Value) -> Option<Answer> + Send>;
 /// The requests the played server read, as method and params, over every run of the CLI.
 type Requests = Arc<Mutex<Vec<(String, Value)>>>;
 
-/// The answer of Copilot CLI 1.0.112, signed in, to the requests a test does not script.
+/// The answer of Copilot CLI 1.0.114, signed in, to the requests a test does not script.
 fn default_answer(method: &str, params: &Value) -> Answer {
     Answer::ok(match method {
-        "connect" => json!({ "ok": true, "protocolVersion": 3, "version": "1.0.112" }),
-        "status.get" => json!({ "version": "1.0.112", "protocolVersion": 3 }),
+        "connect" => json!({ "ok": true, "protocolVersion": 4, "version": "1.0.114" }),
+        "status.get" => json!({ "version": "1.0.114", "protocolVersion": 4 }),
         "auth.getStatus" => json!({ "isAuthenticated": true, "authType": "user", "login": "ant" }),
         "session.create" | "session.resume" => json!({ "sessionId": params["sessionId"], "mode": "interactive" }),
         "session.skills.reload" => json!({ "warnings": [], "errors": [] }),
@@ -207,7 +207,7 @@ impl Played {
     }
 }
 
-/// The events of a turn reading a file, the shapes of Copilot CLI 1.0.112: reasoning and a message streamed and then
+/// The events of a turn reading a file, the shapes of Copilot CLI 1.0.114: reasoning and a message streamed and then
 /// sent whole, a tool call, a sub-agent's message, a message sent only whole, an event of a type the SDK does not know,
 /// token use and cost.
 fn reading(id: &Value) -> Vec<Value> {
@@ -284,7 +284,7 @@ async fn copilot_turns_stream_through_the_translator() {
 
     let session = Session::start(&launch, None).await.unwrap();
     let agent = session.agent().unwrap();
-    assert_eq!((agent.name.as_str(), agent.version.as_str()), ("GitHub Copilot CLI", "1.0.112"));
+    assert_eq!((agent.name.as_str(), agent.version.as_str()), ("GitHub Copilot CLI", "1.0.114"));
     let (reply, updates, spends) = run(&session, Prompt::new("What is this?")).await;
     assert_eq!(reply.unwrap(), "Let me look.\n\nIt is a heading.");
     let id = session.id();
@@ -304,20 +304,28 @@ async fn copilot_turns_stream_through_the_translator() {
     assert_eq!(played.requests("connect")[0]["entra"], entra, "no MATS telemetry");
     let created = &played.requests("session.create")[0];
     assert_eq!(created["sessionId"], json!(*id.0));
-    let keys = ["model", "reasoningEffort", "contextTier", "excludedTools", "streaming", "enableSessionTelemetry"];
+    let keys = [
+        "/model",
+        "/inference/reasoningEffort",
+        "/inference/contextTier",
+        "/tools/excludedTools",
+        "/events/streaming",
+        "/github/telemetryEnabled",
+    ];
     let tools = json!(["bash", "read_bash", "write_bash"]);
     let expected = [json!("claude-haiku-4.5"), json!("low"), json!("long_context"), tools, json!(true), json!(false)];
-    assert_eq!(keys.map(|key| created[key].clone()), expected);
-    assert_eq!((&created["workingDirectory"], &created["requestPermission"]), (&json!(played.dir), &json!(true)));
+    assert_eq!(keys.map(|key| created.pointer(key).cloned()), expected.map(Some));
+    let permission = created.pointer("/permissions/request");
+    assert_eq!((&created["workingDirectory"], permission), (&json!(played.dir), Some(&json!(true))));
     let mcp = json!({
         "github": { "type": "http", "url": "https://api.example/mcp" },
         "ants": { "type": "stdio", "command": "/bin/ants", "args": ["mcp"], "env": { "ANTS_MCP_TOKEN": "secret" } }
     });
-    assert_eq!(created["mcpServers"], mcp);
+    assert_eq!(created.pointer("/mcp/servers"), Some(&mcp));
     assert_eq!(played.requests("session.send")[0]["prompt"], "What is this?");
 
     let checked = handshake(&launch).await;
-    assert_eq!(checked.readiness, Readiness::Ready { agent: "GitHub Copilot CLI 1.0.112".to_owned() });
+    assert_eq!(checked.readiness, Readiness::Ready { agent: "GitHub Copilot CLI 1.0.114".to_owned() });
 }
 
 #[tokio::test]
@@ -372,7 +380,7 @@ async fn copilot_sessions_get_the_ants_skills_as_a_skill_directory() {
     let offered = crate::harness::Skills { dir: skills.clone(), plugin: played.dir.join(".sense") };
     let launch = played.launch(ModelSettings::default()).with_skills(offered);
     Session::start(&launch, Some(SessionId::new("s1"))).await.unwrap().close().await;
-    assert_eq!(played.requests("session.resume")[0]["skillDirectories"], json!([skills]));
+    assert_eq!(played.requests("session.resume")[0].pointer("/skills/directories"), Some(&json!([skills])));
 }
 
 /// Wait for `done`, for at most 10 seconds.
@@ -595,10 +603,10 @@ async fn a_signed_out_or_mismatched_copilot_cli_fails_to_start() {
     let played = Played::new("copilot-start", "", move |method, _| match method {
         "connect" => {
             runs += 1;
-            let protocol = if runs <= 2 { 3 } else { 4 };
+            let protocol = if runs <= 2 { 4 } else { 5 };
             Some(Answer::ok(json!({ "ok": true, "protocolVersion": protocol, "version": "1.0.200" })))
         }
-        "status.get" => Some(Answer::ok(json!({ "version": "1.0.200", "protocolVersion": 4 }))),
+        "status.get" => Some(Answer::ok(json!({ "version": "1.0.200", "protocolVersion": 5 }))),
         "auth.getStatus" => Some(Answer::ok(json!({ "isAuthenticated": false, "statusMessage": "Not authenticated" }))),
         _ => None,
     });
@@ -611,7 +619,7 @@ async fn a_signed_out_or_mismatched_copilot_cli_fails_to_start() {
     assert_eq!(signed_out.sign_in.as_deref(), Some("copilot login"));
 
     let Readiness::Failed { detail } = handshake(&launch).await.readiness else { panic!("a CLI of another protocol") };
-    assert!(detail.contains("Copilot CLI 1.0.200 speaks SDK protocol 4, github-copilot-sdk 1.0.29"), "{detail}");
+    assert!(detail.contains("Copilot CLI 1.0.200 speaks SDK protocol 5, copilot-sdk 2.0.0"), "{detail}");
 }
 
 #[tokio::test]

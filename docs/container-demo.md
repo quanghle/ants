@@ -44,7 +44,7 @@ the hub to remain reachable; it does not provision [store-and-forward outboxes](
 - A GitHub account with Copilot CLI access. Real prompts use the account's model allowance.
 
 No host Rust, Node.js, NATS or Copilot installation is required. The image builds the workspace with the pinned Rust
-toolchain and `Cargo.lock`, and installs the pinned NATS release and Copilot CLI 1.0.112. The script passes the Rust
+toolchain and `Cargo.lock`, and installs the pinned NATS release and Copilot CLI 1.0.114. The script passes the Rust
 image tag from `rust-toolchain.toml` and the NATS image tag from `crates/ants/nats-server.sha256` to the build. Client
 telemetry, OpenTelemetry and automatic Copilot updates are disabled; GitHub's server-side service accounting is
 unaffected.
