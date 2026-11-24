@@ -522,8 +522,8 @@ impl Dedicated {
 
     /// Unlist the ant from the config file at `path`, wait up to `wait` for its daemon to stop it as the colony `js`
     /// shows, revoke its credentials with the account key in `dir` and push the account (unless `no_push`) to the
-    /// server of `nats`, remove their file and take the ant off its team. Its home stays. Refused while the ant leads
-    /// a team.
+    /// server of `nats`, remove their file and take the ant off its team, clearing the team's lead when it led it
+    /// ([`crate::teams::drop_ant`]). Its home stays.
     async fn retire(
         &self,
         path: &Path,

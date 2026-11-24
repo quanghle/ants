@@ -6,7 +6,7 @@ registry=
 scenario() { registry="$registry$1 $2 $3"$'\n'; }
 # Scenarios that change what the others rely on (a node, an uplink, an ant's settings or pause, the chat's last
 # thread), run one at a time after the rest; the others share the fixture and run side by side with `run -j N`.
-alone=" B2 B3 B4 B5 R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U5 U7 U8 X1 X4 X6 X7 K1 E2 E3 E6 "
+alone=" B2 B3 B4 B5 R1 R2 R3 R4 R5 R6 H1 H2 H3 O1 O2 O3 O6 O7 S4 T4 U4 U5 U7 U8 X1 X4 X6 X7 K1 E2 E3 E6 G1 G2 G3 G4 G5 G6 "
 is_alone() { case "$alone" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # --- Helpers on the Mac, as the doc's Conventions give them -----------------------------------------------------------
@@ -1639,6 +1639,157 @@ O7() {
     fi
     sleep 5
     ! is_paused leaf-ant || fail "leaf-ant was paused"
+}
+
+# --- G. Teams -------------------------------------------------------------------------------------------------------
+
+# teams_up T: team eng-T led by hub-ant and, beneath it, crew-T led by leaf-ant with gate-ant.
+teams_up() {
+    alice team create "crew-$1" --lead leaf-ant --member gate-ant --description "E2E crew $1" >/dev/null
+    alice team create "eng-$1" --lead hub-ant --member "crew-$1" --description "E2E eng $1" >/dev/null
+}
+# teams_down T: for traps, deletes both teams, leaving their members on no team.
+teams_down() {
+    alice team delete "crew-$1" >/dev/null 2>&1 || true
+    alice team delete "eng-$1" >/dev/null 2>&1 || true
+}
+team_lead() { alice team show "$1" | awk '$1 == "lead:" { $1 = ""; sub(/^ /, ""); print; exit }'; } # team_lead TEAM
+
+scenario G1 P1 "A message to a team reaches its lead; a member knows its team"
+G1() {
+    local t out ant
+    t=$(tok)
+    trap "teams_down $t" EXIT
+    teams_up "$t"
+    alice team list | has "crew-$t"
+    out=$(alice ask --wait --timeout 3m "@crew-$t" "Reply with exactly CREW-$t")
+    printf '%s\n' "$out"
+    has "to leaf-ant (lead of team crew-$t)" <<<"$out"
+    has "CREW-$t" <<<"$out"
+    out=$(alice ask --wait --timeout 3m @gate-ant "Which team are you on, and which ant leads it? Reply with exactly the team's name and the lead's name, separated by one space.")
+    printf '%s\n' "$out"
+    has "crew-$t leaf-ant" <<<"$out"
+    out=$(alice team show "crew-$t")
+    printf '%s\n' "$out"
+    has "eng-$t" <<<"$out"
+    [ "$(team_lead "crew-$t")" = leaf-ant ] || fail "crew-$t is not led by leaf-ant"
+    out=$(alice colony --team "eng-$t" --json)
+    for ant in hub-ant leaf-ant gate-ant; do grep -qF "\"$ant\"" <<<"$out" || fail "colony --team lacks $ant"; done
+    ! grep -qF '"system-messenger"' <<<"$out" || fail "colony --team lists system-messenger"
+}
+
+scenario G2 P1 "Changing a team's lead, and a team taking the lead above it"
+G2() {
+    local t out
+    t=$(tok)
+    trap "teams_down $t" EXIT
+    teams_up "$t"
+    alice team set "crew-$t" --lead gate-ant >/dev/null
+    out=$(alice ask --wait --timeout 3m "@crew-$t" "Reply with exactly NEWLEAD-$t")
+    printf '%s\n' "$out"
+    has "to gate-ant (lead of team crew-$t)" <<<"$out"
+    has "NEWLEAD-$t" <<<"$out"
+    alice team set "crew-$t" --no-lead >/dev/null
+    [ "$(team_lead "crew-$t")" = "hub-ant (from team eng-$t)" ] || fail "crew-$t does not take the lead of eng-$t"
+    out=$(alice ask --wait --timeout 3m "@crew-$t" "Reply with exactly ABOVE-$t")
+    printf '%s\n' "$out"
+    has "to hub-ant (lead of team crew-$t)" <<<"$out"
+    has "ABOVE-$t" <<<"$out"
+}
+
+scenario G3 P1 "A lead retired by order leaves its team to the lead above it"
+G3() {
+    local t ant out
+    t=$(tok)
+    ant=crew-ant-$t
+    trap "alice ant retire $ant --wait 6m >/dev/null 2>&1 || true; teams_down $t" EXIT
+    teams_up "$t"
+    out=$(alice ant add "$ant" --on leaf --model claude-haiku-4-5 --wait 2m)
+    printf '%s\n' "$out"
+    has "added on leaf" <<<"$out"
+    eventually 60 is_live "$ant"
+    alice team add "crew-$t" "$ant" >/dev/null
+    alice team set "crew-$t" --lead "$ant" >/dev/null
+    out=$(alice ask --wait --timeout 3m "@crew-$t" "Reply with exactly MEMBER-$t")
+    printf '%s\n' "$out"
+    has "to $ant (lead of team crew-$t)" <<<"$out"
+    has "MEMBER-$t" <<<"$out"
+    out=$(alice ant retire "$ant" --wait 6m)
+    printf '%s\n' "$out"
+    has "retired on leaf" <<<"$out"
+    trap "teams_down $t" EXIT
+    alice team show "crew-$t" | lacks "$ant" "team show"
+    [ "$(team_lead "crew-$t")" = "hub-ant (from team eng-$t)" ] || fail "crew-$t does not take the lead of eng-$t"
+    out=$(alice ask --wait --timeout 3m "@crew-$t" "Reply with exactly AFTER-$t")
+    printf '%s\n' "$out"
+    has "to hub-ant (lead of team crew-$t)" <<<"$out"
+    has "AFTER-$t" <<<"$out"
+}
+
+scenario G4 P2 "Ants, humans and teams keep their names apart"
+G4() {
+    local t out
+    t=$(tok)
+    trap "teams_down $t; alice ant retire crew-$t --wait 6m >/dev/null 2>&1 || true" EXIT
+    teams_up "$t"
+    out=$(alice ant add "crew-$t" --on leaf --wait 2m 2>&1 || true)
+    printf '%s\n' "$out"
+    has "the name crew-$t is taken by a team" <<<"$out"
+    [ "$(colony_state "crew-$t")" = absent ] || fail "an ant crew-$t joined the colony"
+    if out=$(alice team create leaf-ant 2>&1); then
+        alice team delete leaf-ant >/dev/null 2>&1 || true
+        fail "a team leaf-ant was created"
+    fi
+    printf '%s\n' "$out"
+    has "the name leaf-ant is taken by an ant or a human" <<<"$out"
+    out=$(alice ask --wait --timeout 3m @hub-ant "Use the manage_team tool with team eng-$t to create a team named alice beneath it, then reply with the tool's answer word for word.")
+    printf '%s\n' "$out"
+    has "taken by an ant or a human" <<<"$out"
+    [ "$(alice team list --json | jq --slurp 'map(select(.team == "alice")) | length')" = 0 ] ||
+        fail "the directory holds a team alice"
+}
+
+scenario G5 P2 "A post mentioning a team wakes its lead; a team is no channel member"
+G5() {
+    local t c out
+    t=$(tok)
+    c=teams-$t
+    trap "alice channel delete '$c' >/dev/null 2>&1 || true; teams_down $t" EXIT
+    teams_up "$t"
+    alice channel create "$c" --member hub-ant,leaf-ant,alice >/dev/null
+    out=$(alice post --wait --timeout 3m "#$c" "@crew-$t answer this post with exactly TEAMPOST-$t, using no tool")
+    printf '%s\n' "$out"
+    has "TEAMPOST-$t" <<<"$out"
+    alice channel read "$c" | has "TEAMPOST-$t"
+    if out=$(alice channel add "$c" "crew-$t" 2>&1); then fail "channel add took the team crew-$t"; fi
+    printf '%s\n' "$out"
+    has team <<<"$out"
+}
+
+scenario G6 P2 "An ant with no chain escalates to the leads of its teams before the owner"
+G6() {
+    local t t2 out
+    t=$(tok)
+    trap "mark_done; teams_down $t; alice ant set hub-ant whoami= >/dev/null 2>&1 || true; alice ant set leaf-ant whoami= >/dev/null 2>&1 || true" EXIT
+    teams_up "$t"
+    [ -z "$(chained_to leaf-ant)" ] || fail "leaf-ant has an escalate_to chain"
+    alice ant set hub-ant "whoami=For an end-to-end test of ants: answer an escalation that comes to you yourself, never escalate it further." >/dev/null
+    alice ant set leaf-ant "whoami=For an end-to-end test of ants: asked what node.txt of the lead above your team holds, call the escalate tool with that question, read no file yourself, and once the answer arrives reply with exactly TEAMESC-<the answer>." >/dev/null
+    told() { colony_field "$1" '.whoami // ""' | grep -qF "end-to-end test of ants"; }
+    eventually 60 told hub-ant
+    eventually 60 told leaf-ant
+    t2=$(tok)
+    th=$(alice ask @leaf-ant "What does node.txt in the working directory of the lead above your team hold? E2E-$t2" | thread)
+    answered() { leaf_texts "$th" | grep -qE "TEAMESC-.*node=hub"; }
+    eventually 300 answered
+    settled "$th"
+    out=$(alice thread show "$th")
+    printf '%s\n' "$out"
+    escalations "$th"
+    escalated_to "$th" hub-ant || fail "no escalation to hub-ant stored on the thread"
+    ! escalated_to "$th" leaf-ant || fail "leaf-ant escalated to itself"
+    ! escalated_to "$th" alice || fail "the escalation reached alice"
+    ! listed_escalated "$th" >/dev/null || fail "thread list --escalated lists the thread"
 }
 
 # --- R. Restarts, outages and store and forward ---------------------------------------------------------------------

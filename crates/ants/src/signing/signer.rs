@@ -447,9 +447,9 @@ impl Signer<'_> {
         Ok((jwt, Some(renewed)))
     }
 
-    /// Retire the ant `request` names, if its manager added it and it leads no team: revoke its live keys, push the
-    /// account to the hub when any were, take it off its team, drop it from the leaf node the request came through
-    /// ([`ordered::drop_from_leaf`]), and answer.
+    /// Retire the ant `request` names, if its manager added it: revoke its live keys, push the account to the hub when
+    /// any were, take it off its team, clearing the team's lead when it led it ([`crate::teams::drop_ant`]), drop it
+    /// from the leaf node the request came through ([`ordered::drop_from_leaf`]), and answer.
     async fn retire(
         &mut self,
         approver: &Approver,

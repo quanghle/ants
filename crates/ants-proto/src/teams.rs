@@ -445,22 +445,6 @@ impl TeamDirectory {
         Ok(true)
     }
 
-    /// Rename the ant `from` to `to` wherever the directory names it, as a member and a lead. Returns whether it
-    /// changed.
-    pub fn rename_ant(&mut self, from: &UserId, to: &UserId) -> bool {
-        let mut changed = false;
-        for team in &mut self.teams {
-            for member in team.members.iter_mut().filter(|m| *m == from) {
-                *member = to.clone();
-                changed = true;
-            }
-            if team.lead.as_ref() == Some(from) {
-                team.lead = Some(to.clone());
-            }
-        }
-        changed
-    }
-
     /// Take the ant `ant`, retired or revoked, out of its team, clearing the team's lead when it led it. Returns the team
     /// it left, if any.
     pub fn drop_ant(&mut self, ant: &UserId) -> Option<UserId> {
