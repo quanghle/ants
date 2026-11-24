@@ -1,5 +1,6 @@
 //! Tests of the doctor's service checks: the hub service of `ants setup` and the nats-server the daemon runs.
 
+#[cfg(unix)]
 use super::*;
 
 #[cfg(unix)]
