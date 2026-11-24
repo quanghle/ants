@@ -18,7 +18,8 @@
 //! whoami = "Implement what the manager assigns."   # defaults a request may replace: whoami, memory, tasks,
 //! capabilities = ["rust"]                # capabilities
 //! env = { CARGO_TARGET_DIR = "target" }  # fixed: env, worktrees, worktree_base, publish, idle_timeout,
-//! worktrees = true                       # approval_timeout, spend_warn_percent, fallback
+//! worktrees = true                       # approval_timeout, spend_warn_percent, fallback; in env, <ant> and
+//!                                        # <manager> stand for the ant's name and its manager's
 //! fallback = ["copilot", ":claude-haiku-4-5"]   # less the entry naming the harness and model an ant runs
 //! ```
 //!
@@ -46,8 +47,11 @@ use crate::worktrees::Base;
 
 /// What `name_pattern` is unless set: the manager's name, a dash and anything.
 pub const DEFAULT_NAME_PATTERN: &str = "<manager>-*";
-/// The placeholder of a name pattern for the manager's name.
+/// The placeholder of a name pattern, and of an `env` value, for the manager's name.
 pub const MANAGER: &str = "<manager>";
+/// The placeholder of an `env` value for the added ant's name, so that each ant of a template can have its own
+/// identity or credentials (`GIT_CONFIG_VALUE_0 = "<ant>"`).
+pub const ANT: &str = "<ant>";
 
 /// A reasoning effort, ranked from the least to the most.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -394,7 +398,11 @@ impl AntTemplate {
             whoami: request.whoami.clone().or_else(|| self.whoami.clone()),
             memory: request.memory.clone().or_else(|| self.memory.clone()),
             tasks: request.tasks.clone().or_else(|| self.tasks.clone()),
-            env: self.env.clone(),
+            env: self
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.replace(ANT, name.as_str()).replace(MANAGER, manager.as_str())))
+                .collect(),
             harness,
             model,
             fallback: self.fallback.clone(),
@@ -654,6 +662,27 @@ mod tests {
         assert_eq!((ant.allow, ant.escalate_to), (vec!["read".to_owned()], vec![id("lead")]));
         assert_eq!((ant.whoami.as_deref(), ant.worktrees, ant.env.len()), (Some("Work."), Some(true), 1));
         assert_eq!(ant.fallback, ["copilot", ":haiku"], "whichever harness and model the ant runs");
+    }
+
+    #[test]
+    fn env_values_name_the_ant_and_its_manager_where_they_say_so() {
+        let mut t = template();
+        t.env = BTreeMap::from([
+            ("USER_NAME".to_owned(), "<ant>_team".to_owned()),
+            ("TOKEN_FILE".to_owned(), "~/.tokens/<ant>.token, by <manager>".to_owned()),
+            ("PLAIN".to_owned(), "<name> <ANT>".to_owned()),
+        ]);
+        let request = Request { model: Some("sonnet".to_owned()), ..Request::default() };
+        let ant = t.resolve(&id("lead"), &id("lead-a"), &request).unwrap();
+        let env: Vec<_> = ant.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(
+            env,
+            [
+                ("PLAIN", "<name> <ANT>"),
+                ("TOKEN_FILE", "~/.tokens/lead-a.token, by lead"),
+                ("USER_NAME", "lead-a_team")
+            ]
+        );
     }
 
     #[test]
