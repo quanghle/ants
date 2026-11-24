@@ -1,5 +1,5 @@
 # SQLite database and WAL files are local state.
-# Share issues with `bd export -o .bd/issues.jsonl`.
+# Issues live on the bd server; a release commits `bd export -o .bd/issues.jsonl` for its notes.
 bd.db
 bd.db-wal
 bd.db-shm

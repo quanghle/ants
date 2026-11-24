@@ -159,7 +159,7 @@ scripts/check.sh --footprint   # also the release build and the idle footprint c
 
 - **Dependencies:** `.cargo/config.toml` enforces a 7-day minimum publish age; `deny.toml` governs allowed permissive licenses and advisories.
 - **Wire compatibility:** `crates/ants-proto/tests/wire_snapshots.rs` pins wire JSON formats with [insta](https://insta.rs) snapshots following [docs/hooks.md](docs/hooks.md#versioning).
-- **Issue & spec tracking:** work items and feature specifications are tracked in `bd` (`.bd/issues.jsonl`).
+- **Issue & spec tracking:** work items and feature specifications are tracked in `bd`, on the server at https://bd.quangle.net/w/ants; each release commits a snapshot in `.bd/issues.jsonl`.
 - **Security:** report vulnerabilities privately per [SECURITY.md](SECURITY.md).
 
 ## License
