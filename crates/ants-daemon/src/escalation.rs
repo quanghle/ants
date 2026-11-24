@@ -410,7 +410,7 @@ impl Escalator {
     pub async fn took_climb(&self, envelope: &Envelope) -> Result<bool> {
         let Some(carried) = envelope.escalation.as_deref() else { return Ok(false) };
         let thread = &envelope.thread_id;
-        if self.humans.is_human(&carried.leader) && passes_on(&self.ant, envelope, carried) {
+        if self.passes_on(envelope) {
             self.passed_on(envelope, carried).await?;
             return Ok(true);
         }
@@ -432,6 +432,13 @@ impl Escalator {
             }
         }
         Ok(true)
+    }
+
+    /// Whether `envelope` passes an escalation of the ant, a question asked first of a human's assistant included, on
+    /// from that assistant to its human, for [`Escalator::took_climb`] to send on.
+    pub fn passes_on(&self, envelope: &Envelope) -> bool {
+        let Some(carried) = envelope.escalation.as_deref() else { return false };
+        self.humans.is_human(&carried.leader) && passes_on(&self.ant, envelope, carried)
     }
 
     /// `envelope` from the assistant leading the thread's escalation passes it on to its human, the leader of

@@ -208,6 +208,7 @@ impl Trails {
                 self.report_step(header, call, StepStage::Dropped);
             }
             if !call.sent || call.function == TrailFunction::Human {
+                self.end_question(call).await;
                 continue;
             }
             if call.to == self.inner.ant {

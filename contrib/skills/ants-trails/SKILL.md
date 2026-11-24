@@ -102,7 +102,9 @@ Nothing else of the host is reachable: these names are defined before the script
   dicts, each with a `question` (1-500 characters) and 2-9 `options` (labels, or dicts with a `label` and a
   `description`), and optionally a `header`, `multi_select` (default False) and `free_text` (default True). Returns the
   answer as text: for one question, the label picked (labels joined by `, ` with `multi_select`) or the text typed; for
-  several, one line per question, `title: answer`. Set `"free_text": False` to compare the answer with a label.
+  several, one line per question, `title: answer`. Set `"free_text": False` to compare the answer with a label. An
+  owner with an assistant has it asked first, as for `ask_human`: the assistant's answer is its reply's text, whatever
+  `free_text` says, so check it before comparing.
 - `await trail(name, args=None)`: one step, answered by a child run of the saved trail `name`, started at its start
   with `args` as its input, on a thread of its own spun off the run's, for the run's owner; returns its result. Its
   steps and turns count against the run's limits. A trail on the route of a calling run, whichever of its legs entered it,

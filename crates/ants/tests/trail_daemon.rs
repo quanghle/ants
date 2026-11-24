@@ -38,6 +38,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+#[path = "trail_daemon/asked_first.rs"]
+mod asked_first;
 #[path = "trail_daemon/children.rs"]
 mod children;
 #[path = "trail_daemon/ends.rs"]

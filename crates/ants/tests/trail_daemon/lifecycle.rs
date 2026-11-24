@@ -576,7 +576,7 @@ async fn a_resumed_run_counts_the_steps_it_sends_anew_once() {
 }
 
 /// A user JWT for `name`, tagged `tag`, signed by `account` for the key `key`.
-fn user_jwt(account: &nkeys::KeyPair, key: &nkeys::KeyPair, name: &UserId, tag: &str) -> String {
+pub(super) fn user_jwt(account: &nkeys::KeyPair, key: &nkeys::KeyPair, name: &UserId, tag: &str) -> String {
     use data_encoding::BASE64URL_NOPAD;
     let header = BASE64URL_NOPAD.encode(br#"{"typ":"JWT","alg":"ed25519-nkey"}"#);
     let claims = json!({

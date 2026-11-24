@@ -54,7 +54,7 @@ these names:
 | Name | What it does |
 |---|---|
 | `await agent(prompt, ant=None, capability=None, team=None, schema=None, label=None, tips=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), to the lead of the team `team` names (alone, without `ant` or `capability`; the step carries the team, as a message to a team does, and a team with no lead, nor any above it, no such team or a directory that cannot be read raises), or to the conductor itself. Returns the reply's text, or with `schema` (a JSON Schema, of which `type`, `properties`, `required`, `items`, `enum` and `additionalProperties: false` are checked, any other keyword passing unchecked) its JSON, asked for again at most twice on a mismatch. `tips` is the step's tip key ([Tips](#tips)). |
-| `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does; returns the answer's text. |
+| `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does, its assistant first ([Trust](#trust)); returns the answer's text. |
 | `await trail(name, args=None)` | One step, answered by a child run of the saved trail `name` with `args` as its input; returns its result ([Child runs](#child-runs-trail)). |
 | `await goto(trail=None, at=None, state=None)` | Ends the leg where called and goes on in `trail` (this one without it) at waypoint `at` (its start without it) with `state` as `args`; returns only by raising ([Routes](#routes-goto)). |
 | `phase(title)`, `log(text)`, `print()` | Notes on the run's thread; never wait. The record keeps a phase's first 1000 characters. |
@@ -456,6 +456,12 @@ those it conducts with `trail_status` and `stop_trail`, resumes none, and saves 
 `save_trail` and `remove_trail` ([auth.md](auth.md)). A `human()` step goes to the run's
 owner, and a step's thread keeps that owner, so replies and escalations of the step's recipient reach the human who owns
 the run.
+
+A `human()` step's questions go to the owner's assistant first, as an `ask_human` question does
+([architecture.md](architecture.md#escalations)), while one acts for the owner: the assistant's answer on the step's
+thread, in words (whatever `free_text` says), is the call's answer; passed on with `escalate`, or left unanswered past the conductor's
+`escalate_after`, the questions reach the owner as questions, whose answer then is. An answer with `answer_for_human`
+counts as the owner's as well. Once the step is answered, or given up, its questions go on to nobody.
 
 ## Tips
 
