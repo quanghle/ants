@@ -17,13 +17,13 @@ use crate::auth;
 use crate::credentials::issued;
 
 impl Approver {
-    /// Check that `request` proves credentials of the team's account named as it says, unexpired and not revoked:
+    /// Check that `request` proves credentials of the bus's account named as it says, unexpired and not revoked:
     /// signed with their key. Returns their claims.
     fn check_renewal(&self, request: &RenewRequest) -> Result<auth::Claims> {
         auth::check_user_key(&request.public_key)?;
         let current = auth::verified(&request.current).context("the credentials to renew")?;
         if current.iss != self.account {
-            bail!("credentials issued by {}, not by the team's account", current.iss);
+            bail!("credentials issued by {}, not by the bus's account", current.iss);
         }
         if current.name != request.name {
             bail!("credentials of {}, not {}", current.name, request.name);
@@ -147,7 +147,7 @@ impl Approver {
 }
 
 /// `ants enroll renew --auto`: renew every credentials asking ([`auth::renew`]) as their requests arrive, with the
-/// account key in the team directory of the approver `connect` gives, until `stop` completes. Each run connects
+/// account key in the auth directory of the approver `connect` gives, until `stop` completes. Each run connects
 /// afresh every `reconnect` ([`super::AUTO_RECONNECT`]), with credentials the approver issues itself, and reads the
 /// revocations again. Calls `renewed` with what each renewal did.
 pub async fn auto(

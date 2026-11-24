@@ -1,12 +1,12 @@
-//! Team credentials for NATS decentralized auth: one operator, the team's account, and one user per ant or human whose
+//! Team credentials for NATS decentralized auth: one operator, the bus's account, and one user per ant or human whose
 //! JWT carries the permissions of [`Permissions::for_user`] in its role.
 //!
 //! The streams, KV buckets and object stores live in an account of their own, the store account, the only one with
 //! JetStream. It exports as services the JetStream API and every subject they store, and as streams the reply inboxes
-//! JetStream delivers to; the team's account imports them under the same names ([`store`]). So no subject a user
-//! names as a reply, which the server answers in the team's account, is a stored one.
+//! JetStream delivers to; the bus's account imports them under the same names ([`store`]). So no subject a user
+//! names as a reply, which the server answers in the bus's account, is a stored one.
 //!
-//! The operator and account seeds stay in the team directory on the machine that issues credentials. The server
+//! The operator and account seeds stay in the auth directory on the machine that issues credentials. The server
 //! needs only `server.conf`; each machine gets the `.creds` file of the ants it runs, and its leaf node the uplink
 //! credentials of [`issue_leaf`].
 //!
@@ -43,8 +43,8 @@ pub use self::issuing::{
 };
 pub use self::relocate::move_stores;
 pub use self::renewal::{Renewed, renew, renew_registered};
-pub(crate) use self::short_lived::retired_consumer_creds;
 pub use self::short_lived::{approver_creds, issue_bootstrap, issue_enrollment, revoker_creds, signer_creds};
+pub(crate) use self::short_lived::{retired_consumer_creds, team_keeper_creds};
 pub use self::uplink::{
     check_leaf, extend_leaf, issue_leaf, leaf_store_creds, leaf_system_creds, leaf_user, shrink_leaf,
 };
@@ -75,7 +75,7 @@ const MAX_CONTROL_LINE: u32 = 64 * 1024;
 const MAX_UPLINK_JWT: usize = 252 * 1024;
 const _: () = assert!(MAX_UPLINK_JWT + 4 * 1024 <= 16 * MAX_CONTROL_LINE as usize);
 
-/// The default team directory, `~/.config/ants/auth`.
+/// The default auth directory, `~/.config/ants/auth`.
 pub fn default_dir() -> Result<PathBuf> {
     Ok(std::env::home_dir().context("no home directory")?.join(".config/ants/auth"))
 }
@@ -88,7 +88,7 @@ pub fn team_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// The keys of a team: its operator, system account, store account and the team's account.
+/// The keys of a team: its operator, system account, store account and the bus's account.
 struct Keys {
     operator: KeyPair,
     system: KeyPair,
@@ -99,7 +99,7 @@ struct Keys {
 impl Keys {
     fn load(dir: &Path) -> Result<Self> {
         if holds_team(dir) && !holds_store(dir) {
-            bail!("the team in {} has no store account: `ants auth init` adds it", dir.display());
+            bail!("the account keys in {} hold no store account: `ants auth init` adds it", dir.display());
         }
         Ok(Self {
             operator: load(&dir.join(OPERATOR_SEED))?,
@@ -113,7 +113,7 @@ impl Keys {
 /// Create the operator and accounts in `dir` and write the `server.conf` that trusts them.
 pub fn init(dir: &Path) -> Result<()> {
     if dir.join(ACCOUNT_SEED).exists() {
-        bail!("{} already holds a team", dir.display());
+        bail!("{} already holds account keys", dir.display());
     }
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let keys = Keys {
@@ -134,10 +134,10 @@ pub fn init(dir: &Path) -> Result<()> {
 /// revocations still in effect ([`revoke::apply`]), the operator JWT kept.
 pub fn add_store(dir: &Path) -> Result<()> {
     if !holds_team(dir) || !dir.join(ACCOUNT_SEED).is_file() {
-        bail!("no team in {}", dir.display());
+        bail!("no account keys in {}", dir.display());
     }
     if holds_store(dir) {
-        bail!("{} already holds a team with a store account", dir.display());
+        bail!("{} already holds account keys with a store account", dir.display());
     }
     write_secret(&dir.join(STORE_SEED), &seed(&KeyPair::new_account())?)?;
     revoke::apply(dir)?;
@@ -151,7 +151,7 @@ pub type AccountJwt = (String, String);
 /// before it are refused.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Revocations {
-    /// Those of the team's account.
+    /// Those of the bus's account.
     pub team: BTreeMap<String, u64>,
     /// Those of the store account: the store account uplinks of leaf nodes.
     pub store: BTreeMap<String, u64>,
@@ -196,7 +196,7 @@ pub fn store_key(dir: &Path) -> Result<String> {
     Ok(load(&dir.join(STORE_SEED))?.public_key())
 }
 
-/// The public keys of the team's account and of the store account a `server.conf` of `ants auth init` preloads, by
+/// The public keys of the bus's account and of the store account a `server.conf` of `ants auth init` preloads, by
 /// their names; the store account's None in one written before there was one.
 fn preloaded_accounts(server_conf: &str) -> Result<(String, Option<String>)> {
     let (mut account, mut store) = (None, None);
@@ -212,15 +212,15 @@ fn preloaded_accounts(server_conf: &str) -> Result<(String, Option<String>)> {
             _ => {}
         }
     }
-    Ok((account.context("no account of the team preloaded: not a server.conf of `ants auth init`")?, store))
+    Ok((account.context("no account of the bus preloaded: not a server.conf of `ants auth init`")?, store))
 }
 
-/// The public key of the team's account in `dir`.
+/// The public key of the bus's account in `dir`.
 pub fn account_key(dir: &Path) -> Result<String> {
     Ok(load(&dir.join(ACCOUNT_SEED))?.public_key())
 }
 
-/// The text of short-lived credentials of the team's system account, for `ants auth push` to update the account on a
+/// The text of short-lived credentials of the bus's system account, for `ants auth push` to update the account on a
 /// server.
 pub fn system_creds(dir: &Path) -> Result<String> {
     let system = load(&dir.join(SYSTEM_SEED))?;
@@ -258,7 +258,7 @@ pub fn check_assistant(dir: &Path, user: &UserId, human: &UserId) -> Result<()> 
     let live = live_in(dir)?;
     let named = |i: &&issued::Issued, name: &UserId| i.name == name.as_str();
     if !issued.iter().any(|i| named(&i, human) && i.kind == issued::Kind::Human) {
-        bail!("{human} is not a human of the team: issue its credentials with `ants auth user {human} --human` first");
+        bail!("{human} is not a human of the bus: issue its credentials with `ants auth user {human} --human` first");
     }
     let mine = issued.iter().filter(|i| named(i, user));
     if let Some(i) = mine.clone().find(|i| i.kind == issued::Kind::Human) {
@@ -382,7 +382,7 @@ fn limits(jetstream: bool) -> serde_json::Value {
     })
 }
 
-/// The JWT of the store account: JetStream, exporting what the team's account imports ([`store`]), and revoking the
+/// The JWT of the store account: JetStream, exporting what the bus's account imports ([`store`]), and revoking the
 /// user keys of `revocations` issued at or before their time.
 fn store_jwt(keys: &Keys, revocations: &BTreeMap<String, u64>) -> Result<String> {
     let mut nats = json!({
@@ -398,7 +398,7 @@ fn store_jwt(keys: &Keys, revocations: &BTreeMap<String, u64>) -> Result<String>
     jwt(&keys.operator, &keys.store.public_key(), STORE, nats, None)
 }
 
-/// The JWT of the team's account, without JetStream of its own, importing the store account's, and revoking the user
+/// The JWT of the bus's account, without JetStream of its own, importing the store account's, and revoking the user
 /// keys of `revocations` issued at or before their time.
 fn account_jwt(keys: &Keys, revocations: &BTreeMap<String, u64>) -> Result<String> {
     let mut nats = json!({

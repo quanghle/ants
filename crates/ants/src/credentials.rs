@@ -1,6 +1,6 @@
 //! Credentials past `ants auth` issuing them: enrollment and renewal asked over NATS and the approver answering them,
 //! the registry of issued keys and its listings, revoking them and pushing the account that carries the revocations,
-//! seeds kept in the OS credential store, and the passphrase-encrypted backup of the team keys.
+//! seeds kept in the OS credential store, and the passphrase-encrypted backup of the account keys.
 
 pub(crate) mod age;
 pub(crate) mod approver;

@@ -100,7 +100,7 @@ pub enum Lookup {
 pub fn verify(account: &str, human: &UserId, device: &DeviceId, jwt: &str, now: u64) -> Result<VerifiedDevice, String> {
     let jwt = UserJwt::verify(jwt).map_err(|e| e.to_string())?;
     if jwt.iss != account {
-        return Err(format!("signed by {}, not by the team's account {account}", jwt.iss));
+        return Err(format!("signed by {}, not by the bus's account {account}", jwt.iss));
     }
     if jwt.name != human.as_str() {
         return Err(format!("names {}, not {human}", jwt.name));

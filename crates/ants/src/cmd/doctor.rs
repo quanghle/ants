@@ -23,7 +23,7 @@ pub(crate) struct DoctorArgs {
     /// Print one JSON object per check.
     #[arg(long)]
     pub(crate) json: bool,
-    /// Team directory of `ants auth` (default: ~/.config/ants/auth); where it holds the team keys, the hub is asked
+    /// Auth directory of `ants auth` (default: ~/.config/ants/auth); where it holds the account keys, the hub is asked
     /// whether it keeps pushed accounts across restarts.
     #[arg(long = "dir", env = "ANTS_AUTH_DIR")]
     pub(crate) team: Option<PathBuf>,

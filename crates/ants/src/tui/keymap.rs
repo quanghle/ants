@@ -20,7 +20,7 @@ mod when;
 pub use table::GLOBAL;
 use table::{
     ANT, ANT_QUEUE, BAR, CHANNEL, CREDENTIALS, DM, HELD, HOME, MCP, MEMORIES, NAV, PENDING, REQUEST, SEARCH, SETTINGS,
-    START, THREAD, TREE, TYPING, WORK,
+    START, TEAM, THREAD, TREE, TYPING, WORK,
 };
 use when::finding;
 
@@ -90,6 +90,7 @@ pub enum View {
     Home,
     Work,
     Channel,
+    Team,
     Thread,
     Dm,
     Search,
@@ -121,6 +122,7 @@ impl View {
             Self::Home => "home",
             Self::Work => "work, and an ant's threads",
             Self::Channel => "a channel",
+            Self::Team => "a team",
             Self::Thread => "a thread",
             Self::Dm => "a person",
             Self::Search => "a search",
@@ -159,6 +161,7 @@ pub fn views(model: &Model) -> Vec<View> {
         Page::Home(_) => View::Home,
         Page::Work(_) => View::Work,
         Page::Channel(_) => View::Channel,
+        Page::Team(_) => View::Team,
         Page::Thread(_) => View::Thread,
         Page::Dm(_) => View::Dm,
         Page::Search(_) => View::Search,
@@ -223,6 +226,7 @@ pub fn entries(view: View) -> &'static [Entry] {
         View::Home => HOME,
         View::Work => WORK,
         View::Channel => CHANNEL,
+        View::Team => TEAM,
         View::Thread => THREAD,
         View::Dm => DM,
         View::Search => SEARCH,

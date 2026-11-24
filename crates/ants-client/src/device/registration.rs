@@ -48,7 +48,7 @@ fn plain_host(host: &str) -> bool {
 pub enum Step {
     /// Sign in to GitHub at `page`, the trusted device login page, and enter `user_code` there before `expires_at`.
     Verify { page: String, user_code: String, expires_at: DateTime<Utc> },
-    /// Signed in as GitHub user `login`, outside the registration policy: a human of the team decides.
+    /// Signed in as GitHub user `login`, outside the registration policy: a human of the bus decides.
     Waiting { login: String, reason: String },
     /// The device is registered: its credentials, the user JWT `jwt`.
     Signed { jwt: String, credentials: Credentials },

@@ -209,7 +209,7 @@ async fn a_clone_order_copies_an_ant_under_a_new_name_and_undoes_a_failed_one() 
         let want = json!({ "whoami": "Reviews parsers", "model": "gpt-5", "escalate_to": ["lead"] });
         assert_eq!(Value::Object(record.fields), want, "dev-a's with the order's over them");
 
-        // The signer refuses: the team holds credentials of dev-d already.
+        // The signer refuses: the bus holds credentials of dev-d already.
         server.creds_as(&p("dev-d"), Role::Ant);
         let home_d = server.dir().join("home-d");
         let clone = clone_as("dev-d", json!({ "home": home_d }));

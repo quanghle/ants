@@ -39,6 +39,7 @@ impl Tools {
             + Self::notes_router()
             + Self::attach_router()
             + Self::channels_router()
+            + Self::teams_router()
             + Self::escalation_router();
         if hub.requester.get().is_some() {
             tool_router.merge(Self::managers_router());
@@ -95,6 +96,7 @@ pub fn own_names() -> &'static HashSet<String> {
             + Tools::notes_router()
             + Tools::attach_router()
             + Tools::channels_router()
+            + Tools::teams_router()
             + Tools::escalation_router()
             + Tools::managers_router()
             + Tools::assist_router()
@@ -183,7 +185,10 @@ fn instructions(ant: &UserId, hub: &Hub, assisting: Option<&UserId>, provider: O
          post_channel starts a channel thread this ant creates, whose escalations go up this ant's chain; with \
          on_thread it posts on the thread of the channel post being handled, spending one of its turns. \
          escalate sends the thread up its origin chain when stuck on it. manage_channel lists the \
-         channels a human made this ant the owner of, and changes their members and messenger. react marks a \
+         channels a human made this ant the owner of, and changes their members and messenger. \
+         list_teams shows the teams, groups of ants each with a lead: send_message and ask_ant to a team reach its \
+         lead, list_ants and route take a team to keep to its ants, and manage_team changes a team this ant leads \
+         or one beneath it. react marks a \
          message, by default the one being handled, with a reaction such as eyes (seen) or check (done) that \
          humans see beneath it: it wakes nobody, so it acknowledges without a reply. list_reactions shows the \
          reactions to a message this ant reads, which never arrive as messages. suggest_thread_title proposes a \

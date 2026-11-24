@@ -203,6 +203,7 @@ expression: value
         "5.2"
       ]
     },
+    "team": "backend",
     "sent_at": "2025-01-01T12:00:00Z"
   },
   "payload": "{\"id\":"

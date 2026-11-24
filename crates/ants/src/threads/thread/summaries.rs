@@ -22,6 +22,9 @@ pub struct Summary {
     pub users: BTreeSet<UserId>,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub channels: BTreeSet<ChannelId>,
+    /// The teams messages on it were sent to, each delivered to its lead ([`Entry::team`]).
+    #[serde(skip)]
+    pub teams: BTreeSet<UserId>,
     pub first_at: DateTime<Utc>,
     pub last_at: DateTime<Utc>,
     pub messages: usize,
@@ -109,7 +112,7 @@ pub struct Threads {
     by_id: HashMap<ThreadId, Summary>,
     /// `--grep`'s text, lowercased.
     grep: Option<String>,
-    /// With `--escalated`, the team's humans.
+    /// With `--escalated`, the bus's humans.
     humans: Option<Humans>,
 }
 
@@ -131,6 +134,7 @@ impl Threads {
             owner: None,
             users: BTreeSet::new(),
             channels: BTreeSet::new(),
+            teams: BTreeSet::new(),
             first_at: entry.stored_at,
             last_at: entry.stored_at,
             messages: 0,
@@ -160,6 +164,7 @@ impl Threads {
         summary.last_at = summary.last_at.max(entry.stored_at);
         summary.users.extend(entry.users().cloned());
         summary.channels.extend(entry.channel.iter().cloned());
+        summary.teams.extend(entry.team.iter().filter(|_| !entry.forged).cloned());
         if summary.owner.is_none() {
             summary.owner.clone_from(&entry.owner);
         }

@@ -78,7 +78,7 @@ impl Local {
             }
         });
         let issued = team.map(issued::issued).transpose().unwrap_or_else(|e| {
-            tracing::warn!("reading the team's registry: {e:#}");
+            tracing::warn!("reading the auth directory's registry: {e:#}");
             None
         });
         let issued = issued.unwrap_or_default().into_iter().filter(|i| i.name == ant.as_str()).collect::<Vec<_>>();
@@ -137,8 +137,8 @@ fn check(ant: &UserId, local: &Local, colony: &[ColonyEntry]) -> Result<Vec<Stri
         ));
     } else if local.entry.is_none() && !local.in_registry {
         warnings.push(format!(
-            "neither the config file nor the team's registry on this machine lists {ant}: whether it was added from a \
-             template is not checked"
+            "neither the config file nor the auth directory's registry on this machine lists {ant}: whether it was \
+             added from a template is not checked"
         ));
     }
     Ok(warnings)
@@ -191,7 +191,7 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId) -> Result<()> {
     let (before, _) = put(&js, creds, human, Some(ant.clone()), Sealing::Keep).await?;
     replaced(ant, human, before, None);
     println!(
-        "It acts for {human} only while its credentials name {human} as the human it assists, as the team's account \
+        "It acts for {human} only while its credentials name {human} as the human it assists, as the bus's account \
          signs them."
     );
     Ok(())

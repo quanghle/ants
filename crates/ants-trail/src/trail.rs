@@ -17,8 +17,8 @@ const PRELUDE_NAME: &str = "<prelude>";
 /// trail and goto suspend the run on a future, phase and log return at once.
 const PRELUDE: &str = r#"import asyncio
 
-async def agent(prompt, ant=None, capability=None, schema=None, label=None, tips=None):
-    request = {"prompt": prompt, "ant": ant, "capability": capability, "schema": schema, "label": label, "tips": tips}
+async def agent(prompt, ant=None, capability=None, team=None, schema=None, label=None, tips=None):
+    request = {"prompt": prompt, "ant": ant, "capability": capability, "team": team, "schema": schema, "label": label, "tips": tips}
     return await __ants_agent({k: v for k, v in request.items() if v is not None})
 
 async def human(questions):

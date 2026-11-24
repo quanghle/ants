@@ -101,7 +101,7 @@ pub struct AddArgs {
     /// The webhooks' config file (default: ~/.ants/webhooks.toml).
     #[arg(long)]
     pub config: Option<PathBuf>,
-    /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+    /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
     #[arg(long, env = "ANTS_AUTH_DIR")]
     pub dir: Option<PathBuf>,
     /// Where to write the webhook's credentials (default: ~/.config/ants/auth/<name>.creds, or <dir>/<name>.creds).

@@ -1,0 +1,35 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "teams": [
+    {
+      "team": "eng",
+      "description": "The eng team.",
+      "members": [
+        "lead",
+        "backend"
+      ],
+      "lead": "lead",
+      "owner": "alice",
+      "avatar": "seed",
+      "color": "teal",
+      "created_by": "alice",
+      "created_at": "2025-01-01T12:00:00Z"
+    },
+    {
+      "team": "backend",
+      "description": "The backend team.",
+      "members": [
+        "dev-a"
+      ],
+      "lead": "dev-a",
+      "owner": "alice",
+      "avatar": "seed",
+      "color": "teal",
+      "created_by": "alice",
+      "created_at": "2025-01-01T12:00:00Z"
+    }
+  ]
+}

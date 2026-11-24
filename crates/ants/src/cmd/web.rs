@@ -66,7 +66,7 @@ struct ServeArgs {
 #[derive(Subcommand, Debug)]
 enum WebCommand {
     /// Write the page into DIR for the reverse proxy fronting a hub, on the origin the hub's websocket block names
-    /// in allowed_origins, with site.json naming the hub's WebSocket address and the team's bootstrap credentials,
+    /// in allowed_origins, with site.json naming the hub's WebSocket address and the bus's bootstrap credentials,
     /// public, with which the page registers its device. Files of the page already in DIR are replaced, others kept,
     /// so that a page still open loads what it names. Prints the response headers to serve DIR with.
     Export {
@@ -75,7 +75,7 @@ enum WebCommand {
         /// The hub's WebSocket address as browsers reach it, such as wss://hub.example/nats.
         #[arg(long, value_name = "URL")]
         server: String,
-        /// The team's bootstrap credentials, from `ants auth bootstrap`, for the page to register its device with
+        /// The bus's bootstrap credentials, from `ants auth bootstrap`, for the page to register its device with
         /// `ants signer`. Without them, the page has a device's JWT pasted in.
         #[arg(long, value_name = "FILE")]
         bootstrap: Option<PathBuf>,

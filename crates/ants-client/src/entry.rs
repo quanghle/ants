@@ -175,6 +175,11 @@ pub struct Entry {
     /// The channel of a post or of the post a mention tells of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelId>,
+    /// The team an inbox message was sent to, which delivered it to its lead ([`Envelope::team`]).
+    ///
+    /// [`Envelope::team`]: ants_proto::Envelope::team
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<UserId>,
     /// The users a channel post @mentions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<UserId>,
@@ -294,6 +299,7 @@ impl Entry {
             from: None,
             to: None,
             channel: None,
+            team: None,
             mentions: Vec::new(),
             owner: None,
             note: None,
@@ -451,6 +457,7 @@ mod tests {
             from: Some(user("alice")),
             to: Some(user("dev-a")),
             channel: Some("ops".parse().unwrap()),
+            team: Some(user("backend")),
             mentions: vec![user("bob")],
             owner: Some(user("alice")),
             note: Some("a note".into()),
@@ -499,7 +506,7 @@ mod tests {
     fn an_entry_reads_back_from_what_it_serializes_to_with_every_field() {
         let entry = full();
         let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json.as_object().unwrap().len(), 34, "a field left out: {json}");
+        assert_eq!(json.as_object().unwrap().len(), 35, "a field left out: {json}");
         assert_eq!(json["attachments"][0]["stored"], "2023-11-14T22:13:20.005Z");
         assert_eq!((&json["in_reply_to"], &json["turns"]), (&json!(Uuid::from_u128(8)), &json!(3)));
         assert_eq!(serde_json::from_value::<Entry>(json).unwrap(), entry);

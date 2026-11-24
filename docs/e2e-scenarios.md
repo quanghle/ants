@@ -1,6 +1,6 @@
 # End-to-end scenarios: hub, leaf and chat client in containers, Claude harness
 
-Manual or scripted end-to-end scenarios for a three-container team under
+Manual or scripted end-to-end scenarios for a three-container bus under
 [Apple container](https://github.com/apple/container): a hub, a worker leaf and a client running the CLI and
 `ants chat`. Every ant runs Claude Code. The scenarios say what to do and what must be observed;
 `scripts/e2e.sh` builds the [fixture](#fixture) and runs them ([Running them](#running-them)). The repository's
@@ -51,7 +51,7 @@ and the GitHub stub (`contrib/e2e/github_stub.py`).
 
 | Container | Runs | Users and files |
 |---|---|---|
-| `ants-e2e-hub` | `nats-server` (domain `hub`, leaf port `7422` on the network, `feature_flags { js_api_reply_v2: true }`, `full` resolver), `ants signer`, `ants channel serve`, `ants daemon` | Team keys in `~/.config/ants/auth`; `hub-ant` (`capabilities = ["e2e", "hub"]`, workdir `/demo/work`, a git repository with `node.txt` committed, `max_harnesses = 2`, worktrees left at their default: on); `sage-ant` (workdir `/demo/work`, `max_harnesses = 1`, a `whoami` making its reviews predictable: the sage of [group D](#d-dreams-and-sage-reviews), of its own so that no other scenario's pause or restart takes the reviewer away); `system-messenger` (`ants auth builtin messenger`); host credentials `hub`; human `bob` (`ants auth user bob --human`, no admin role) |
+| `ants-e2e-hub` | `nats-server` (domain `hub`, leaf port `7422` on the network, `feature_flags { js_api_reply_v2: true }`, `full` resolver), `ants signer`, `ants channel serve`, `ants daemon` | Account keys in `~/.config/ants/auth`; `hub-ant` (`capabilities = ["e2e", "hub"]`, workdir `/demo/work`, a git repository with `node.txt` committed, `max_harnesses = 2`, worktrees left at their default: on); `sage-ant` (workdir `/demo/work`, `max_harnesses = 1`, a `whoami` making its reviews predictable: the sage of [group D](#d-dreams-and-sage-reviews), of its own so that no other scenario's pause or restart takes the reviewer away); `system-messenger` (`ants auth builtin messenger`); host credentials `hub`; human `bob` (`ants auth user bob --human`, no admin role) |
 | `ants-e2e-leaf` | `ants daemon` running its own leaf `nats-server` (`[nats_server] config = "~/.config/ants/leaf.conf"`, so add and retire orders reconnect the uplink) | `leaf-ant` (`capabilities = ["e2e", "leaf"]`, workdir `/demo/work`, no git, `max_harnesses = 2`, `env = { E2E_SECRET_TOKEN = "e2e-s3cr3t-0123456789" }`); `gate-ant` (workdir `/demo/gate`, `tools = "ask"`, `allow = ["read", "search", "execute:ls*"]`, `max_harnesses = 1`); host credentials `leaf`; uplink `ants auth leaf leaf --ant leaf-ant --ant gate-ant` |
 | `ants-e2e-client` | leaf `nats-server` only, no daemon | Human `alice` (`ants auth user alice --human --admin --label client`), `[cli] creds` naming her credentials; uplink `ants auth leaf client --human alice` |
 
@@ -161,7 +161,7 @@ end rather than changing the fixture under it. `ANTS_E2E_IMAGE` names the image 
 nodes from (default `ants-e2e:local`), to try a changed fixture without retagging the image the running nodes came
 from.
 
-Everything is safe to repeat. `up` creates what is missing and starts what is stopped; the hub issues the team keys
+Everything is safe to repeat. `up` creates what is missing and starts what is stopped; the hub issues the account keys
 and credentials once and keeps them on its volume, and `up` copies them to the other nodes; config files are written
 anew at each start. `run` starts with `up`. Each scenario takes fresh tokens and undoes what it changed (a pause, a
 setting, a stopped node, a dropped uplink), even when it fails; `ants chat` scenarios open a chat of their own,
@@ -370,7 +370,7 @@ hub ants chat       # as bob, where the account key is: home lists "b5-$t (enrol
 ```
 
 **Expect** on the client, which holds no account key, home names the machine that does (`requests for credentials
-are answered on machine hub, where the team's account key is`) and the credentials page says the key is not on this
+are answered on machine hub, where the bus's account key is`) and the credentials page says the key is not on this
 machine and to approve on `machine hub`; on the hub, home counts the request (`b5-$t (enroll)`), its page lists it,
 and `r` then `y` rejects it, ending the `ants add`.
 
@@ -402,7 +402,7 @@ alice tools approve signer/ID
 # a second login of erin-$t, same GitHub user, under another HOME
 ```
 
-**Expect** login says it waits for a human of the team to approve, and the signer's request is listed; after the
+**Expect** login says it waits for a human of the bus to approve, and the signer's request is listed; after the
 approval login ends 0 and `ants auth issued` records an `approval` grant naming the human. The second login is signed
 at once, the approval standing for that user and name: two live keys of `erin-$t`. **Undo:** revoke `erin-$t`, remove both
 HOMEs.

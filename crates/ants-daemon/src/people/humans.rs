@@ -6,7 +6,7 @@
 //! bucket again every little while, since an ant may read it but not create it.
 //!
 //! The same watch keeps the humans' assistant grants ([`ants_proto::AssistantGrant`], under `<human>.assistant`),
-//! verified for the team's account ([`Registry::verifying_grants`]): a withdrawal holds as soon as the watch delivers
+//! verified for the bus's account ([`Registry::verifying_grants`]): a withdrawal holds as soon as the watch delivers
 //! it, and is announced to whoever listens ([`Registry::withdrawals`]).
 //!
 //! It keeps too each human's consent to what its assistant does for it ([`ants_proto::Consents`]): its signed answers
@@ -35,7 +35,7 @@ pub const RETRY: Duration = Duration::from_secs(30);
 /// How many withdrawals a listener may lag behind before it misses some ([`Registry::withdrawals`]).
 const WITHDRAWALS: usize = 64;
 
-/// The humans of the team, shared by the inbox loop and the MCP server.
+/// The humans of the bus, shared by the inbox loop and the MCP server.
 #[derive(Debug, Clone)]
 pub struct Registry {
     humans: Arc<RwLock<Humans>>,
@@ -48,7 +48,7 @@ pub struct Registry {
 #[derive(Debug)]
 struct Assistants {
     grants: RwLock<Grants>,
-    /// The team's account, which signs the credentials of the devices whose grants count; none: no grant does.
+    /// The bus's account, which signs the credentials of the devices whose grants count; none: no grant does.
     account: Option<String>,
     withdrawals: broadcast::Sender<Withdrawal>,
     /// The humans' answers to their assistants' acts and their pre-allow rules, verified as the grants are.
@@ -399,7 +399,7 @@ impl Default for TestDevice {
 
 #[cfg(test)]
 impl TestDevice {
-    /// The team's account.
+    /// The bus's account.
     pub fn account(&self) -> String {
         self.account.public_key()
     }
@@ -409,7 +409,7 @@ impl TestDevice {
         self.signed_jwt(human, &self.id.tag())
     }
 
-    /// The user JWT of the credentials of `assistant` as the assistant of `human`, signed by the team's account.
+    /// The user JWT of the credentials of `assistant` as the assistant of `human`, signed by the bus's account.
     pub fn assistant_jwt(&self, assistant: &UserId, human: &UserId) -> String {
         self.signed_jwt(assistant, &ants_proto::AssistantOf::tag(human))
     }

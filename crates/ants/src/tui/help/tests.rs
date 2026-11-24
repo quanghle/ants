@@ -151,7 +151,7 @@ fn the_fold_keys_have_rows_in_the_table() {
 
 /// The functions taking keys for the views of the key table: their file under `tui/`, their name and the views whose
 /// rows hold their keys.
-const TAKERS: [(&str, &str, &[View]); 25] = [
+const TAKERS: [(&str, &str, &[View]); 26] = [
     ("model/keys.rs", "nav_key", &[View::Nav]),
     ("thread/find.rs", "find_key", &[View::Thread]),
     ("command/bar.rs", "key", &[View::Bar]),
@@ -165,6 +165,7 @@ const TAKERS: [(&str, &str, &[View]); 25] = [
     ("home.rs", "key", &[View::Home]),
     ("work.rs", "key", &[View::Work]),
     ("channel.rs", "key", &[View::Channel]),
+    ("team.rs", "key", &[View::Team]),
     ("thread.rs", "key", &[View::Thread]),
     ("thread/pending.rs", "waiting_key", &[View::Pending]),
     ("dm.rs", "key", &[View::Dm]),
@@ -192,6 +193,7 @@ fn source(file: &str) -> &'static str {
         "home.rs" => include_str!("../home.rs"),
         "work.rs" => include_str!("../work.rs"),
         "channel.rs" => include_str!("../channel.rs"),
+        "team.rs" => include_str!("../team.rs"),
         "thread.rs" => include_str!("../thread.rs"),
         "thread/find.rs" => include_str!("../thread/find.rs"),
         "thread/pending.rs" => include_str!("../thread/pending.rs"),
@@ -211,12 +213,13 @@ fn source(file: &str) -> &'static str {
 /// The functions stepping through [`select::step`](crate::tui::select::step) for what has no rows in the key table, its
 /// keys told on screen: the help and the notices in their last line, the digest, the copy picker and the members
 /// editor in their title or the footer, and `Selection::step` itself.
-const UNLISTED: [(&str, &str); 6] = [
+const UNLISTED: [(&str, &str); 7] = [
     ("help.rs", "key"),
     ("notices.rs", "key"),
     ("catchup.rs", "digest_key"),
     ("clipboard.rs", "key"),
     ("channel/members.rs", "key"),
+    ("team/editor.rs", "key"),
     ("select.rs", "step"),
 ];
 

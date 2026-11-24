@@ -1,5 +1,5 @@
 //! Machines: a machine's [`MachineRecord`] in [`crate::MACHINES_BUCKET`], the ants its daemon serves, put with the
-//! machine's host credentials; the [`AccountHolder`] record naming where the team's account key is; and the names of a
+//! machine's host credentials; the [`AccountHolder`] record naming where the bus's account key is; and the names of a
 //! machine's host connection ([`host_user`], [`host_inbox_prefix`], [`admin_consumer`]).
 
 use std::collections::BTreeMap;
@@ -45,7 +45,7 @@ impl MachineRecord {
 /// host credentials write it, and [`subject::machine_records`] readers skip it.
 pub const ACCOUNT_HOLDER_KEY: &str = "_account";
 
-/// Where the team's account key is, in [`MACHINES_BUCKET`] under [`ACCOUNT_HOLDER_KEY`]: `ants signer` puts it, with
+/// Where the bus's account key is, in [`MACHINES_BUCKET`] under [`ACCOUNT_HOLDER_KEY`]: `ants signer` puts it, with
 /// credentials it signs with that key, each time it connects, so that machines without the key can name the one that
 /// answers enrollment and renewal requests. Only credentials signed there write it ([`crate::Permissions::for_account_holder`]);
 /// humans read it. Readers should treat unknown fields as additions, not errors.

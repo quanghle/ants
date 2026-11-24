@@ -77,7 +77,7 @@ impl Registrar<'_> {
     fn check_member(&self, request: &RenewRequest, account: &GithubAccount) -> Result<AbortOnDrop> {
         let registration =
             signer_registration(self.config).context("the signer's registration policy does not load")?.with_context(
-                || format!("registration is no longer enabled on this team to check GitHub user {}", account.login),
+                || format!("registration is no longer enabled on this bus to check GitHub user {}", account.login),
             )?;
         let github = Github::new(Some(&registration))?;
         let (id, tx) = (account.id, self.progress.0.clone());

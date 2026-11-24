@@ -1,4 +1,4 @@
-//! Short-lived and narrow credentials: an ant's enrollment, the team's public bootstrap, and the approver's, signer's
+//! Short-lived and narrow credentials: an ant's enrollment, the bus's public bootstrap, and the approver's, signer's
 //! and revoker's for one task.
 
 use std::fs;
@@ -34,7 +34,7 @@ pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> 
     Ok(exp)
 }
 
-/// Issue the team's public bootstrap credentials, valid for `ttl` (zero: with no expiry), and write their `.creds`
+/// Issue the bus's public bootstrap credentials, valid for `ttl` (zero: with no expiry), and write their `.creds`
 /// file to `out`, readable by all as they are meant to be shared: they may only ask `ants signer` to register a
 /// human's device and hear its answers ([`Permissions::for_bootstrap`]), with messages of at most
 /// [`ants_proto::BOOTSTRAP_MAX_PAYLOAD`] bytes. Returns their public key and when they expire, in seconds since the
@@ -64,9 +64,9 @@ pub fn approver_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String
 }
 
 /// [`approver_creds`] for `ants signer`, which also answers ants' reactions requests
-/// ([`Permissions::for_reactions_responder`]) and trail saves ([`Permissions::for_trail_keeper`]), and humans'
-/// registration requests ([`Permissions::for_registrar`]), and keeps the buckets held in memory
-/// ([`Permissions::for_bucket_keeper`]).
+/// ([`Permissions::for_reactions_responder`]), trail saves ([`Permissions::for_trail_keeper`]) and team changes
+/// ([`Permissions::for_team_keeper`]), and humans' registration requests ([`Permissions::for_registrar`]), and keeps
+/// the buckets held in memory ([`Permissions::for_bucket_keeper`]).
 pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
     let mut permissions = signer_permissions();
     // Registration and keeping the buckets happen on the hub only: a leaf uplink with signer_permissions never carries
@@ -77,12 +77,13 @@ pub fn signer_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> 
 }
 
 /// What `ants enroll` and `ants signer` need: [`Permissions::for_enroll_approver`],
-/// [`Permissions::for_reactions_responder`], [`Permissions::for_trail_keeper`] and
+/// [`Permissions::for_reactions_responder`], [`Permissions::for_trail_keeper`], [`Permissions::for_team_keeper`] and
 /// [`Permissions::for_account_holder`].
 pub(super) fn signer_permissions() -> Permissions {
     let mut permissions = Permissions::for_enroll_approver();
     merge(&mut permissions, Permissions::for_reactions_responder());
     merge(&mut permissions, Permissions::for_trail_keeper());
+    merge(&mut permissions, Permissions::for_team_keeper());
     merge(&mut permissions, Permissions::for_account_holder());
     permissions
 }
@@ -91,6 +92,12 @@ pub(super) fn signer_permissions() -> Permissions {
 /// one, that put the revocation records of humans' keys ([`Permissions::for_device_revoker`]).
 pub fn revoker_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
     short_lived_creds(dir, js_domain, Permissions::for_device_revoker())
+}
+
+/// Short-lived credentials that read and write the team directory ([`Permissions::for_team_keeper`]): `ants auth
+/// revoke` takes a revoked ant off its team with them, and `ants auth user` reads which names teams hold.
+pub(crate) fn team_keeper_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {
+    short_lived_creds(dir, js_domain, Permissions::for_team_keeper())
 }
 
 /// Short-lived credentials for checking and cleaning up one retired ant ([`Permissions::for_retired_consumers`]).

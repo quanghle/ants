@@ -537,7 +537,7 @@ fn with_humans_on_a_machine_no_two_admissions_overlap() {
 }
 
 /// `ants leaf outbox M --remove-ant ANT` after the uplink credentials stopped carrying ANT: an ant the hub still takes
-/// from the outbox for, or the team directory kept among the members once, left already; any other is no ant of M.
+/// from the outbox for, or the auth directory kept among the members once, left already; any other is no ant of M.
 #[tokio::test]
 async fn removing_an_ant_the_uplink_no_longer_carries_takes_one_that_left_already() {
     let Some(hub) = NatsServer::start() else { return };
@@ -562,7 +562,7 @@ async fn removing_an_ant_the_uplink_no_longer_carries_takes_one_that_left_alread
     };
     let mut change = removing(&["dev-a", "dev-c", "dev-b"]);
     let left = left_already(&js, &m1, &team, &mut change, Some(&carried)).await.unwrap();
-    assert_eq!(left, [p("dev-a"), p("dev-c")], "sourced by the hub, kept by the team directory once");
+    assert_eq!(left, [p("dev-a"), p("dev-c")], "sourced by the hub, kept by the auth directory once");
     let set = change.apply(&m1, Some(carried.clone()), || anyhow::anyhow!("unknown")).unwrap();
     assert_eq!(set, Members { ants: Vec::new(), ..carried.clone() }, "dev-b, carried, removed as ever");
 

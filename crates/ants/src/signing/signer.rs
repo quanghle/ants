@@ -13,7 +13,8 @@
 //! write the reactions bucket, so the signer lists the reactions to a message for the ant, and adds or removes the
 //! ant's own, once it found the ant reads the message, and ants' trail saves ([`keeper::serve`]): an ant's credentials
 //! write no saved trail, whose key names no saver, so the signer saves a trail for the ant as its own, and replaces or
-//! removes only one the ant saved. It also registers humans' devices after a GitHub sign-in, and
+//! removes only one the ant saved, and ants' team changes ([`teams::keeper::serve`]): no ant writes the team
+//! directory, one entry for every team, so the signer changes for a lead only the teams it manages. It also registers humans' devices after a GitHub sign-in, and
 //! renews the credentials such registrations granted ([`crate::signing::registrar`]), and answers the enrollment requests a
 //! machine's daemon sends carrying an admin's order to add or retire an ant there ([`ordered`]). Each time it connects,
 //! it records its machine as the one holding the account key ([`AccountHolder`]), for `ants chat` and `ants machines`
@@ -22,7 +23,7 @@
 //!
 //! The signer trusts only what it can check itself: the request is signed by the manager's credentials of the team's
 //! account, and its template is read from the signer's own config file ([`config::signer_templates`]), never taken
-//! from the manager's machine. How many ants a template has is counted from the keys the team issued
+//! from the manager's machine. How many ants a template has is counted from the keys the bus issued
 //! ([`issued::Issued::template`]), live ones only.
 
 use ants_daemon::bus::relayed;
@@ -35,6 +36,7 @@ use ants_daemon::config;
 use ants_daemon::profile::template::{AntTemplate, Request};
 use ants_daemon::records::direct_kv::DirectKv;
 use ants_daemon::records::reactions;
+use ants_daemon::teams;
 use ants_daemon::trail::keeper;
 use ants_proto::{
     ACCOUNT_HOLDER_KEY, ANTS_VERSION, AccountHolder, AntReply, AntRequest, ApprovalDecision, ApprovalRequest,
@@ -148,8 +150,8 @@ struct Waiting {
 }
 
 /// `ants signer`: answer the ant requests of manager ants ([`AntRequest`]) over the server at `url`, signing with the
-/// account key in the team directory `dir`, ants' reactions requests ([`reactions::serve`]) and trail saves
-/// ([`keeper::serve`]), until `stop`
+/// account key in the auth directory `dir`, ants' reactions requests ([`reactions::serve`]), trail saves
+/// ([`keeper::serve`]) and team changes ([`teams::keeper::serve`]), until `stop`
 /// completes. Each run connects afresh every
 /// [`Options::reconnect`], with credentials it issues itself, and reads the revocations again; the templates are read
 /// for each request. Calls `report` with what it did with each request.
@@ -188,6 +190,12 @@ pub async fn serve(
         let _keeping = AbortOnDrop(tokio::spawn(async move {
             if let Err(e) = keeping.await {
                 tracing::warn!("answering trail saves until the next reconnect: {e:#}");
+            }
+        }));
+        let teams = teams::keeper::serve(approver.client.clone(), approver.hub().clone(), js_domain.cloned());
+        let _teams = AbortOnDrop(tokio::spawn(async move {
+            if let Err(e) = teams.await {
+                tracing::warn!("answering team changes until the next reconnect: {e:#}");
             }
         }));
         let _buckets = AbortOnDrop(tokio::spawn(keep_in_memory(approver.hub().clone(), options.tick * BUCKET_TICKS)));
@@ -358,7 +366,7 @@ impl Signer<'_> {
             return refuse(format!("{manager} was added from a template, and added ants never add ants"));
         }
         if let Some(other) = issued.iter().find(|i| i.name == name.as_str() && i.key != request.public_key) {
-            return refuse(format!("the team holds credentials named {name} already (key {})", other.key));
+            return refuse(format!("the bus holds credentials named {name} already (key {})", other.key));
         }
         let waiting = self.waiting.iter().filter(|w| w.request.manager == *manager).count();
         let templates = match config::signer_templates(self.options.config) {
@@ -438,8 +446,9 @@ impl Signer<'_> {
         Ok((jwt, Some(renewed)))
     }
 
-    /// Retire the ant `request` names, if its manager added it: revoke its live keys, push the account to the hub
-    /// when any were, drop it from the leaf node the request came through ([`ordered::drop_from_leaf`]), and answer.
+    /// Retire the ant `request` names, if its manager added it and it leads no team: revoke its live keys, push the
+    /// account to the hub when any were, take it off its team, drop it from the leaf node the request came through
+    /// ([`ordered::drop_from_leaf`]), and answer.
     async fn retire(
         &mut self,
         approver: &Approver,
@@ -460,6 +469,9 @@ impl Signer<'_> {
             super::retire::clean_consumers(self.url, approver.js_domain(), self.dir, name).await;
         }
         report(request, &Event::Retired { revoked: revoked.len(), push_error: push_error.clone() });
+        if let Some(line) = crate::teams::drop_ant_or_say(approver.hub(), approver.js_domain(), name).await {
+            tracing::info!(ant = %name, "{line}");
+        }
         let (leaf_jwt, leaf_error) = match &request.leaf {
             Some(leaf) => {
                 match ordered::drop_from_leaf(approver, &leaf.jwt, &leaf.machine, name, ants_proto::LeafRole::Ant).await
@@ -562,7 +574,7 @@ impl Signer<'_> {
     }
 }
 
-/// Check that `request` is its manager's: signed by the manager's credentials of the team's account, unexpired and
+/// Check that `request` is its manager's: signed by the manager's credentials of the bus's account, unexpired and
 /// unrevoked, for a well-formed key, still waited for, and if it names a leaf node, signed by the leaf's uplink
 /// credentials too.
 fn check(approver: &Approver, request: &AntRequest) -> Result<()> {
@@ -574,7 +586,7 @@ fn check(approver: &Approver, request: &AntRequest) -> Result<()> {
     let manager = &request.manager;
     let claims = auth::verified(&request.credentials).context("the manager's credentials")?;
     if claims.iss != approver.account {
-        bail!("credentials issued by {}, not by the team's account", claims.iss);
+        bail!("credentials issued by {}, not by the bus's account", claims.iss);
     }
     if claims.name != manager.as_str() {
         bail!("credentials of {}, not of {manager}", claims.name);
@@ -601,7 +613,7 @@ fn check(approver: &Approver, request: &AntRequest) -> Result<()> {
 /// Revoke the live keys of ant `name`, added from a template (by `manager` when given), and write `server.conf`
 /// again ([`revoke::revoke`]); returns the keys revoked, none when none is live. Given the `key` of the ant's
 /// credentials, only it and the keys issued before it go (those it renewed): keys issued after it, for the ant added
-/// again, stay. Fails, revoking nothing, when the team never issued `key` (or with none, any key of `name`) for an ant
+/// again, stay. Fails, revoking nothing, when the bus never issued `key` (or with none, any key of `name`) for an ant
 /// added so, or holds live keys of `name` issued otherwise.
 pub fn revoke_added(
     dir: &Path,
@@ -615,18 +627,19 @@ pub fn revoke_added(
     let by = manager.map_or_default(|m| format!(" by {m}"));
     let issued = issued::issued(dir)?;
     let before = match key {
-        Some(key) => {
-            issued.iter().filter(|i| i.key == key && added(i)).map(|i| i.issued_at).max().with_context(|| {
-                format!("the team issued no key {key} of {name} as an ant added from a template{by}")
-            })?
-        }
+        Some(key) => issued
+            .iter()
+            .filter(|i| i.key == key && added(i))
+            .map(|i| i.issued_at)
+            .max()
+            .with_context(|| format!("the bus issued no key {key} of {name} as an ant added from a template{by}"))?,
         None if issued.iter().any(added) => u64::MAX,
-        None => bail!("the team issued no credentials of {name} as an ant added from a template{by}"),
+        None => bail!("the bus issued no credentials of {name} as an ant added from a template{by}"),
     };
     let live: Vec<issued::Issued> =
         live(dir)?.into_iter().filter(|i| i.name == name.as_str() && i.issued_at <= before).collect();
     if let Some(other) = live.iter().find(|i| !added(i)) {
-        bail!("the team holds credentials of {name} not issued for an ant added{by} (key {})", other.key);
+        bail!("the bus holds credentials of {name} not issued for an ant added{by} (key {})", other.key);
     }
     if live.is_empty() {
         return Ok(Vec::new());
@@ -635,7 +648,7 @@ pub fn revoke_added(
     revoke::revoke(dir, None, &keys)
 }
 
-/// The keys the team issued that are neither revoked nor expired.
+/// The keys the bus issued that are neither revoked nor expired.
 pub(crate) fn live(dir: &Path) -> Result<Vec<issued::Issued>> {
     let revoked: BTreeSet<String> = revoke::revoked(dir)?.into_iter().map(|r| r.key).collect();
     let now = auth::now()?;

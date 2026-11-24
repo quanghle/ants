@@ -79,6 +79,8 @@ struct Shown {
     /// The colony entry, with its `state` added; None when the colony lists none.
     colony: Option<serde_json::Value>,
     holds: Vec<String>,
+    /// The team holding the ant; None when it is on no team, or the directory is unread.
+    team: Option<TeamOf>,
     /// None when no daemon of the ant answered.
     queue: Option<Vec<queue::Waiting>>,
     /// The messages waiting in the stream past those listed.
@@ -99,6 +101,28 @@ struct Shown {
     #[serde(skip_serializing_if = "Option::is_none")]
     settings_stale: Option<String>,
     orders: Vec<orders::Listed>,
+}
+
+/// The team holding an ant, as `ants ant show --json` gives it.
+#[derive(Serialize)]
+struct TeamOf {
+    team: UserId,
+    /// Whether the ant leads it.
+    lead: bool,
+    /// The teams above it, the nearest first.
+    within: Vec<UserId>,
+}
+
+impl TeamOf {
+    fn of(directory: &ants_proto::TeamDirectory, ant: &UserId) -> Option<Self> {
+        let chain = directory.ancestors(ant);
+        let first = chain.first()?;
+        Some(Self {
+            team: first.team.clone(),
+            lead: first.lead.as_ref() == Some(ant),
+            within: chain[1..].iter().map(|t| t.team.clone()).collect(),
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -154,16 +178,20 @@ pub async fn show(nats: &Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, Caps>, j
     let now = Utc::now();
     let moved = faces.identity(&ant).and_then(|i| i.moved.as_ref());
     let holds = holds(&ant, entry.as_ref(), moved, now);
+    let teams = crate::teams::read_of(&js, nats.domain).await;
+    let teams = teams.inspect_err(|e| tracing::warn!("not showing the team: {e:#}")).ok().flatten();
     if json {
         let colony = entry.as_ref().map(|e| colony::json(e, now, &faces)).transpose()?;
         let colony = colony.map(|r| serde_json::from_str(&r)).transpose()?;
         let (queue, queue_unlisted) = queue.map_or((None, 0), |(waiting, more)| (Some(waiting), more));
         let settings::Reading { read, stale, orders, shared } = reading;
         let (shared_settings, shared_settings_unverified) = Unverified::split(shared.map(|s| *s));
+        let team = teams.as_ref().and_then(|d| TeamOf::of(d, &ant));
         let shown = Shown {
             ant,
             colony,
             holds,
+            team,
             queue,
             queue_unlisted,
             spend_today: spend,
@@ -184,6 +212,9 @@ pub async fn show(nats: &Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, Caps>, j
             println!("  {label:13} {value}");
         }
     }
+    if let Some(teams) = &teams {
+        println!("  {:13} {}", "team", crate::teams::team_line(teams, &ant));
+    }
     println!("\nholds:");
     if holds.is_empty() {
         println!("  none");
@@ -191,17 +222,7 @@ pub async fn show(nats: &Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, Caps>, j
     for line in &holds {
         println!("  {line}");
     }
-    println!("\nqueue (`ants queue {ant}`):");
-    match &queue {
-        None => println!("  {}", queue::unanswered(&ant)),
-        Some((waiting, _)) if waiting.is_empty() => println!("  no messages waiting"),
-        Some((waiting, more)) => {
-            println!("{}", indent(&queue::table(waiting, now)));
-            if *more > 0 {
-                println!("  {more} more messages wait in the stream, not listed");
-            }
-        }
-    }
+    print_queue(&ant, queue.as_ref(), now);
     println!("\nspend today, UTC (`ants spend {ant}`):");
     match &spend {
         Some(report) => println!("{}", indent(&spend::ant_tables(report))),
@@ -220,6 +241,20 @@ pub async fn show(nats: &Nats<'_>, ant: UserId, caps: &BTreeMap<UserId, Caps>, j
         println!("{line}");
     }
     Ok(())
+}
+
+fn print_queue(ant: &UserId, queue: Option<&(Vec<queue::Waiting>, usize)>, now: DateTime<Utc>) {
+    println!("\nqueue (`ants queue {ant}`):");
+    match queue {
+        None => println!("  {}", queue::unanswered(ant)),
+        Some((waiting, _)) if waiting.is_empty() => println!("  no messages waiting"),
+        Some((waiting, more)) => {
+            println!("{}", indent(&queue::table(waiting, now)));
+            if *more > 0 {
+                println!("  {more} more messages wait in the stream, not listed");
+            }
+        }
+    }
 }
 
 fn indent(text: &str) -> String {

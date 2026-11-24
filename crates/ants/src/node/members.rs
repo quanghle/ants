@@ -1,7 +1,7 @@
 //! The members of a machine's leaf node, its ants, humans and webhooks, kept between runs of `ants auth leaf` and
 //! `ants leaf outbox`: a run naming none takes those of the last one, and `--add-*` and `--remove-*` change them.
 //!
-//! `ants auth leaf` runs where the team keys are. It keeps the members in the line of the registry
+//! `ants auth leaf` runs where the account keys are. It keeps the members in the line of the registry
 //! ([`issued::ISSUED`]) recording the uplink key it issues, and `ants enroll approve`, there too, adds an ant enrolled
 //! through the leaf node with a later line for that key.
 //!
@@ -175,7 +175,7 @@ impl Change {
 #[derive(clap::Args, Debug)]
 pub struct UplinkArgs {
     /// Ant served on the machine (repeatable). `human` counts as a human. With any of --ant, --human or --webhook,
-    /// the members are exactly those named; without, those of the last run, which the team directory keeps (with
+    /// the members are exactly those named; without, those of the last run, which the auth directory keeps (with
     /// the ants enrolled through the leaf node since).
     #[arg(long = "ant", value_name = "ANT")]
     ants: Vec<UserId>,
@@ -246,7 +246,7 @@ pub struct OutboxArgs {
     #[arg(long = "add-human", value_name = "HUMAN", conflicts_with_all = OUTBOX_LISTS)]
     add_humans: Vec<UserId>,
     /// Remove an ant from the members the uplink credentials carry (repeatable). An ant they no longer carry that
-    /// the hub still takes from the outbox for, or that the team directory kept among the members once, as a retired
+    /// the hub still takes from the outbox for, or that the auth directory kept among the members once, as a retired
     /// ant, stays out.
     #[arg(long = "remove-ant", value_name = "ANT", conflicts_with_all = OUTBOX_LISTS)]
     remove_ants: Vec<UserId>,
@@ -275,7 +275,7 @@ fn latest(dir: &Path, machine: &Machine) -> Result<Option<Issued>> {
     Ok(issued::issued(dir)?.into_iter().rev().find(|i| i.name == name && i.kind == Kind::Leaf))
 }
 
-/// The members `ants auth leaf` last issued the uplink of `machine` for, from the team directory `dir`, with the ants
+/// The members `ants auth leaf` last issued the uplink of `machine` for, from the auth directory `dir`, with the ants
 /// enrolled through the leaf node since; none when it issued none.
 pub fn issued(dir: &Path, machine: &Machine) -> Result<Option<Members>> {
     Ok(latest(dir, machine)?.and_then(|line| line.members))

@@ -10,7 +10,7 @@ async fn send_message_follows_on_from_the_current_message() {
     let (url, token) = http_server(&mcp, &current.thread_id);
     let client = http_client(&url, &token).await;
     let tools: Vec<_> = client.list_all_tools().await.unwrap().into_iter().map(|t| t.name).collect();
-    assert_eq!(tools.len(), 19, "{tools:?}");
+    assert_eq!(tools.len(), 21, "{tools:?}");
 
     let (ok, text) = call(&client, "send_message", serde_json::json!({"to": "dev-b", "text": "hi"})).await;
     assert!(!ok && text.contains("no message is being handled"), "{text}");

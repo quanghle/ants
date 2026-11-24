@@ -1,6 +1,7 @@
 //! The messages the bar sends: an ask, a reply, a post, a note and a message handed on, each as `ants ask`, `ants post`
 //! and `ants notes` send them, with the files staged in the bar stored before the message.
 
+use ants_client::sending::Addressed;
 use ants_daemon::bus;
 use ants_proto::{ChannelId, ThreadId, UserId};
 use anyhow::{Result, anyhow};
@@ -42,10 +43,30 @@ pub(super) async fn ask(
     deliver(ctx, to, envelope, quote, files, new).await
 }
 
-/// Send `envelope` from [`send::ask_envelope`] to `to` as [`ask`] does, opening its thread when `new`.
+/// Send `text` as [`ask`] does to where `to` says: to a team's lead, carrying the team, told as such.
+pub(super) async fn ask_addressed(
+    ctx: &Ctx,
+    to: Addressed,
+    thread: Option<ThreadId>,
+    text: String,
+    quote: Option<Quoted>,
+    queue: bool,
+    files: &[File],
+) -> Result<Done> {
+    let Some(team) = to.team.clone() else { return ask(ctx, to.to.into(), thread, text, quote, queue, files).await };
+    let new = thread.is_none();
+    let told = format!("team {team} (lead {})", to.to);
+    let mut envelope = send::ask_envelope(&ctx.me, thread, to.to.clone(), text);
+    envelope.queue = queue;
+    to.apply(&mut envelope);
+    deliver(ctx, told, envelope, quote, files, new).await
+}
+
+/// Send `envelope` from [`send::ask_envelope`] to `to`, as the line tells it, as [`ask`] does, opening its thread when
+/// `new`.
 async fn deliver(
     ctx: &Ctx,
-    to: send::Recipient,
+    to: impl std::fmt::Display,
     mut envelope: ants_proto::Envelope,
     quote: Option<Quoted>,
     files: &[File],
@@ -166,7 +187,7 @@ pub(super) async fn forward(
 ) -> Result<Done> {
     let files = source.files(&ctx.js, ctx.keyring.as_deref(), files.to_vec()).await?;
     let envelope = source.envelope(&ctx.me, to.clone(), note);
-    deliver(ctx, to.into(), envelope, None, &files, true).await
+    deliver(ctx, to, envelope, None, &files, true).await
 }
 
 /// Post `text` to the notes of `thread` as `ants notes` does, `files` going with it.

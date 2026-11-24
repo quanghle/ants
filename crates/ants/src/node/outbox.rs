@@ -301,7 +301,7 @@ pub async fn drop_ant(hub: &Context, machine: &Machine, ant: &UserId) -> Result<
 }
 
 /// Take out of the ants `change` removes from `kept`, the members of `machine` its uplink credentials carry, those
-/// that left them already ([`Change::left_already`]), and return them: those the registry of the team directory `dir`
+/// that left them already ([`Change::left_already`]), and return them: those the registry of the auth directory `dir`
 /// ever kept among the members, or the hub's stream still takes from the outbox for. [`admit`] without them drops
 /// what the hub takes for them all the same.
 pub async fn left_already(

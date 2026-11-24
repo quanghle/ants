@@ -42,6 +42,7 @@ mod replies;
 mod routing;
 mod saving;
 mod serving;
+mod teams;
 
 type Client = RunningService<RoleClient, ClientConfig>;
 

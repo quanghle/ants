@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install a machine's user services: its nats-server (the leaf node from `ants leaf config`, or the hub on the hub
 # machine), the ant daemon (`ants daemon --config`), on the hub the channel manager (`ants channel serve`) and the
-# webhook ingress (`ants webhook serve`), on the machine holding the team directory the signer (`ants signer`), for
+# webhook ingress (`ants webhook serve`), on the machine holding the auth directory the signer (`ants signer`), for
 # an uplink through a private Dev Tunnel `devtunnel connect` and, on the hub machine, `devtunnel host` of that tunnel,
 # and for an uplink through the HTTPS fallback bridge `ants bridge connect` and, on the hub machine,
 # `ants bridge serve`. launchd agents on macOS, systemd user units on Linux and WSL; templates in contrib/.
@@ -10,7 +10,7 @@
 #   scripts/install-units.sh --devtunnel ants-hub    # and `devtunnel connect ants-hub` for nats-leaf://127.0.0.1:7422
 #   scripts/install-units.sh --no-daemon --channel-manager ~/.config/ants/auth/channel-manager.creds   # on the hub
 #   scripts/install-units.sh --webhook               # and `ants webhook serve` for ~/.ants/webhooks.toml
-#   scripts/install-units.sh --signer                # with the team directory, and `ants signer` for --config
+#   scripts/install-units.sh --signer                # with the auth directory, and `ants signer` for --config
 #   scripts/install-units.sh --devtunnel-host ants-hub   # on the hub, and `devtunnel host ants-hub`
 #   scripts/install-units.sh --bridge https://hub.example/bridge --bridge-token FILE   # and `ants bridge connect`
 #   scripts/install-units.sh --no-daemon --bridge-serve --bridge-token FILE           # on the hub, `ants bridge serve`
@@ -29,7 +29,7 @@
 #                                    fight over its port, and removing a running service here would cut the bus
 #           --no-daemon              no daemon service, on a machine without ants
 #           --channel-manager CREDS  also run the channel manager with CREDS, from `ants auth channel-manager`
-#           --signer                 also keep `ants signer --config FILE` running, on the machine holding the team
+#           --signer                 also keep `ants signer --config FILE` running, on the machine holding the auth
 #                                    directory (see docs/config.md, Manager ants)
 #           --devtunnel TUNNEL       also keep `devtunnel connect TUNNEL` running, for an uplink through that tunnel
 #           --devtunnel-host TUNNEL  also keep `devtunnel host TUNNEL` running, on the hub machine

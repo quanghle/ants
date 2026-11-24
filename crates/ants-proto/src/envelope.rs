@@ -191,6 +191,11 @@ pub struct Envelope {
     /// [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_outcomes: Option<ReviewOutcomes>,
+    /// The team the message was addressed to, sent on to its lead, `to` ([`crate::TeamDirectory`]): the lead's daemon
+    /// opens the prompt saying the message came through the team. The sender sets it; a reader takes it as a claim of
+    /// the sender's only. Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<UserId>,
     pub sent_at: DateTime<Utc>,
 }
 
@@ -279,6 +284,7 @@ impl Envelope {
             trail_start: None,
             rating_of: None,
             review_outcomes: None,
+            team: None,
             sent_at: Utc::now(),
         }
     }
@@ -469,6 +475,7 @@ impl Envelope {
             trail_start: None,
             rating_of: None,
             review_outcomes: None,
+            team: None,
             sent_at: Utc::now(),
         })
     }

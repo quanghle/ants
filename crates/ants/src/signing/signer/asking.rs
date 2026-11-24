@@ -98,7 +98,7 @@ pub async fn ask(requester: &Requester<'_>, asked: AskedAnt, thread: &ThreadId, 
                     AntReply::Retired { .. } => continue,
                 }
             }
-            () = &mut deadline => bail!("no answer from the signer (`ants signer` on the machine holding the team's account key) in time"),
+            () = &mut deadline => bail!("no answer from the signer (`ants signer` on the machine holding the bus's account key) in time"),
         }
     }
 }
@@ -176,7 +176,7 @@ pub async fn retire(
                     AntReply::Approved { .. } => continue,
                 }
             }
-            () = &mut deadline => bail!("no answer from the signer (`ants signer` on the machine holding the team's account key) in time"),
+            () = &mut deadline => bail!("no answer from the signer (`ants signer` on the machine holding the bus's account key) in time"),
         }
     }
 }

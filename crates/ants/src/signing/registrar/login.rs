@@ -65,7 +65,7 @@ impl Registrar<'_> {
     fn start(&self, request: &LoginRequest) -> Result<AbortOnDrop> {
         let registration = signer_registration(self.config)
             .context("the signer's registration policy does not load")?
-            .context("registration is not enabled on this team")?;
+            .context("registration is not enabled on this bus")?;
         if let (true, Some(xkey)) = (request.web, &request.xkey) {
             bail!("a web device binds no encryption key: the request names {xkey}");
         }
@@ -109,7 +109,7 @@ impl Registrar<'_> {
     /// hold.
     pub(super) fn grant(&self, request: &LoginRequest, user: &GithubUser) -> Result<Option<Grant>> {
         let registration =
-            signer_registration(self.config)?.context("registration is no longer enabled on this team")?;
+            signer_registration(self.config)?.context("registration is no longer enabled on this bus")?;
         let issued = issued::issued(self.dir)?;
         binding::check(&issued, &request.name, &user.account(), Binder::Signer)?;
         Ok(registration.grant(user).or_else(|| issued::standing_approval(&issued, request.name.as_str(), user.id)))
@@ -127,7 +127,7 @@ impl Registrar<'_> {
         let waiting = self.flows.values().filter(|f| f.asking.is_some()).count();
         if waiting >= MAX_WAITING_REGISTRATIONS {
             bail!(
-                "GitHub user {} is outside the team's registration policy, and {waiting} registrations wait for a \
+                "GitHub user {} is outside the bus's registration policy, and {waiting} registrations wait for a \
                  human already: try again later",
                 account.login
             );
@@ -136,7 +136,7 @@ impl Registrar<'_> {
         let timeout = self.approval_timeout.min(left);
         if timeout < LEAST_ASKING {
             bail!(
-                "GitHub user {} is outside the team's registration policy, and too little time is left to ask a human",
+                "GitHub user {} is outside the bus's registration policy, and too little time is left to ask a human",
                 account.login
             );
         }
@@ -149,7 +149,7 @@ impl Registrar<'_> {
             .await
             .context("waiting for JetStream to store the approval request")?;
         (self.report)(request, &Event::Asked { login: account.login.clone(), id: approval.id });
-        let reason = "outside the team's registration policy: a human of the team decides".to_owned();
+        let reason = "outside the bus's registration policy: a human of the bus decides".to_owned();
         let flow = self.flows.get_mut(&request.public_key).context("the registration")?;
         flow.answer = Some(LoginAnswer::Waiting { login: account.login.clone(), reason });
         flow.asking = Some(Asking { account, approval });
@@ -215,7 +215,7 @@ impl Registrar<'_> {
     /// ([`Permissions::for_web`]) with the web lifetime of `[registration]`, never an admin's.
     fn sign(&self, request: &LoginRequest, account: &GithubAccount, grant: Grant) -> Result<String> {
         let registration =
-            signer_registration(self.config)?.context("registration is no longer enabled on this team")?;
+            signer_registration(self.config)?.context("registration is no longer enabled on this bus")?;
         let name = &request.name;
         binding::check_in(self.dir, name, account, Binder::Signer)?;
         let expires_at = auth::now()? + registration.lifetime(request.web).as_secs();

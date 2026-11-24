@@ -19,8 +19,9 @@ mod files;
 mod http;
 mod text;
 
-// Channels and tool requests.
+// Channels, teams and tool requests.
 mod channel;
+mod teams;
 mod tools;
 
 // The full-screen views.

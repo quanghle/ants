@@ -1,4 +1,4 @@
-//! User JWTs and their claims, signed by the team's account and verified, and signatures of user keys.
+//! User JWTs and their claims, signed by the bus's account and verified, and signatures of user keys.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

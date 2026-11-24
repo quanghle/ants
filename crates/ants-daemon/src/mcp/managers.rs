@@ -153,7 +153,7 @@ impl Tools {
     #[tool(description = "Add a worker ant from an ant template that lists this ant among its managers: `name` \
         fitting the template's name pattern, `reason` saying why it is needed, and `overrides` choosing settings \
         within the template's bounds. It is checked against the template here first and refused at once outside \
-        it. Its key is made on this machine and its credentials signed where the team's account key is: at once \
+        it. Its key is made on this machine and its credentials signed where the bus's account key is: at once \
         within the template's policy, else once a human approves, which can take a while. Then it is listed in \
         the config file and served by this machine's daemon; it returns once the new ant is in the colony, to be \
         reached with send_message and ask_ant, or says why it was refused. Ants added this way never add ants.")]
@@ -168,7 +168,7 @@ impl Tools {
 
     #[tool(description = "Retire a worker ant this ant added with request_ant, once its work is done: its entry \
         leaves the config file, this machine's daemon stops it once its prompts in flight end (waiting up to 5 \
-        minutes, past which they are cut off), and its credentials are revoked where the team's account key is. \
+        minutes, past which they are cut off), and its credentials are revoked where the bus's account key is. \
         Its home stays, memory, task database and worktrees included: a later request_ant of the same name from \
         the same template brings it back with them. A retired ant no longer counts toward the template's max_ants \
         or its pool's daily spend. Only ants this ant added can be retired.")]

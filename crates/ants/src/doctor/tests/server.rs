@@ -183,8 +183,8 @@ async fn an_ants_credentials_skip_the_hub_check() {
     assert_eq!(named(&checks, "hub")[0].status, Status::Skip, "{checks:#?}");
 }
 
-/// With the team keys, the hub is asked whether it keeps pushed accounts: a warning without a `full` resolver, and
-/// for a hub of another team, which refuses the system account.
+/// With the account keys, the hub is asked whether it keeps pushed accounts: a warning without a `full` resolver, and
+/// for a hub of another bus, which refuses the system account.
 #[tokio::test]
 async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory() {
     for full in [false, true] {
@@ -223,14 +223,14 @@ async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory
         let other = Setup { team: hub.dir().join("other"), ..setup };
         let check = check_resolver(&other, false).await;
         assert_eq!(check.status, Status::Warn, "{check}");
-        assert!(check.detail.contains("refuses the team's system account"), "{check}");
+        assert!(check.detail.contains("refuses the bus's system account"), "{check}");
         let none = Setup { team: hub.dir().join("no-team"), ..other };
         assert_eq!(check_resolver(&none, false).await.status, Status::Skip);
     }
 }
 
-/// The store account check fails on a hub whose team's account holds JetStream, as before the store account, and
-/// passes once its streams are moved into the store account; a team without a store account fails it locally.
+/// The store account check fails on a hub whose bus's account holds JetStream, as before the store account, and
+/// passes once its streams are moved into the store account; a bus without a store account fails it locally.
 #[tokio::test]
 async fn the_store_account_check_fails_until_the_hub_keeps_jetstream_in_the_store_account() {
     let Some(mut hub) = Server::start_before_store() else { return };
@@ -254,7 +254,7 @@ async fn the_store_account_check_fails_until_the_hub_keeps_jetstream_in_the_stor
     let (client, _js) = hub.connect(&human).await;
     let check = check_store_account(&setup(&hub), false).await;
     assert_eq!(check.status, Status::Fail, "{check}");
-    assert!(check.detail.contains("the team's account holds JetStream"), "{check}");
+    assert!(check.detail.contains("the bus's account holds JetStream"), "{check}");
     assert!(check.fix[0].contains("ants auth move-stores --store-dir DIR"), "{check}");
     assert_eq!(check_store_account(&setup(&hub), true).await.status, Status::Skip, "through the leaf node");
 
@@ -271,5 +271,5 @@ async fn the_store_account_check_fails_until_the_hub_keeps_jetstream_in_the_stor
     std::fs::remove_file(team.join(auth::STORE_SEED)).unwrap();
     let check = check_store_account(&setup(&hub), false).await;
     assert_eq!(check.status, Status::Fail, "{check}");
-    assert!(check.detail.contains("has no store account") && check.fix[0].starts_with("ants auth init"), "{check}");
+    assert!(check.detail.contains("hold no store account") && check.fix[0].starts_with("ants auth init"), "{check}");
 }

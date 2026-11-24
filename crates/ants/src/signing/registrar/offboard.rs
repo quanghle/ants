@@ -183,7 +183,7 @@ pub struct Offboarded {
 /// its organizations or teams, or no user any more.
 pub(super) fn gone(account: &GithubAccount, now: Option<&GithubAccount>) -> String {
     match now {
-        Some(now) => format!("GitHub user {} is no member of the team's organizations or teams any more", now.login),
+        Some(now) => format!("GitHub user {} is no member of the bus's organizations or teams any more", now.login),
         None => format!("GitHub has no user {} (id {}) any more", account.login, account.id),
     }
 }

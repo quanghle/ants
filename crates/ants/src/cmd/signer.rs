@@ -24,7 +24,7 @@ pub(crate) struct SignerArgs {
     #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
     #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "15m")]
     pub(crate) approval_timeout: Duration,
-    /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+    /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
     #[arg(long, env = "ANTS_AUTH_DIR")]
     pub(crate) dir: Option<PathBuf>,
     #[command(flatten)]

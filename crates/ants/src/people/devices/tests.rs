@@ -52,7 +52,7 @@ fn a_reader_takes_a_key_only_from_a_jwt_it_verifies() {
 
     let other = Own::from_creds_text(&issue(&other_team, &alice, Role::Human)).unwrap();
     let theirs = verify(&account.public_key(), &alice, &other.device, &other.jwt, now).unwrap_err();
-    assert!(theirs.contains("not by the team's account"), "{theirs}");
+    assert!(theirs.contains("not by the bus's account"), "{theirs}");
     let reason = |claims: &Value, by: &KeyPair| ok(&signed(by, claims)).unwrap_err();
     let mut forged = claims.clone();
     forged["name"] = "bob".into();

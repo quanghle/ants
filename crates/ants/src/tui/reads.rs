@@ -1,5 +1,5 @@
 //! What `ants chat` reads besides the live feed ([`crate::live::Feed`]), every while and on demand: which of the
-//! human's inbox messages and channel posts are read, the channels, their notify levels and the humans, and the reactions to the messages
+//! human's inbox messages and channel posts are read, the channels, their notify levels, the humans and the teams, and the reactions to the messages
 //! shown, again at once as any of them changes; and marking a thread's messages and a channel's posts read, and
 //! reacting to a message as `ants react` does.
 
@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use ants_daemon::records::reactions::{self, Change, Reactions};
 use ants_proto::{
-    ChannelEntry, ChannelId, ChannelNotify, ChannelReadMarkers, Humans, JsDomain, Reaction, ReadMarker, ThreadId,
-    UserId, Uuid,
+    ChannelEntry, ChannelId, ChannelNotify, ChannelReadMarkers, Humans, JsDomain, Reaction, ReadMarker, TeamDirectory,
+    ThreadId, UserId, Uuid,
 };
 use anyhow::Result;
 use async_nats::jetstream;
@@ -24,7 +24,7 @@ use crate::messages::inbox::{Inbox, Select};
 
 /// How often the read markers are read, for what other devices of the human marked read.
 const MARKER_EVERY: Duration = Duration::from_secs(5);
-/// How often the channels, their notify levels, the humans and the reactions are read.
+/// How often the channels, their notify levels, the humans, the teams and the reactions are read.
 const DIRECTORY_EVERY: Duration = Duration::from_secs(10);
 
 type Directory = (Vec<ChannelEntry>, Humans);
@@ -49,6 +49,8 @@ pub enum Read {
     ChannelMarked(ChannelId, Result<ChannelReadMarkers>),
     /// Every channel, and the team's humans.
     Directory(Result<Directory>),
+    /// The team directory; none on a bus without `ants_teams`.
+    Teams(Result<Option<TeamDirectory>>),
     /// The human's notify levels of the channels.
     Levels(Levels),
     /// The thread's messages were marked read, or not.
@@ -72,6 +74,7 @@ pub struct Reads {
     directories: tokio::time::Interval,
     marker: Option<LocalBoxFuture<'static, Result<ReadMarker>>>,
     directory: Option<LocalBoxFuture<'static, Result<Directory>>>,
+    teams: Option<LocalBoxFuture<'static, Result<Option<TeamDirectory>>>>,
     /// The threads to mark read, after the one in flight.
     to_mark: VecDeque<ThreadId>,
     marking: Option<LocalBoxFuture<'static, (ThreadId, Result<()>)>>,
@@ -109,6 +112,7 @@ impl Reads {
             directories: tokio::time::interval(DIRECTORY_EVERY),
             marker: None,
             directory: None,
+            teams: None,
             to_mark: VecDeque::new(),
             marking: None,
             to_unmark: VecDeque::new(),
@@ -157,18 +161,7 @@ impl Reads {
                         self.read_channel_marker();
                     }
                 }
-                _ = self.directories.tick() => {
-                    if self.directory.is_none() {
-                        let js = self.js.clone();
-                        self.directory = Some(directory(js).boxed_local());
-                    }
-                    if self.levels.is_none() {
-                        self.read_levels();
-                    }
-                    if self.reactions.is_none() {
-                        self.read_reactions();
-                    }
-                }
+                _ = self.directories.tick() => self.read_directories(),
                 read = maybe(&mut self.marker) => {
                     self.marker = None;
                     return Read::Marker(read);
@@ -184,6 +177,10 @@ impl Reads {
                 read = maybe(&mut self.directory) => {
                     self.directory = None;
                     return Read::Directory(read);
+                }
+                read = maybe(&mut self.teams) => {
+                    self.teams = None;
+                    return Read::Teams(read);
                 }
                 read = maybe(&mut self.levels) => {
                     self.levels = None;
@@ -221,6 +218,25 @@ impl Reads {
                     }
                 }
             }
+        }
+    }
+
+    /// Read again, every [`DIRECTORY_EVERY`], the directory, the teams, the notify levels and the reactions not being
+    /// read.
+    fn read_directories(&mut self) {
+        if self.directory.is_none() {
+            let js = self.js.clone();
+            self.directory = Some(directory(js).boxed_local());
+        }
+        if self.teams.is_none() {
+            let (js, domain) = (self.js.clone(), self.domain.clone());
+            self.teams = Some(async move { crate::teams::read_of(&js, domain.as_ref()).await }.boxed_local());
+        }
+        if self.levels.is_none() {
+            self.read_levels();
+        }
+        if self.reactions.is_none() {
+            self.read_reactions();
         }
     }
 
@@ -289,10 +305,11 @@ impl Reads {
         self.to_react.push_back((message, reaction, remove));
     }
 
-    /// Read the directory again now, as the human changed a channel's entry.
+    /// Read the directory and the teams again now, as the human changed a channel's entry or a team.
     pub fn read_directory(&mut self) {
         self.directories.reset_immediately();
         self.directory = None;
+        self.teams = None;
     }
 
     /// Read everything again now.
@@ -302,6 +319,7 @@ impl Reads {
         self.marker = None;
         self.channel_marker = None;
         self.directory = None;
+        self.teams = None;
         self.levels = None;
         self.reactions = None;
     }

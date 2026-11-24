@@ -1,6 +1,7 @@
 //! Where Enter sends the bar's text, which the bar's title names: the one routing both read, so that a send goes where
 //! the title said when Enter was pressed.
 
+use ants_client::sending::Addressed;
 use ants_proto::{ChannelId, ThreadId, UserId};
 
 use super::Note;
@@ -49,8 +50,10 @@ impl Route {
         match self {
             Self::Command(name) => format!("run /{name}"),
             Self::Unnamed => String::new(),
-            Self::Ask { to, thread: None } => format!("to {to} on a new thread{}", sealed(to)),
-            Self::Ask { to, thread: Some(thread) } => format!("to {to} on {}{}", title(thread), sealed(to)),
+            Self::Ask { to, thread: None } => format!("to {} on a new thread{}", named(to, data), sealed(to)),
+            Self::Ask { to, thread: Some(thread) } => {
+                format!("to {} on {}{}", named(to, data), title(thread), sealed(to))
+            }
             Self::Post { channel, thread: None } => format!("new thread in #{channel}"),
             Self::Post { channel, thread: Some(thread) } => format!("post in #{channel} on {}", title(thread)),
             Self::Reply { thread, to: Replied::Reading } => format!("reply on {}", title(thread)),
@@ -60,6 +63,19 @@ impl Route {
             }
             Self::Unaddressed => "to the assistant or the messenger on a new thread".to_owned(),
         }
+    }
+}
+
+/// `to` as the bar's title names it: a team with its lead, its own or one above it, where the message goes, or that
+/// it has none.
+fn named(to: &UserId, data: &Data) -> String {
+    let Some(teams) = data.teams.as_ref().filter(|teams| teams.is_team(to)) else { return to.to_string() };
+    match teams.lead_source(to) {
+        Some(source) if source.team == *to => format!("team {to} (lead {})", source.lead.as_ref().expect("a lead")),
+        Some(source) => {
+            format!("team {to} (lead {}, from team {})", source.lead.as_ref().expect("a lead"), source.team)
+        }
+        None => format!("team {to}, which has no lead"),
     }
 }
 
@@ -122,7 +138,10 @@ impl Model {
     pub(super) fn job(&self, route: Route, text: String) -> Result<Job, String> {
         let quote = self.quoting().map(|(_, quote)| quote);
         Ok(match route {
-            Route::Ask { to, thread } => Job::Ask { quote: thread.as_ref().and(quote), to, thread, text },
+            Route::Ask { to, thread } => {
+                let Addressed { to, team } = self.addressed(to)?;
+                Job::Ask { quote: thread.as_ref().and(quote), to, thread, text, team }
+            }
             Route::Post { channel, thread } => Job::Post { quote: thread.as_ref().and(quote), channel, thread, text },
             Route::Reply { thread, to } => {
                 let to = match to {
@@ -134,6 +153,15 @@ impl Model {
             Route::Unaddressed => Job::Unaddressed { text },
             Route::Command(_) | Route::Unnamed => return Err("nothing to send".to_owned()),
         })
+    }
+
+    /// Where a message to `to` goes: to its lead when `to` names a team of the directory read, carrying the team;
+    /// a team with no lead, nor any above it, refused ([`ants_client::sending::addressed`]).
+    fn addressed(&self, to: UserId) -> Result<Addressed, String> {
+        match &self.data.teams {
+            Some(teams) => ants_client::sending::addressed(teams, to).map_err(|e| e.to_string()),
+            None => Ok(Addressed { to, team: None }),
+        }
     }
 
     /// What the bar's title says Enter does with the text as it stands.
@@ -195,7 +223,7 @@ mod tests {
         assert_eq!(title(&mut m, "@dev-b look"), "new thread in #ops", "an @mention posts on a channel");
         m.pages.push(Page::Dm(dm::Page::new(user("bob"))));
         assert_eq!(title(&mut m, "lunch?"), "to bob on a new thread, sealed");
-        let ask = Job::Ask { to: user("bob"), thread: None, text: "lunch?".into(), quote: None };
+        let ask = Job::Ask { to: user("bob"), thread: None, text: "lunch?".into(), quote: None, team: None };
         assert_eq!(m.key(Key::Enter, at(2)), Some(Action::Run(ask, "lunch?".into())));
     }
 

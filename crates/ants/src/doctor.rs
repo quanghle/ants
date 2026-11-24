@@ -25,6 +25,7 @@ use self::credentials::{check_backup, check_cli_creds};
 use self::leaf_node::{Leaf, check_leaf};
 use self::server::{check_resolver, check_storage, check_store_account, reach};
 use self::services::{check_services, check_webhooks};
+use self::teams::{check_team_changes, check_teams};
 pub use self::trails::trail_worker;
 use self::trails::{check_runs, check_worker};
 use self::transports::{check_transports, installed_transports, same_address};
@@ -41,6 +42,7 @@ mod credentials;
 mod leaf_node;
 mod server;
 mod services;
+mod teams;
 mod trails;
 mod transports;
 mod web;
@@ -122,7 +124,7 @@ pub struct Setup {
     pub hub_config: PathBuf,
     /// Whether to start each harness for an ACP handshake.
     pub harnesses: bool,
-    /// The team directory of `ants auth`, whose system account key, when it is there, asks the hub how it keeps
+    /// The auth directory of `ants auth`, whose system account key, when it is there, asks the hub how it keeps
     /// pushed accounts.
     pub team: PathBuf,
     /// The config file of `ants webhook serve`, checked when it is there.
@@ -135,10 +137,11 @@ pub struct Setup {
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
-/// buckets, the versions of ants running across the team, the JetStream storage, each ant's credentials, harness,
-/// workdir and reactions responder, the trail worker and the runs of trails stuck, the hub's account resolver and store
-/// account, the team keys' backup, the leaf node and outbox, the installed services, the WebSocket listeners' origins, the
-/// webhooks' config file and notification sinks, and the Dev Tunnel and HTTPS bridge services installed.
+/// buckets, the versions of ants running across the colony, the JetStream storage, each ant's credentials, harness,
+/// workdir, reactions responder, trail saves and team changes, the trail worker and the runs of trails stuck, the team
+/// directory, the hub's account resolver and store account, the account keys' backup, the leaf node and outbox, the
+/// installed services, the WebSocket listeners' origins, the webhooks' config file and notification sinks, and the Dev
+/// Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -160,6 +163,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let resolver = check_resolver(setup, through_leaf);
     let reactions = check_reactions(ants, setup, NETWORK_TIMEOUT);
     let trail_saves = check_trail_saves(ants, setup, NETWORK_TIMEOUT);
+    let team_changes = check_team_changes(ants, setup, NETWORK_TIMEOUT);
     let update = check_update(loaded.as_ref().map_or_default(|l| l.auto_update));
     let worker = async {
         match (&loaded, &setup.worker) {
@@ -171,8 +175,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
             (Some(_), Some(program)) => check_worker(program, ants_trail::GRACE).await,
         }
     };
-    let ((reached, connected), ants_checked, resolver, reactions, trail_saves, update, worker) =
-        tokio::join!(reach, ants_checked, resolver, reactions, trail_saves, update, worker);
+    let ((reached, connected), ants_checked, resolver, reactions, trail_saves, team_changes, update, worker) =
+        tokio::join!(reach, ants_checked, resolver, reactions, trail_saves, team_changes, update, worker);
     checks.extend(update);
     checks.extend(reached);
     let settings = loaded.as_ref().map_or_default(|l| l.storage);
@@ -199,14 +203,16 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(check_sense_logs(ants));
     checks.extend(reactions);
     checks.extend(trail_saves);
+    checks.extend(team_changes);
     if let Some(loaded) = &loaded {
         let webhooks = setup.webhooks.exists().then(|| webhook::Config::read(&setup.webhooks).ok()).flatten();
         checks.extend(check_bypassed(loaded, webhooks.as_ref().map_or_default(|c| c.webhooks.as_slice())));
     }
     checks.push(worker);
     checks.extend(check_runs(connected.as_ref(), chrono::Utc::now()).await);
+    checks.extend(check_teams(connected.as_ref(), setup, chrono::Utc::now()).await);
     checks.push(resolver);
-    // After the CLI's connection, which has the hub load the team's account if no member connected yet.
+    // After the CLI's connection, which has the hub load the bus's account if no member connected yet.
     checks.push(check_store_account(setup, through_leaf).await);
     checks.extend(check_backup(&setup.team));
     let human = identity.as_ref().filter(|i| i.finding.is_some()).map(|i| &i.me).filter(|me| me.role.is_human());

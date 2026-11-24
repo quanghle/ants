@@ -225,7 +225,7 @@ An ant's role settings and core memories are the ant's, the same on whichever ma
 
 `system-messenger` and `system-sage` are reserved built-in IDs, not valid `[[ant]]` names. `messenger` and `sage` are ordinary names, with no special behavior unless explicitly assigned to a channel or review. There is no `[[ant]].role`; `whoami` supplies descriptive prompt instructions, not an assignment.
 
-On an authenticated server a daemon serves each built-in only where its credentials are present. The server counts as authenticated when the file names credentials anywhere: host credentials (`[host]` `creds` or one found in `~/.config/ants/auth/`), an `[[ant]]`'s `creds`, or the CLI's `[cli]` `creds`. Issue them with `ants auth builtin messenger` or `ants auth builtin sage` on the machine holding the team keys, then copy `system-messenger.creds` or `system-sage.creds` to `~/.config/ants/auth/` on the serving machine. Credentials appearing or disappearing take effect on [reload](#precedence-and-reload). `ants daemon --config FILE --ant system-sage --creds system-sage.creds` can select a built-in left to another machine. A built-in left elsewhere needs no harness. A file leaving every ant elsewhere, or with `messenger = false` and no `[[ant]]`, serves nothing: `ants daemon` refuses to start. `ants doctor` fails its `config` line there when host credentials are present, a daemon being meant to run; without them it passes the file as that of a machine where only humans run the CLI, such as the one `ants login` writes (`js_domain`, `nats` and `[cli]` `creds` alone), and skips the ant and trail worker checks. On an unauthenticated server, built-ins connect as no one, like the other ants in the file. `messenger = false` disables local hosting, not routing to `system-messenger`.
+On an authenticated server a daemon serves each built-in only where its credentials are present. The server counts as authenticated when the file names credentials anywhere: host credentials (`[host]` `creds` or one found in `~/.config/ants/auth/`), an `[[ant]]`'s `creds`, or the CLI's `[cli]` `creds`. Issue them with `ants auth builtin messenger` or `ants auth builtin sage` on the machine holding the account keys, then copy `system-messenger.creds` or `system-sage.creds` to `~/.config/ants/auth/` on the serving machine. Credentials appearing or disappearing take effect on [reload](#precedence-and-reload). `ants daemon --config FILE --ant system-sage --creds system-sage.creds` can select a built-in left to another machine. A built-in left elsewhere needs no harness. A file leaving every ant elsewhere, or with `messenger = false` and no `[[ant]]`, serves nothing: `ants daemon` refuses to start. `ants doctor` fails its `config` line there when host credentials are present, a daemon being meant to run; without them it passes the file as that of a machine where only humans run the CLI, such as the one `ants login` writes (`js_domain`, `nats` and `[cli]` `creds` alone), and skips the ant and trail worker checks. On an unauthenticated server, built-ins connect as no one, like the other ants in the file. `messenger = false` disables local hosting, not routing to `system-messenger`.
 
 ## The sage
 
@@ -334,6 +334,8 @@ The signer also answers ants' reactions requests (MCP `react` and `list_reaction
 
 The signer also saves and removes ants' trails (MCP `save_trail` and `remove_trail`) in queue group `savetrail`: a saved trail's key is its name, which no subject ties to its saver, so ant credentials neither put nor delete in `ants_trails`, and the signer writes for an ant only a trail saved as the ant's own, under a new name or over a trail the ant saved, and removes only such a trail. With authentication, `save_trail` and `remove_trail` therefore need a running `ants signer`; a daemon without credentials writes itself, with the same checks.
 
+The signer also changes teams for their leads (MCP `manage_team`) in queue group `teamadm`: the team directory is one entry of `ants_teams`, which no subject ties to a team, so ant credentials write nothing of it, and the signer writes for an ant only what a lead may change of the team it leads and the teams beneath it (members, description, lead named or cleared, sub-teams created or deleted; never a team's owner, nor a team above), on the directory as the ant read it. With authentication, `manage_team` therefore needs a running `ants signer`; a daemon without credentials writes itself, with the same checks.
+
 ### Retiring an added ant
 
 Managers also get `retire_ant(name)` (`other:retire_ant`) for ants whose `added_by` matches them:
@@ -362,11 +364,11 @@ Not copied: messages queued for SRC, channel memberships, references, spend coun
 
 ## Human registration
 
-`ants signer` registers a human's new device after a GitHub sign-in (`ants login`, with the team's bootstrap credentials) when its `--config` has a `[registration]` table, reread per request, and renews the credentials such registrations granted. Without the table, every registration is refused as not enabled. The flow, the grants, name bindings, renewal and offboarding are in [auth.md](auth.md#registering-humans).
+`ants signer` registers a human's new device after a GitHub sign-in (`ants login`, with the bus's bootstrap credentials) when its `--config` has a `[registration]` table, reread per request, and renews the credentials such registrations granted. Without the table, every registration is refused as not enabled. The flow, the grants, name bindings, renewal and offboarding are in [auth.md](auth.md#registering-humans).
 
 ```toml
 [registration]
-client_id = "Ov23liAbCdEf"                    # the team's GitHub OAuth App, device flow enabled (required)
+client_id = "Ov23liAbCdEf"                    # the bus's GitHub OAuth App, device flow enabled (required)
 orgs = ["acme"]                               # members of these organizations are signed at once
 teams = ["acme/core"]                         # ... and members of these teams (org/team slug)
 email_domains = ["acme.example"]              # ... and users with a verified email address in these domains
@@ -379,7 +381,7 @@ token_file = "~/.config/ants/github-token"    # the signer's GitHub token, mode 
 # api_url = "https://api.github.com"          # GitHub's REST API (default)
 ```
 
-- **`client_id`:** the client ID of a GitHub OAuth App of the team with **Enable Device Flow** checked; no client secret is needed. Signing in grants it the scopes `read:org user:email`.
+- **`client_id`:** the client ID of a GitHub OAuth App of the bus with **Enable Device Flow** checked; no client secret is needed. Signing in grants it the scopes `read:org user:email`.
 - **`orgs`, `teams`, `email_domains`:** the policy, checked in that order: an active member of a listed organization (grant `org`), then of a listed team (`team`), then a user with a verified email address in a listed domain (`email-domain`; that exact domain, no subdomains) is signed at once. Names are compared without case; organizations are GitHub logins and teams `org/slug`. Anyone else waits for a human's approval ([auth.md](auth.md#registration-policy)), within `ants signer --approval-timeout` (default `15m`). An empty policy sends every registration to the humans.
 - **`ttl`:** how long a registered device's credentials stay valid; a renewal keeps the lifetime they were signed with.
 - **`web_ttl`:** how long the credentials of a registered [web device](auth.md#web-devices) stay valid, a page of the web client whose registration request asks for one; a renewal keeps the lifetime they were signed with.
@@ -857,7 +859,7 @@ The built-in sense exports an ant's sense log, as stream `ANTS_SENSE` stores it
 
 - `manifest`: `{version, sense, ant, events, tip, accounts, files}`: the version (1), the sense id, the ant's name,
   the log's number of events and its last one (`tip`, `{index, sha256}`, left out for an empty log), the public keys
-  of the team accounts whose ants' credentials signed the events (the bus exported from, and the buses before it the
+  of the accounts whose ants' credentials signed the events (the bus exported from, and the buses before it the
   log came from; empty for a server without authentication), and each file as `{path, sha256, size}`.
 - `files`: each file as `{path, data}`, `data` in base64: `log.jsonl`, each event as stored, one a line, then each
   skill file under `skills/`, its path relative to `.sense/skills`.

@@ -19,6 +19,7 @@ impl Page {
             Self::Home(page) => page.key(key, data, now),
             Self::Work(page) => page.key(key, data, now),
             Self::Channel(page) => page.key(key, data, ui, now),
+            Self::Team(page) => page.key(key, data, now),
             Self::Thread(page) => page.key(key, data, now),
             Self::Dm(page) => page.key(key, data, now),
             Self::Search(page) => page.key(key, data, now),
@@ -34,6 +35,7 @@ impl Page {
             Self::Home(page) => page.draw(frame, area, model, now, focused),
             Self::Work(page) => page.draw(frame, area, model, now, focused),
             Self::Channel(page) => page.draw(frame, area, model, now, focused),
+            Self::Team(page) => page.draw(frame, area, model, now, focused),
             Self::Thread(page) => page.draw(frame, area, model, now, focused),
             Self::Dm(page) => page.draw(frame, area, model, now, focused),
             Self::Search(page) => page.draw(frame, area, model, now, focused),
@@ -45,12 +47,13 @@ impl Page {
     }
 
     /// Take `key` if it is typed into what the view holds: the text found in a thread, an ant's setting or sign-in
-    /// address being written, or a channel's members editor. Where it leads, if anywhere.
+    /// address being written, or a channel's or a team's editor. Where it leads, if anywhere.
     pub fn typed(&mut self, key: Key, data: &Data) -> Option<Option<To>> {
         match self {
             Self::Thread(page) => page.find_key(key).then_some(None),
             Self::Ant(page) => page.write(key).map(|action| action.map(To::Do)),
             Self::Channel(page) => page.write(key, data),
+            Self::Team(page) => page.write(key, data),
             _ => None,
         }
     }
@@ -64,6 +67,7 @@ impl Page {
                 page.card_paste(line, data, now) || line.chars().all(|c| page.finding() && page.find_key(Key::Char(c)))
             }
             Self::Channel(page) => page.paste(line),
+            Self::Team(page) => page.paste(line),
             Self::Ant(page) => line.chars().all(|c| page.write(Key::Char(c)).is_some()),
             _ => false,
         }
@@ -116,6 +120,7 @@ impl Page {
         match self {
             Self::Home(page) => page.prompt().map(Cow::Owned),
             Self::Channel(page) => page.prompt().map(Cow::Borrowed),
+            Self::Team(page) => page.prompt().map(Cow::Borrowed),
             Self::Tree(page) => page.prompt().map(Cow::Borrowed),
             Self::Ant(page) => page.prompt().map(Cow::Borrowed),
             Self::Credentials(page) => page.prompt().map(Cow::Borrowed),
@@ -141,7 +146,7 @@ impl Page {
         match self {
             Self::Ant(page) => page.armed().is_some(),
             Self::Home(_) | Self::Tree(_) | Self::Credentials(_) | Self::Held(_) => self.prompt().is_some(),
-            Self::Work(_) | Self::Channel(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
+            Self::Work(_) | Self::Channel(_) | Self::Team(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
         }
     }
 
@@ -153,7 +158,7 @@ impl Page {
             Self::Ant(page) => page.disarm(),
             Self::Credentials(page) => page.disarm(),
             Self::Held(page) => page.disarm(),
-            Self::Work(_) | Self::Channel(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
+            Self::Work(_) | Self::Channel(_) | Self::Team(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
         }
     }
 

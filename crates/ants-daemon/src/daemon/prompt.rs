@@ -542,6 +542,7 @@ impl Inbox<'_> {
             steering: Some(Steering { ready: ready_tx, steers }),
             brief,
             channel,
+            team: self.teams.clone().map(|kv| crate::teams::Note { kv, ant: self.ant.clone() }),
             began: Some(began),
         };
         let ready = futures::FutureExt::fuse(ready);

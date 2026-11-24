@@ -1,6 +1,7 @@
 //! The nav: home, the assistant's activity once there is any, work with a count per state (shown while work or a state
-//! is selected), the human's channels with their unread posts and @mentions, the ants
-//! with their state, and the team's other humans, online or not. Each entry selects a view.
+//! is selected), the human's channels with their unread posts and @mentions, the teams as a forest (each indented
+//! under the team holding it, with how many ants it holds down through its member teams), the ants with their state,
+//! and the team's other humans, online or not. Each entry selects a view.
 
 use ants_client::entry::Kind;
 use ants_proto::{Activity, ChannelId, ColonyEntry, Humans, ThreadId, UserId};
@@ -26,6 +27,8 @@ pub enum Item {
     /// Every thread, or those in a state.
     Work(Option<ThreadState>),
     Channel(ChannelId),
+    /// A team: its lead, owner and description, and its members as a tree.
+    Team(UserId),
     /// An ant: where and how it runs, what holds it back, its activity, threads, queue and spend.
     Ant(UserId),
     /// Another human: the direct messages with it.
@@ -38,6 +41,7 @@ impl Item {
         match self {
             Self::Home | Self::Activity | Self::Work(_) => None,
             Self::Channel(_) => Some("CHANNELS"),
+            Self::Team(_) => Some("TEAMS"),
             Self::Ant(_) => Some("ANTS"),
             Self::Person(_) => Some("PEOPLE"),
         }
@@ -55,6 +59,9 @@ pub fn items(data: &Data, selected: &Item, _now: DateTime<Utc>) -> Vec<Item> {
         items.extend(ThreadState::ALL.map(|s| Item::Work(Some(s))));
     }
     items.extend(data.channels.iter().map(|c| Item::Channel(c.channel.clone())));
+    if let Some(teams) = &data.teams {
+        items.extend(crate::teams::forest(teams).into_iter().map(|(_, t)| Item::Team(t.team.clone())));
+    }
     let mut ants: Vec<&UserId> = data.live.colony.iter().map(|e| &e.ant).collect();
     ants.sort();
     ants.dedup();
@@ -137,6 +144,16 @@ fn line(
                 spans.push(Span::styled(format!(" ·{}", unread.other), style::dim()));
             }
             spans.extend(ui.drafts.mark(&Conversation::Channel(channel.clone())));
+            Line::from(spans)
+        }
+        Item::Team(team) => {
+            let Some(teams) = &data.teams else { return Line::raw(team.to_string()) };
+            let indent = "  ".repeat(teams.ancestors(team).len());
+            let mut spans = vec![Span::raw(format!("{indent}{team}"))];
+            spans.push(Span::styled(count(teams.ants_under(team).len()), style::dim()));
+            if teams.lead_of(team).is_err() {
+                spans.push(Span::styled(" ✕ no lead", Style::new().fg(style::ERROR)));
+            }
             Line::from(spans)
         }
         Item::Ant(ant) => {

@@ -11,7 +11,7 @@ impl Permissions {
     /// allowed by a wildcard (`$JS.*.API.…`) is not listed again, saving room in the JWT.
     ///
     /// Each domain form is that of a plain right, as listed, never a wildcard over several: the store account maps a
-    /// domain form to the plain one past the service import of the team's account ([`crate::Permissions`]), where no
+    /// domain form to the plain one past the service import of the bus's account ([`crate::Permissions`]), where no
     /// permissions of the user are checked any more. Without a domain the permissions are unchanged.
     #[must_use]
     pub fn with_js_domain(mut self, domain: Option<&JsDomain>) -> Self {

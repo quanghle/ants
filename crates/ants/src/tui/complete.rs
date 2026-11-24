@@ -1,4 +1,4 @@
-//! Completion in the command bar: `@` lists users and `#` channels, narrowed by what follows them up to the cursor;
+//! Completion in the command bar: `@` lists users and teams and `#` channels, narrowed by what follows them up to the cursor;
 //! after `/attach`, the paths of the directory typed. `/` at the start lists the palette ([`super::palette`]).
 
 use std::collections::BTreeSet;
@@ -97,7 +97,7 @@ impl Model {
         match word {
             Word::User(typed) => narrow(typed, self.users().into_iter().map(|(u, what)| (u.to_string(), what)))
                 .into_iter()
-                .map(|(name, what)| Candidate { word: format!("@{name}"), detail: what.to_owned() })
+                .map(|(name, detail)| Candidate { word: format!("@{name}"), detail })
                 .collect(),
             Word::Channel(typed) => {
                 let channels = self.data.channels.iter().map(|c| (c.channel.to_string(), c.members.len()));
@@ -110,8 +110,9 @@ impl Model {
     }
 
     /// The users `@` completes, by name, each an "ant" or a "human": the members of the channel on view, else the
-    /// colony's ants and the registered humans; the human using the UI is left out.
-    fn users(&self) -> Vec<(UserId, &'static str)> {
+    /// colony's ants, the registered humans and the teams, each team with its lead; the human using the UI is left
+    /// out.
+    fn users(&self) -> Vec<(UserId, String)> {
         let data = &self.data;
         let channel = match self.page() {
             Page::Channel(page) => Some(page.channel.clone()),
@@ -122,19 +123,29 @@ impl Model {
             | Page::Search(_)
             | Page::Tree(_)
             | Page::Ant(_)
+            | Page::Team(_)
             | Page::Credentials(_)
             | Page::Held(_) => None,
         };
         let members = channel.and_then(|channel| data.channels.iter().find(|c| c.channel == channel));
+        let teams = data.teams.iter().flat_map(|d| &d.teams).filter(|_| members.is_none());
         let users: BTreeSet<&UserId> = match members {
             Some(entry) => entry.members.iter().collect(),
             None => data.live.colony.iter().map(|e| &e.ant).chain(data.humans.iter().flat_map(Humans::iter)).collect(),
         };
-        users
+        let teams: Vec<(UserId, String)> = teams
+            .map(|t| {
+                let lead = t.lead.as_ref().map_or_else(|| "no lead".to_owned(), |lead| format!("lead {lead}"));
+                (t.team.clone(), format!("team · {lead}"))
+            })
+            .collect();
+        let mut users: Vec<(UserId, String)> = users
             .into_iter()
-            .filter(|u| *u != data.me())
-            .map(|u| (u.clone(), if data.is_human(u) { "human" } else { "ant" }))
-            .collect()
+            .filter(|u| *u != data.me() && !teams.iter().any(|(t, _)| t == *u))
+            .map(|u| (u.clone(), if data.is_human(u) { "human" } else { "ant" }.to_owned()))
+            .collect();
+        users.extend(teams);
+        users
     }
 
     /// Take `key` for the list of completions when it shows: Up and Down select, Tab or Enter completes (Enter only

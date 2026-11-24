@@ -10,7 +10,7 @@
 //! of `ants add --store-key` and `ants auth user|channel-manager --store-key` put their seed in the store at once
 //! ([`write_new_stored`]), never in a file.
 //!
-//! Leaf node uplink credentials stay in their file, which nats-server reads; so do the team keys of `ants auth`.
+//! Leaf node uplink credentials stay in their file, which nats-server reads; so do the account keys of `ants auth`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -380,7 +380,7 @@ mod tests {
         unchanged();
         store.allow_writes();
 
-        // A server of another team refuses the stored key: what was stored goes.
+        // A server of another bus refuses the stored key: what was stored goes.
         let err = format!("{:#}", store_seed(&creds, &store, &other.url).await.unwrap_err());
         assert!(err.contains("authenticating"), "{err}");
         unchanged();

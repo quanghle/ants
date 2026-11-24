@@ -92,7 +92,7 @@ hub_ip() {
 
 node_exec() { local node=$1; shift; container exec "$name-$node" "$@"; }
 
-# Copies a file of the hub's team directory into another node's (a scratch node's too), once; with --force, again.
+# Copies a file of the hub's auth directory into another node's (a scratch node's too), once; with --force, again.
 copy_creds() {
     local force= node file
     if [ "$1" = --force ]; then force=1; shift; fi

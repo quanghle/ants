@@ -177,6 +177,8 @@ struct Inner {
     outbox: Outbox,
     attempts: DirectKv,
     notes: Arc<dyn NotesStore>,
+    /// The team directory, naming the leads agent(team=) steps go to; None when it cannot be named.
+    teams: Option<DirectKv>,
     /// The runs not finished: running, waiting or stopped.
     runs: Mutex<HashMap<RunId, Arc<Slot>>>,
     /// The threads of steps, to the run waiting on them; or, once answered or given up, to the step's recipient, so
@@ -295,6 +297,7 @@ impl Trails {
         let saved = Saved::new(&js, js_domain.as_ref(), trails_dir, ant.clone(), saves).await;
         let tips = Tips::new(&js, js_domain.as_ref()).await?;
         let ratings = Ratings::new(&js, js_domain.as_ref(), ant.clone()).await?;
+        let teams = crate::teams::open(&js, js_domain.as_ref()).await.ok();
         let (wake, woken) = mpsc::unbounded_channel();
         let inner = Inner {
             ant,
@@ -309,6 +312,7 @@ impl Trails {
             outbox,
             attempts,
             notes,
+            teams,
             runs: Mutex::default(),
             threads: Mutex::default(),
             unrestored: Mutex::default(),

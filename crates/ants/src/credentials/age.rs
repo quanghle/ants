@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn what_is_encrypted_decrypts_with_the_passphrase_only_and_unaltered() {
         let long: Vec<u8> = (0..CHUNK * 2 + 7).map(|n| n as u8).collect();
-        for plaintext in [&b""[..], b"team keys", &long[..CHUNK], &long] {
+        for plaintext in [&b""[..], b"account keys", &long[..CHUNK], &long] {
             let file = encrypt(plaintext, b"correct horse", 10).unwrap();
             assert!(file.starts_with(BEGIN) && file.lines().all(|l| l.len() <= 64), "{file}");
             assert_eq!(decrypt(file.as_bytes(), b"correct horse").unwrap(), plaintext);

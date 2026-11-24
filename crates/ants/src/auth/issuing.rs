@@ -21,7 +21,7 @@ use super::{ACCOUNT_SEED, check_not_reserved};
 use crate::credentials::devices;
 use crate::credentials::issued::{self, Issued, Kind};
 
-/// Credentials to issue, signed with the account key in the team directory `dir`: those of `user`, of `kind`, with
+/// Credentials to issue, signed with the account key in the auth directory `dir`: those of `user`, of `kind`, with
 /// `permissions`. A human's are for a new device, whose id their user JWT carries ([`DeviceId::tag`]) and the
 /// registry records with `new`.
 pub struct Issue<'a> {
@@ -195,7 +195,7 @@ fn with_device(issued: Issued, device: Option<DeviceId>, label: Option<&str>, xk
 }
 
 /// The permissions of the credentials of `webhook` in `dir`, `<webhook>.creds` as `ants auth user WEBHOOK --webhook`
-/// writes them ([`Permissions::for_webhook`]): issued by the team's account, for `webhook`, hearing only its own reply
+/// writes them ([`Permissions::for_webhook`]): issued by the bus's account, for `webhook`, hearing only its own reply
 /// inboxes as a webhook's do.
 pub fn webhook_permissions(dir: &Path, webhook: &UserId) -> Result<Permissions> {
     let path = dir.join(format!("{webhook}.creds"));
@@ -208,7 +208,7 @@ pub fn webhook_permissions(dir: &Path, webhook: &UserId) -> Result<Permissions> 
     let jwt = creds_jwt(&text).with_context(|| format!("{}: no user JWT", path.display()))?;
     let (claims, body) = verified_body(jwt).with_context(|| path.display().to_string())?;
     if claims.iss != load(&dir.join(ACCOUNT_SEED))?.public_key() {
-        bail!("{} were not issued by the team in {}", path.display(), dir.display());
+        bail!("{} were not issued with the account keys in {}", path.display(), dir.display());
     }
     if claims.name != webhook.as_str() {
         bail!("{} are {}'s, not {webhook}'s", path.display(), claims.name);

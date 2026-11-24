@@ -13,8 +13,8 @@ use crate::cmd::{
     ant::AntCommand, assistant::AssistantCommand, attachment::AttachmentCommand, auth::AuthCommand,
     bridge::BridgeCommand, channel::ChannelCommand, dead::DeadCommand, doctor, enroll::EnrollCommand,
     harness::HarnessCommand, hook::HookCommand, inbox, keys::KeysCommand, leaf::LeafCommand, login,
-    notify::NotifyCommand, remind::RemindCommand, renew, send, setup, signer, spend::SpendArgs, thread::ThreadCommand,
-    tools::ToolsCommand, trail::TrailCommand, web, webhook::WebhookCommand,
+    notify::NotifyCommand, remind::RemindCommand, renew, send, setup, signer, spend::SpendArgs, team::TeamCommand,
+    thread::ThreadCommand, tools::ToolsCommand, trail::TrailCommand, web, webhook::WebhookCommand,
 };
 use crate::messages::{attachments, progress};
 use crate::release::update;
@@ -72,8 +72,8 @@ pub(crate) struct Ants<C: Subcommand> {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
-    /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient; otherwise the
-    /// human's assistant gets it while its grant stands, else system-messenger. With --wait or --follow, print the
+    /// Send a message as the CLI's human, who owns the thread. Starts with @ant to pick the recipient, or @TEAM to send
+    /// to the team's lead; otherwise the human's assistant gets it while its grant stands, else system-messenger. With --wait or --follow, print the
     /// replies to the CLI's human on the thread and mark them read.
     Ask(send::AskArgs),
     /// Print the replies to the CLI's human not read yet, including those that arrived while no CLI was running, and
@@ -85,6 +85,9 @@ pub(crate) enum Command {
         /// One JSON entry per line, with its state.
         #[arg(long)]
         json: bool,
+        /// Only the ants of this team and of the teams beneath it.
+        #[arg(long, value_name = "TEAM", value_parser = crate::teams::parse_name, add = ArgValueCandidates::new(completions::teams))]
+        team: Option<UserId>,
     },
     /// One ant at a glance, as the ant view of `ants chat` shows it.
     #[command(subcommand)]
@@ -112,6 +115,10 @@ pub(crate) enum Command {
     /// Channels: named groups of ants that humans post to with `ants post`.
     #[command(subcommand)]
     Channel(ChannelCommand),
+    /// Teams: named groups of ants and teams, each with an ant lead that messages to the team go to (`ants ask
+    /// @TEAM`). Each ant and each team is on one team at most, so teams form a forest.
+    #[command(subcommand)]
+    Team(TeamCommand),
     /// Show the notes of a thread, or post TEXT to them as the CLI's human, which gives them a fresh turn budget.
     /// Thread notes are a passive board, one per thread: a post wakes nobody, and ants read the notes with
     /// read_notes. They are distinct from the execution plan an ant reports, which `ants watch <ant>` shows.
@@ -309,7 +316,7 @@ pub(crate) enum Command {
     Enroll(EnrollCommand),
     /// On the machine holding the account key, sign the credentials of the ants manager ants ask for (their
     /// `request_ant` tool), until stopped: at once for a request within the policy of the [[ant_template]] tables of
-    /// --config (the template lists the manager, has room under its max_ants among the live keys the team issued,
+    /// --config (the template lists the manager, has room under its max_ants among the live keys the bus issued,
     /// and bounds the request), on a human's approval of a tool request of the manager otherwise (`ants tools`, ntfy,
     /// Slack, Telegram). Names taken, ants added by added ants and forged requests are refused. Also answers ants'
     /// reactions requests (their `react` and `list_reactions` tools, `ants react` with an ant's credentials) for the
@@ -319,7 +326,7 @@ pub(crate) enum Command {
     #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
     Signer(signer::SignerArgs),
     /// Register a device of a human with a GitHub sign-in: generate its NKey here, ask `ants signer` on the hub with
-    /// the team's bootstrap credentials, show GitHub's device login page and the code to enter there, and wait for
+    /// the bus's bootstrap credentials, show GitHub's device login page and the code to enter there, and wait for
     /// the credentials or a refusal (repeating the request every 5 s, for up to 15 min, until Ctrl-C). Then write
     /// ~/.config/ants/auth/NAME.creds and set `creds` and `nats` of [cli] in the config file when [cli] names no
     /// credentials. A refusal, an expiry or Ctrl-C leaves no key and no file.
@@ -348,10 +355,10 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Harness(HarnessCommand),
     /// Check the machine's ants setup end to end: the config file, credentials, the server and JetStream, the hub's
-    /// stream and buckets, each ant's harness, whether the hub keeps pushed accounts across restarts (with the team
-    /// keys), the leaf node and its outbox, the installed services, the webhooks' config file and its secrets, and the
-    /// Dev Tunnel and HTTPS bridge services installed. Prints one line per check (ok, warn, fail or skip) with the
-    /// command fixing each warning or failure, and exits with status 1 when one fails. Changes nothing.
+    /// stream and buckets, each ant's harness, whether the hub keeps pushed accounts across restarts (with the
+    /// account keys), the leaf node and its outbox, the installed services, the webhooks' config file and its secrets,
+    /// and the Dev Tunnel and HTTPS bridge services installed. Prints one line per check (ok, warn, fail or skip) with
+    /// the command fixing each warning or failure, and exits with status 1 when one fails. Changes nothing.
     Doctor(doctor::DoctorArgs),
     /// Bring up ants on this machine, each step skipped when already done: write a local nats-server configuration
     /// with JetStream (~/.config/ants/nats.conf) and install its service, run `ants init`, write the config file with
@@ -377,7 +384,7 @@ pub(crate) enum Command {
     /// renames it over the executable at once; services running ants restart onto it through their upgrade check.
     /// Refuses an executable installed by cargo install, or in a directory not writable, printing the command to run.
     Update(update::UpdateArgs),
-    /// Issue NATS credentials: one operator and account for the team, one user per ant or human.
+    /// Issue NATS credentials: one operator and account for the bus, one user per ant or human.
     #[command(subcommand)]
     Auth(AuthCommand),
     /// The machine's local NATS leaf node, which every ants process on it connects to.

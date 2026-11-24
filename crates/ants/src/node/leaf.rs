@@ -7,7 +7,7 @@
 //!
 //! Clients reach the hub's JetStream through the hub's domain. The leaf runs a JetStream of its own, in a domain named
 //! after the machine, only to keep the machine's outbox (`ants leaf outbox`) while the uplink is down; the hub sources
-//! it from there. It trusts the team's operator through the same `server.conf` as the hub, so it checks local clients
+//! it from there. It trusts the bus's operator through the same `server.conf` as the hub, so it checks local clients
 //! against their own credentials, and its uplink carries the credentials of `ants auth leaf`.
 //!
 //! JetStream lives in the team's store account, on the leaf as on the hub, so a second uplink, to the same hub URLs,
@@ -16,7 +16,7 @@
 //! hub's domain takes the first uplink alone.
 //!
 //! A third uplink joins the leaf's system account to the hub's with the system account
-//! credentials `ants auth leaf` writes beside the uplink's: allowed only to hear updates of the team's account and
+//! credentials `ants auth leaf` writes beside the uplink's: allowed only to hear updates of the bus's account and
 //! answer them, it brings the leaf every account `ants auth push` sends the hub, revocations included. The leaf keeps
 //! accounts in a `full` resolver of its own, so the last one pushed outlives restarts with an older `server.conf`.
 //! That resolver also asks the hub's, if the hub runs a `full` one, for its accounts every [`RESOLVER_SYNC`], so a leaf
@@ -316,7 +316,7 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
          # Notices a dead uplink in about a minute, and keeps proxies with idle timeouts from dropping it.\n\
          ping_interval: \"20s\"\n\
          include {include}\n\
-         # Keeps the team's account as last pushed (`ants auth push`, through the hub and the system account's uplink)\n\
+         # Keeps the bus's account as last pushed (`ants auth push`, through the hub and the system account's uplink)\n\
          # across restarts and reloads, even with an older server.conf, and every {sync} asks a hub with a full\n\
          # resolver for a newer one, missed while the uplink was down.\n\
          resolver {{ type: full, dir: {jwt}, interval: {sync_quoted} }}\n\
@@ -335,7 +335,7 @@ fn render(leaf: &Leaf, dir: &Path) -> Result<String> {
     ))
 }
 
-/// The credentials of a leaf's uplinks and the accounts they are for, checked against the team's server.conf.
+/// The credentials of a leaf's uplinks and the accounts they are for, checked against the bus's server.conf.
 struct Accounts {
     creds: PathBuf,
     account: String,
@@ -347,16 +347,16 @@ struct Accounts {
 }
 
 impl Accounts {
-    /// The credentials `leaf` names for uplinks of `scheme`, each checked to be for an account the team's server.conf
+    /// The credentials `leaf` names for uplinks of `scheme`, each checked to be for an account the bus's server.conf
     /// trusts, the system account's for the system account.
     fn read(leaf: &Leaf, scheme: Scheme) -> Result<Self> {
         let creds = existing(leaf.creds, "uplink credentials (`ants auth leaf` writes them)")?;
         let account = leaf_account(&creds, scheme)?;
-        let server_conf = existing(leaf.server_conf, "server.conf (copy it from the team directory)")?;
+        let server_conf = existing(leaf.server_conf, "server.conf (copy it from the auth directory)")?;
         let trust = fs::read_to_string(&server_conf).with_context(|| format!("reading {}", server_conf.display()))?;
         if !trust.contains(&account) {
             bail!(
-                "{} does not trust the account of {}; use the team's server.conf",
+                "{} does not trust the account of {}; use the bus's server.conf",
                 server_conf.display(),
                 creds.display()
             );

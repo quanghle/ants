@@ -1,6 +1,6 @@
-//! The registry of the user keys the team issued.
+//! The registry of the user keys the bus issued.
 //!
-//! Every user key the team directory issues or signs is recorded in [`ISSUED`], one JSON object per line, so that
+//! Every user key the auth directory issues or signs is recorded in [`ISSUED`], one JSON object per line, so that
 //! `ants auth revoke NAME` finds all the keys of a name: a human may hold credentials on several devices, and
 //! enrollment and re-issued credentials add more.
 
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth;
 
-/// The registry of issued user keys in the team directory.
+/// The registry of issued user keys in the auth directory.
 pub const ISSUED: &str = "issued.jsonl";
 
 /// What credentials an issued key is for.
@@ -38,7 +38,7 @@ pub enum Kind {
     Host,
     Enrollment,
     Observer,
-    /// The team's public bootstrap credentials, with which `ants login` asks to register a human's device.
+    /// The bus's public bootstrap credentials, with which `ants login` asks to register a human's device.
     Bootstrap,
     /// An ant that is a human's assistant ([`Issued::assistant_of`]).
     Assistant,
@@ -53,7 +53,7 @@ impl From<ants_proto::Role> for Kind {
     }
 }
 
-/// One user key the team issued, a line of [`ISSUED`].
+/// One user key the bus issued, a line of [`ISSUED`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
     /// The user's public NKey, `U...`.

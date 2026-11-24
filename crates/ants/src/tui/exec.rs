@@ -62,12 +62,14 @@ impl Ctx {
 /// What the bar asks to be done.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
-    /// Send `text` to `to` as `ants ask` does, on `thread` or a new one, quoting the message it replies to if any.
+    /// Send `text` to `to` as `ants ask` does, on `thread` or a new one, quoting the message it replies to if any;
+    /// with `team`, the team `to` leads, which the message was addressed to ([`ants_client::sending::addressed`]).
     Ask {
         to: UserId,
         thread: Option<ThreadId>,
         text: String,
         quote: Option<Quoted>,
+        team: Option<UserId>,
     },
     /// Send `text`, which names no one, on a new thread as `ants ask` does: to the human's assistant, else the
     /// messenger ([`cli::unaddressed`]).
@@ -131,6 +133,11 @@ pub enum Job {
     Channel {
         channel: ChannelId,
         change: crate::channel::Change,
+    },
+    /// Change `team` as `ants team add|remove|set` does, refused as it refuses it.
+    Team {
+        team: UserId,
+        change: crate::teams::change::Change,
     },
     /// Set the human's notify level of `channel`, as `ants channel notify` does.
     ChannelNotify {
@@ -267,6 +274,8 @@ pub struct Done {
     pub edit: Option<(String, Vec<PathBuf>)>,
     /// The channel whose entry it changed, to read back.
     pub channel: Option<ChannelId>,
+    /// Whether it changed the team directory, to read back.
+    pub teams: bool,
     /// What to show in the pager: a table the CLI prints.
     pub page: Option<String>,
     /// The run of a trail planned, to start once confirmed.
@@ -354,8 +363,9 @@ impl Job {
             job => (job, false),
         };
         match job {
-            Self::Ask { to, thread, text, quote } => {
-                send::ask(ctx, to.into(), thread, text, quote, false, &files).await
+            Self::Ask { to, thread, text, quote, team } => {
+                let to = ants_client::sending::Addressed { to, team };
+                send::ask_addressed(ctx, to, thread, text, quote, false, &files).await
             }
             Self::Unaddressed { text } => {
                 let to = cli::unaddressed(&ctx.js, &ctx.me, ctx.account.as_deref()).await;
@@ -378,6 +388,7 @@ impl Job {
             Self::Mute { thread, hold } => Ok(Done::line(quiet::muted(&ctx.js, me, &thread, hold).await?)),
             Self::Unmute { thread } => Ok(Done::line(quiet::unmuted(&ctx.js, me, &thread).await?)),
             Self::Channel { channel, change } => change_channel(ctx, channel, &change).await,
+            Self::Team { team, change } => change_team(ctx, &team, &change).await,
             Self::ChannelNotify { channel, level } => {
                 Ok(Done::line(quiet::channel_notify(&ctx.js, me, &channel, level).await?))
             }
@@ -457,6 +468,14 @@ async fn change_channel(ctx: &Ctx, channel: ChannelId, change: &crate::channel::
     let changed = change.write(&ctx.js, &kv, &channel, &humans).await?;
     let line = changed_line(&channel, change, &changed);
     Ok(Done { line, warnings: changed.warnings, channel: Some(channel), ..Done::default() })
+}
+
+/// Write `change` to `team` with the human's credentials ([`crate::teams::change::Change::write`]).
+pub async fn change_team(ctx: &Ctx, team: &UserId, change: &crate::teams::change::Change) -> Result<Done> {
+    let kv = crate::teams::open(&ctx.js, ctx.domain.as_ref()).await?;
+    let humans = humans::load(&ctx.js, &ctx.me).await;
+    let changed = change.write(&ctx.js, ctx.domain.as_ref(), &kv, team, &humans).await?;
+    Ok(Done { line: change.line(team, &changed), teams: true, ..Done::default() })
 }
 
 /// What a change to `channel`'s entry did, in a line.
@@ -554,7 +573,8 @@ fn admin(ctx: &Ctx) -> Result<&orders::Admin> {
 
 /// Retire `ant` by admin order, as `ants ant retire` does.
 async fn retire(ctx: &Ctx, ant: &UserId) -> Result<Done> {
-    let said = orders::retire::retire(admin(ctx)?, &ctx.js, ant, None, orders::retire::WAIT).await?;
+    let said =
+        orders::retire::retire(admin(ctx)?, &ctx.js, ctx.domain.as_ref(), ant, None, orders::retire::WAIT).await?;
     Ok(Done::line(said.replace('\n', " ")))
 }
 
@@ -593,7 +613,7 @@ mod tests {
         std::fs::write(&source, b"soup").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
 
-        let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into(), quote: None };
+        let ask = Job::Ask { to: bob.clone(), thread: None, text: "lunch?".into(), quote: None, team: None };
         let thread = Box::pin(ask.run(&ctx)).await.unwrap().open.unwrap();
         let quote = Quoted { id: Uuid::now_v7(), quote: Quote::new(alice.clone(), "lunch?"), sealed: true };
         let reply = Job::Reply { thread: thread.clone(), to: None, text: "at noon".into(), quote: Some(quote.clone()) };
@@ -610,6 +630,7 @@ mod tests {
             thread: Some(thread.clone()),
             text: "book".into(),
             quote: Some(quote.clone()),
+            team: None,
         };
         Box::pin(to_ant.run(&ctx)).await.unwrap();
 
@@ -713,7 +734,7 @@ mod tests {
         let meta = Err("unused".into());
         let admin = Err("unused".into());
         let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
-        let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), quote: None };
+        let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), quote: None, team: None };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(
             done.line.starts_with("sent to dev-a on thread ") && done.line.ends_with(" with 1 file"),
@@ -733,7 +754,7 @@ mod tests {
         let files_before =
             js.get_stream(ants_daemon::hub::files_config().name).await.unwrap().info().await.unwrap().state.messages;
         for job in [
-            Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: big.clone(), quote: None },
+            Job::Ask { to: user("dev-a"), thread: Some(thread.clone()), text: big.clone(), quote: None, team: None },
             Job::Post { channel: "ops".parse().unwrap(), thread: None, text: big.clone(), quote: None },
             Job::Notes { thread: thread.clone(), text: big.clone() },
         ] {
@@ -913,5 +934,62 @@ mod tests {
         assert_eq!(done.line, "#ops: messenger back to the default, no owner, no description");
         let stored = channel::get(&kv, &ops).await.unwrap().unwrap();
         assert_eq!((stored.messenger, stored.owner, stored.description), (None, None, None));
+    }
+
+    /// The team editor's writes change the team as `ants team add|remove|set` does, refused as it refuses them, each
+    /// telling the teams to read back.
+    #[tokio::test]
+    async fn a_team_job_changes_the_team_as_ants_team_does() {
+        use ants_daemon::records::direct_kv::DirectKv;
+        use ants_proto::{AntIdentity, IDENTITIES_BUCKET, Team, TeamRefusal};
+
+        use crate::teams::change::Change;
+
+        let Some(server) = crate::test_support::Server::start() else { return };
+        let (alice, bob) = (user("alice"), user("bob"));
+        let creds = [server.creds_as(&alice, ants_proto::Role::Human), server.creds_as(&bob, ants_proto::Role::Human)];
+        let nats: Vec<_> = creds.iter().map(|c| Nats::new(&server.url, Some(c), None, None).unwrap()).collect();
+        let (client, js) = nats[0].connect("test").await.unwrap();
+        let (_, bob_js) = nats[1].connect("test").await.unwrap();
+        humans::ensure(&js).await.unwrap();
+        humans::register(&js, &nats[0].me).await.unwrap();
+        humans::register(&bob_js, &nats[1].me).await.unwrap();
+        ants_daemon::hub::create_identities(&js).await.unwrap();
+        ants_daemon::hub::ensure_bucket(&js, ants_daemon::hub::Object::Teams).await.unwrap();
+        let identities = DirectKv::whole(&js, None, IDENTITIES_BUCKET).await.unwrap();
+        for ant in ["dev-a", "dev-b"] {
+            let record = AntIdentity::new(user(ant), format!("{ant}-id"), chrono::Utc::now());
+            identities.put(ant, serde_json::to_vec(&record).unwrap()).await.unwrap();
+        }
+        let kv = crate::teams::open(&js, None).await.unwrap();
+        let backend = user("backend");
+        let team = Team::new(backend.clone(), user("dev-a"), alice.clone());
+        ants_daemon::teams::modify(&kv, |d| d.create(team.clone(), None)).await.unwrap();
+        let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
+        let (meta, admin) = (Err("unused".into()), Err("unused".into()));
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let run = |change: Change| Job::Team { team: backend.clone(), change }.run(&ctx);
+
+        let done = run(Change { add: vec![user("dev-b")], ..Change::default() }).await.unwrap();
+        assert_eq!((done.line.as_str(), done.teams), ("team backend: added dev-b", true));
+        let unknown = run(Change { add: vec![user("dev-z")], ..Change::default() }).await.unwrap_err();
+        assert_eq!(unknown.to_string(), TeamRefusal::UnknownAnt { name: user("dev-z") }.to_string());
+        let human = run(Change { add: vec![bob.clone()], ..Change::default() }).await.unwrap_err();
+        assert!(human.to_string().starts_with("bob is a human"), "{human}");
+        let cleared = run(Change { lead: Some(None), ..Change::default() }).await.unwrap();
+        assert_eq!(cleared.line, "team backend: no lead of its own");
+        let set = Change {
+            lead: Some(Some(user("dev-b"))),
+            owner: Some(Some(bob.clone())),
+            description: Some(Some("The API.".to_owned())),
+            remove: vec![user("dev-a")],
+            ..Change::default()
+        };
+        let done = run(set).await.unwrap();
+        assert_eq!(done.line, "team backend: removed dev-a, lead now dev-b, owner now bob, description changed");
+        let read = crate::teams::read_of(&ctx.js, None).await.unwrap().unwrap();
+        let stored = read.team(&backend).unwrap();
+        assert_eq!((stored.lead.clone(), stored.members.clone()), (Some(user("dev-b")), vec![user("dev-b")]));
+        assert_eq!((stored.owner.clone(), stored.description.as_deref()), (Some(bob), Some("The API.")));
     }
 }

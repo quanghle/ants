@@ -15,7 +15,7 @@ use crate::{EnrollLeaf, Error, ThreadId, UserId, subject};
 /// otherwise, and answers with an [`AntReply`].
 ///
 /// With `retire` set, the manager asks instead to retire ant `name`, one it added (its `retire_ant` tool): the signer
-/// revokes the ant's live keys if the team issued them all for the manager to add, and answers
+/// revokes the ant's live keys if the bus issued them all for the manager to add, and answers
 /// [`AntReply::Retired`]; `public_key` is then that of the ant's credentials on the manager's machine, `template` the
 /// ant's, `request` and `reason` unused.
 ///

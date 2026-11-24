@@ -66,12 +66,18 @@ struct ListAnts {
     /// Only the ants advertising this capability, such as `rust`.
     #[serde(default)]
     capability: Option<String>,
+    /// Only the ants of this team and of the teams beneath it, such as `backend`.
+    #[serde(default)]
+    team: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct Route {
     /// Capability the request needs, as ants advertise it in the colony, such as `rust`.
     capability: String,
+    /// Route only to the ants of this team and of the teams beneath it, such as `backend`.
+    #[serde(default)]
+    team: Option<String>,
     /// The request.
     text: String,
     /// Wait for the reply and return it (the default); false sends the request and returns at once.
@@ -98,8 +104,23 @@ impl Hub {
         Ok(entries)
     }
 
+    /// The colony without this ant, kept to the ants of `team` and of the teams beneath it when given.
+    async fn others_in(&self, team: Option<&str>) -> Result<Vec<ColonyEntry>, String> {
+        let team = team.map(str::trim).filter(|t| !t.is_empty());
+        let ants = match team {
+            Some(team) => Some(self.team_ants(team).await?),
+            None => None,
+        };
+        let mut entries = self.others().await?;
+        if let Some(ants) = ants {
+            entries.retain(|e| ants.contains(&e.ant));
+        }
+        Ok(entries)
+    }
+
     /// Why no daemon serves the ant `to` now, by its colony entry, with names from the colony `to` may stand for, and
-    /// for a name the colony lacks, how to reach a human instead; None when one does, `to` is a human or the channel manager, or the colony cannot be read, so a lookup never holds a
+    /// for a name the colony lacks, how to reach a human instead; None when one does, `to` is a human or the channel
+    /// manager, or the colony cannot be read, so a lookup never holds a
     /// message back. A provider limit counts only while it holds past `wait` from now.
     pub(super) async fn unserved(&self, to: &UserId, wait: Duration) -> Option<String> {
         let lookup = self.lookup.get()?;
@@ -129,7 +150,18 @@ impl Hub {
             Ok(Ok(others)) => others,
             _ => return Some(format!("{why}.")),
         };
-        Some(format!("{why}. {}", alternatives(to, entry.as_ref(), &others, now)))
+        let instead = alternatives(to, entry.as_ref(), &others, now);
+        let teams = match entry {
+            Some(_) => Vec::new(),
+            None => {
+                self.directory().await.ok().flatten().map_or_default(|d| d.teams.into_iter().map(|t| t.team).collect())
+            }
+        };
+        let teams = closest(to, teams.iter());
+        if teams.is_empty() {
+            return Some(format!("{why}. {instead}"));
+        }
+        Some(format!("{why}. {instead} Closest teams, which messages reach through their leads: {}.", teams.join(", ")))
     }
 }
 
@@ -140,17 +172,21 @@ impl Tools {
         `billing`), harness, machine and whether it is idle or working, \
         or signed out or paused: messages to an ant whose harness is signed out wait unanswered until a human signs \
         it in, and to a paused ant until a human resumes it. \
-        `capability` keeps only those advertising it. Pick whom to send_message or ask_ant by these capabilities.")]
+        `capability` keeps only those advertising it, and `team` only the ants of that team and of the teams \
+        beneath it. Pick whom to send_message or ask_ant by these capabilities.")]
     async fn list_ants(&self, Parameters(args): Parameters<ListAnts>) -> Result<CallToolResult, ErrorData> {
         let result = async {
-            let entries = self.hub.others().await?;
+            let team = args.team.as_deref().map(str::trim).filter(|t| !t.is_empty());
+            let entries = self.hub.others_in(team).await?;
             let capability = args.capability.as_deref().map(str::trim).filter(|c| !c.is_empty());
             let shown: Vec<&ColonyEntry> =
                 entries.iter().filter(|e| capability.is_none_or(|c| colony::has_capability(e, c))).collect();
-            match (capability, shown.is_empty()) {
-                (Some(c), true) => Err(nobody_has(c, &entries)),
-                (None, true) => Ok("No other ant is in the colony.".to_owned()),
-                (_, false) => Ok(describe(&shown)),
+            match (capability, shown.is_empty(), team) {
+                (Some(c), true, None) => Err(nobody_has(c, &entries)),
+                (Some(c), true, Some(t)) => Err(format!("Within team {t}: {}", nobody_has(c, &entries))),
+                (None, true, None) => Ok("No other ant is in the colony.".to_owned()),
+                (None, true, Some(t)) => Ok(format!("No other ant of team {t} is in the colony.")),
+                (_, false, _) => Ok(describe(&shown)),
             }
         }
         .await;
@@ -165,7 +201,8 @@ impl Tools {
         profile only breaks a tie. By \
         default it waits for the reply and returns it, like ask_ant; \
         with `wait` false it sends and returns at once, like send_message. Either way it goes on the current thread \
-        and follows its turn budget, as those do, and `attach` attaches files as they do.")]
+        and follows its turn budget, as those do, and `attach` attaches files as they do. `team` keeps to the ants \
+        of that team and of the teams beneath it.")]
     async fn route(
         &self,
         Parameters(args): Parameters<Route>,
@@ -174,17 +211,21 @@ impl Tools {
         let thread = self.thread(&cx)?;
         let result = async {
             let wait = ask_wait(args.timeout.as_deref())?;
-            let entries = self.hub.others().await?;
+            let team = args.team.as_deref().map(str::trim).filter(|t| !t.is_empty());
+            let entries = self.hub.others_in(team).await?;
             let capability = args.capability.trim();
             let to = colony::pick(&entries, capability, &args.text, &self.hub.ant, chrono::Utc::now())
-                .ok_or_else(|| nobody_has(capability, &entries))?
+                .ok_or_else(|| match team {
+                    Some(team) => format!("Within team {team}: {}", nobody_has(capability, &entries)),
+                    None => nobody_has(capability, &entries),
+                })?
                 .ant
-                .to_string();
+                .clone();
             if !args.wait {
-                let sent = self.send_to(&thread, &to, args.text, None, &args.attach).await?;
+                let sent = self.send_to_user(&thread, (to.clone(), None), args.text, None, &args.attach).await?;
                 return Ok(format!("Routed to {to} for {capability}. {sent}"));
             }
-            let reply = self.ask(&thread, &to, args.text, &args.attach, wait, &cx).await?;
+            let reply = self.ask_user(&thread, (to.clone(), None), args.text, &args.attach, wait, &cx).await?;
             Ok(format!(
                 "Routed to {to} for {capability}. {} replied (message {}):\n{}",
                 reply.from,
@@ -402,24 +443,29 @@ fn alternatives(
         }
         return format!("Served ants sharing a capability of {ant}: {}.", names(&sharing));
     }
-    let wanted = ant.as_str().to_lowercase();
-    let most = wanted.chars().count().div_ceil(3).max(1);
-    let mut close: Vec<(usize, &ColonyEntry)> = others
-        .iter()
-        .filter_map(|e| {
-            let name = e.ant.as_str().to_lowercase();
-            let distance = edit_distance(&wanted, &name);
-            (distance <= most || name.starts_with(&wanted) || wanted.starts_with(&name)).then_some((distance, e))
-        })
-        .collect();
-    close.sort_by(|(a, x), (b, y)| a.cmp(b).then_with(|| x.ant.cmp(&y.ant)));
-    let close: Vec<&ColonyEntry> = close.into_iter().map(|(_, e)| e).take(3).collect();
+    let close = closest(ant, others.iter().map(|e| &e.ant));
     match others.len() {
-        _ if !close.is_empty() => format!("Closest names in the colony: {}.", names(&close)),
+        _ if !close.is_empty() => format!("Closest names in the colony: {}.", close.join(", ")),
         0 => "No other ant is in the colony.".to_owned(),
         n if n <= SHOWN_NAMES => format!("In the colony: {}.", names(&others.iter().collect::<Vec<_>>())),
         n => format!("No name in the colony is close; list_ants shows the {n} ants there."),
     }
+}
+
+/// The 3 names of `names` closest to `wanted`, which may be misspelt: by their edits from it, then by name.
+fn closest<'a>(wanted: &UserId, names: impl Iterator<Item = &'a UserId>) -> Vec<&'a str> {
+    let wanted = wanted.as_str().to_lowercase();
+    let most = wanted.chars().count().div_ceil(3).max(1);
+    let mut close: Vec<(usize, &str)> = names
+        .filter_map(|name| {
+            let lower = name.as_str().to_lowercase();
+            let distance = edit_distance(&wanted, &lower);
+            (distance <= most || lower.starts_with(&wanted) || wanted.starts_with(&lower))
+                .then_some((distance, name.as_str()))
+        })
+        .collect();
+    close.sort_unstable();
+    close.into_iter().map(|(_, name)| name).take(3).collect()
 }
 
 /// The edits (insertions, deletions, substitutions of a character) that turn `a` into `b`.

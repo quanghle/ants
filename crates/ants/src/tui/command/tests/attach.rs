@@ -47,7 +47,7 @@ fn attach_stages_files_for_the_next_message_and_a_failed_send_stages_them_again(
 
     typed(&mut m, "@dev-a read this");
     let Some(Action::Run(Job::Attached { job, files }, text)) = m.key(Key::Enter, at(0)) else { panic!() };
-    assert_eq!(*job, Job::Ask { to: user("dev-a"), thread: None, text: "read this".into(), quote: None });
+    assert_eq!(*job, Job::Ask { to: user("dev-a"), thread: None, text: "read this".into(), quote: None, team: None });
     assert_eq!((files.len(), text.as_str()), (1, "@dev-a read this"));
     assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "sending with 1 file…");
     assert!(m.ui.bar.staged.names().is_empty(), "the files go with one message");

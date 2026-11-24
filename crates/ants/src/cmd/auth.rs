@@ -1,6 +1,7 @@
-//! `ants auth`: the team's keys, and the credentials they sign.
+//! `ants auth`: the account keys, and the credentials they sign.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ants_proto::{
     BuiltinAnt, ChannelId, Destination, DeviceKey, IDENTITIES_BUCKET, JsDomain, Machine, Permissions, UserId,
@@ -20,17 +21,17 @@ use crate::{auth, channel};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {
-    /// Create the team operator and accounts, and the server.conf that makes nats-server trust them. On a team made
-    /// before the store account, add it and write server.conf again; the hub's streams then move into it with `ants
-    /// auth move-stores`.
+    /// Create the operator and accounts of the bus, and the server.conf that makes nats-server trust them. On account
+    /// keys made before the store account, add it and write server.conf again; the hub's streams then move into it
+    /// with `ants auth move-stores`.
     Init {
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
     /// Issue credentials for an ant, allowing only the subjects of its role, with --human for a human, a CLI user,
     /// with --human --web for a human's web device, a page of the web client, with only the rights the page uses,
-    /// with --webhook for a webhook of `ants webhook serve`, with --observer for a hook observing the team's
+    /// with --webhook for a webhook of `ants webhook serve`, with --observer for a hook observing the bus's
     /// events, or with --assistant-of for an ant assisting a human. `human` always gets a human's. Give the hub's
     /// --js-domain, if it has one, so they work with it.
     User(UserArgs),
@@ -38,7 +39,7 @@ pub(crate) enum AuthCommand {
     Builtin {
         #[arg(value_enum)]
         service: BuiltinService,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
         /// Credentials file (default: <dir>/system-<service>.creds).
@@ -59,21 +60,21 @@ pub(crate) enum AuthCommand {
         /// How long the enrollment credentials stay valid (a duration such as 90s, 10m or 1h; 0 for no expiry).
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "1h")]
         ttl: std::time::Duration,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
         /// Where to write the enrollment credentials (default: <dir>/enroll-<ant>.creds).
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Issue the team's public bootstrap credentials, which may only ask `ants signer` to register a human's new
+    /// Issue the bus's public bootstrap credentials, which may only ask `ants signer` to register a human's new
     /// device (`ants login`) and hear its answers: no JetStream, messages of at most 4 KiB. The file is meant to be
     /// shared, and readable by all; revoke them with `ants auth revoke bootstrap` and issue new ones here.
     Bootstrap {
         /// How long the bootstrap credentials stay valid (a duration such as 30d or 1h; 0 for no expiry).
         #[arg(long, value_name = "DURATION", value_parser = ants_proto::duration::parse, default_value = "0")]
         ttl: std::time::Duration,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
         /// Where to write the bootstrap credentials (default: <dir>/bootstrap.creds).
@@ -83,7 +84,7 @@ pub(crate) enum AuthCommand {
     /// Issue the credentials of the channel manager, `ants channel serve`: it hears channel management requests and
     /// answers each once, reads the colony and the humans, writes the channels and posts in them.
     ChannelManager {
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
         /// Where to write the credentials (default: <dir>/channel-manager.creds).
@@ -101,7 +102,7 @@ pub(crate) enum AuthCommand {
         /// label of its host name: letters, digits, '-' and '_'.
         #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
         machine: Machine,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
         /// Where to write the credentials (default: <dir>/host-<machine>.creds, where the daemon finds them on this
@@ -122,7 +123,7 @@ pub(crate) enum AuthCommand {
         machine: Machine,
         #[command(flatten)]
         members: members::UplinkArgs,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
         /// Where to write the credentials (default: <dir>/leaf-<machine>.creds); the store account credentials of
@@ -133,7 +134,7 @@ pub(crate) enum AuthCommand {
     },
     /// Revoke credentials before they expire: every key issued to NAME (an ant, human, webhook or observer,
     /// `leaf-<machine>`, its store and system account uplinks' too, `host-<machine>`, `channel-manager` or
-    /// `enroll-<ant>`) and each --key. The team's account in server.conf, or its store or system account for a leaf
+    /// `enroll-<ant>`) and each --key. The bus's account in server.conf, or its store or system account for a leaf
     /// node's store or system account uplink, refuses them from then on, and the accounts are pushed to the server of --nats, which closes their connections,
     /// as do the leaf nodes connected to it through a system account uplink. Revoking an ant's last live key also
     /// drops it from the uplink, members and outbox sourcing of this machine's leaf node, if it is behind it, and
@@ -157,7 +158,7 @@ pub(crate) enum AuthCommand {
         /// Only record the revocation and write server.conf; push later with `ants auth push`.
         #[arg(long)]
         no_push: bool,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
@@ -168,7 +169,7 @@ pub(crate) enum AuthCommand {
         /// One JSON object per line.
         #[arg(long)]
         json: bool,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
@@ -179,14 +180,14 @@ pub(crate) enum AuthCommand {
         device: String,
         /// The new label.
         label: String,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
     /// List the revoked keys: key, name, when revoked and when their credentials expire. Revocations of expired
     /// credentials are dropped on the next revoke or push.
     Revoked {
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
@@ -197,18 +198,18 @@ pub(crate) enum AuthCommand {
         /// One JSON object per line.
         #[arg(long)]
         json: bool,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Push the team's account, with its revocations, to the server of --nats (the hub) and through it to the leaf
+    /// Push the bus's account, with its revocations, to the server of --nats (the hub) and through it to the leaf
     /// nodes connected with a system account uplink, as `ants auth revoke` does.
     Push {
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Back up the team keys (operator, account, store account and system account seeds), server.conf, issued.jsonl
+    /// Back up the account keys (operator, account, store account and system account seeds), server.conf, issued.jsonl
     /// and revoked.json into FILE, encrypted with a passphrase in the age format (`age -d` decrypts it too) and
     /// readable by its owner only. Without them no credentials can be issued, renewed or revoked again. The passphrase comes
     /// from --passphrase-file, else ANTS_BACKUP_PASSPHRASE, else the terminal; `ants doctor` warns until a backup
@@ -219,11 +220,11 @@ pub(crate) enum AuthCommand {
         /// Read the passphrase from the first line of this file.
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Move the streams, buckets and object stores of a stopped nats-server from the team's account, which held
+    /// Move the streams, buckets and object stores of a stopped nats-server from the bus's account, which held
     /// JetStream before the store account, into the store account, keeping every entry, sequence and consumer. Run
     /// once per server (the hub, and each leaf node for its outbox) after `ants auth init` added the store account:
     /// stop the server, give it the new server.conf, move, start it.
@@ -231,21 +232,21 @@ pub(crate) enum AuthCommand {
         /// The `store_dir` of the server's jetstream block.
         #[arg(long, value_name = "DIR")]
         store_dir: PathBuf,
-        /// The server.conf the server includes (default: the team directory's).
+        /// The server.conf the server includes (default: the auth directory's).
         #[arg(long, value_name = "FILE")]
         server_conf: Option<PathBuf>,
         /// Discard streams the store account already holds under the same names, created by a start on the new
         /// server.conf before the move.
         #[arg(long)]
         replace: bool,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
     /// The humans with the admin role: list them, or drop the role of one.
     #[command(subcommand)]
     Admin(AdminCommand),
-    /// Restore the team keys and files of a backup of `ants auth backup` into the team directory, as files there.
+    /// Restore the account keys and files of a backup of `ants auth backup` into the auth directory, as files there.
     /// Keys issued and revocations made after the backup are not restored.
     Restore {
         /// The backup file.
@@ -253,10 +254,10 @@ pub(crate) enum AuthCommand {
         /// Read the passphrase from the first line of this file (else ANTS_BACKUP_PASSPHRASE, else the terminal).
         #[arg(long, value_name = "FILE")]
         passphrase_file: Option<PathBuf>,
-        /// Replace the team files already in the directory, removing those the backup has none of.
+        /// Replace the auth files already in the directory, removing those the backup has none of.
         #[arg(long)]
         force: bool,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
@@ -269,7 +270,7 @@ pub(crate) struct UserArgs {
     /// The ant, with --human the human, with --webhook the webhook, or with --observer the observer.
     user: UserId,
     /// Issue a human's credentials, with the same rights as every other human. The human joins `ants_humans`,
-    /// the team's humans, on its first CLI connection.
+    /// the bus's humans, on its first CLI connection.
     #[arg(long, conflicts_with = "webhook")]
     human: bool,
     /// With --human (or for `human`): issue web credentials, for a device that is a page of the web client: only
@@ -292,7 +293,7 @@ pub(crate) struct UserArgs {
     /// With --webhook: a channel the webhook may post to (repeatable).
     #[arg(long = "channel", value_name = "CHANNEL", value_parser = channel::parse_channel, requires = "webhook")]
     channels: Vec<ChannelId>,
-    /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+    /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
     #[arg(long, env = "ANTS_AUTH_DIR")]
     dir: Option<PathBuf>,
     /// Where to write the credentials (default: <dir>/<user>.creds), or with --public-key the JWT (default:
@@ -352,7 +353,7 @@ pub(crate) enum AdminCommand {
         /// One JSON object per line.
         #[arg(long)]
         json: bool,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
@@ -364,7 +365,7 @@ pub(crate) enum AdminCommand {
         /// Only record the revocation and write server.conf; push later with `ants auth push`.
         #[arg(long)]
         no_push: bool,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
@@ -524,6 +525,7 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     }
     let kind = Kind { human, web, observer, webhook, assistant_of: assistant_of.as_ref() };
     let (kind, permissions) = user_rights(&user, kind, to, channels, domain)?;
+    check_name_free(&dir, &user, kind, conn).await?;
     let github = match github {
         Some(login) => Some(github_binding(&dir, &user, &login, config).await?),
         None => None,
@@ -567,13 +569,42 @@ async fn issue_user(args: UserArgs, conn: &Connection<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Refuse issuing `user` credentials of `kind`, an ant's or a human's, when another kind holds the name, as ants,
+/// humans and teams share names: a live key of `dir` issued to an ant of the name for a human, or to a human for an
+/// ant, or a team of the name, should the team directory of the server of `conn` be read within a few seconds.
+async fn check_name_free(dir: &Path, user: &UserId, kind: issued::Kind, conn: &Connection<'_>) -> Result<()> {
+    use issued::Kind::{Ant, Assistant, Human};
+    let other = match kind {
+        Human => [Ant, Assistant].as_slice(),
+        Ant | Assistant => [Human].as_slice(),
+        _ => return Ok(()),
+    };
+    let live = crate::signing::signer::live(dir)?;
+    if let Some(held) = live.iter().find(|i| i.name == user.as_str() && other.contains(&i.kind)) {
+        let (holder, wanted) = if held.kind == Human { ("a human", "an ant's") } else { ("an ant", "a human's") };
+        bail!(
+            "{user} is {holder} of the bus (key {}): no {wanted} credentials take its name; `ants auth revoke {user}` \
+             frees it",
+            held.key
+        );
+    }
+    let reached = async { crate::teams::keeper(conn.nats, conn.js_domain, dir, Duration::from_secs(3)).await };
+    match reached.await {
+        Ok(js) => crate::teams::check_no_team(&js, conn.js_domain, user).await,
+        Err(e) => {
+            tracing::debug!("not checking the team names: {e:#}");
+            Ok(())
+        }
+    }
+}
+
 /// `ants auth init`.
 fn init(dir: Option<PathBuf>) -> Result<()> {
     let dir = team_dir(dir)?;
     if auth::holds_team(&dir) && !auth::holds_store(&dir) {
         auth::add_store(&dir)?;
         println!(
-            "store account added to the team in {0}, which now holds JetStream in place of the team's account; on              the hub, and on each leaf node for its outbox: stop the server, copy {0}/{1} over the one it includes,              run `ants auth move-stores --store-dir DIR` with the store_dir of its jetstream block, then start it.              Leaf nodes also need store uplink credentials: `ants auth leaf`, then `ants leaf config`",
+            "store account added to the account keys in {0}, which now holds JetStream in place of the bus's account; on              the hub, and on each leaf node for its outbox: stop the server, copy {0}/{1} over the one it includes,              run `ants auth move-stores --store-dir DIR` with the store_dir of its jetstream block, then start it.              Leaf nodes also need store uplink credentials: `ants auth leaf`, then `ants leaf config`",
             dir.display(),
             auth::SERVER_CONF
         );
@@ -581,7 +612,7 @@ fn init(dir: Option<PathBuf>) -> Result<()> {
     }
     auth::init(&dir)?;
     println!(
-        "team keys in {0}\ncopy {0}/{1} next to the hub's nats-server configuration and include \"{1}\" from it \
+        "account keys in {0}\ncopy {0}/{1} next to the hub's nats-server configuration and include \"{1}\" from it \
          (include paths are relative), followed by `resolver {{ type: full, dir: \"/ABSOLUTE/DIR\" }}` so the \
          hub keeps the accounts `ants auth push` sends it across restarts",
         dir.display(),
@@ -594,7 +625,7 @@ fn init(dir: Option<PathBuf>) -> Result<()> {
 fn move_stores(store_dir: &Path, server_conf: &Path, replace: bool) -> Result<()> {
     let moved = auth::move_stores(store_dir, server_conf, replace)?;
     if moved.streams.is_empty() {
-        println!("no streams of the team's account in {}: nothing to move", store_dir.display());
+        println!("no streams of the bus's account in {}: nothing to move", store_dir.display());
     } else {
         println!("moved into the store account: {}", moved.streams.join(", "));
     }
@@ -815,6 +846,9 @@ pub(crate) async fn revoke_credentials(
     for ant in &retired {
         crate::signing::retire::clean_consumers(url, domain, &dir, ant).await;
     }
+    if !retired.is_empty() {
+        leave_teams(url, domain, &dir, &retired).await;
+    }
     if let Some(ant) = ant {
         devices::forget_identity(url, domain, &dir, &ant.parse()?).await?;
         println!("{ant}'s identity deleted from {IDENTITIES_BUCKET}");
@@ -822,7 +856,27 @@ pub(crate) async fn revoke_credentials(
     Ok(())
 }
 
-/// The ants among the names of `revoked` that hold no live key in the team directory `dir` any more: retired.
+/// Take the ants of `revoked`, revoked whole, off their teams, with short-lived credentials signed with the account
+/// key in `dir`: a revoked lead leaves its team to the lead of the nearest team above it.
+async fn leave_teams(url: &str, domain: Option<&JsDomain>, dir: &Path, revoked: &[UserId]) {
+    let js = match crate::teams::keeper(url, domain, dir, Duration::from_secs(10)).await {
+        Ok(js) => js,
+        Err(e) => {
+            println!(
+                "cannot reach the team directory ({e:#}): `ants team remove TEAM NAME` takes {} off their teams",
+                revoked.iter().map(UserId::as_str).collect::<Vec<_>>().join(", ")
+            );
+            return;
+        }
+    };
+    for ant in revoked {
+        if let Some(line) = crate::teams::drop_ant_or_say(&js, domain, ant).await {
+            println!("{line}");
+        }
+    }
+}
+
+/// The ants among the names of `revoked` that hold no live key in the auth directory `dir` any more: retired.
 fn retired_ants(dir: &Path, revoked: &[revoke::Revoked]) -> Result<Vec<UserId>> {
     let issued = issued::issued(dir)?;
     let live = crate::signing::signer::live(dir)?;

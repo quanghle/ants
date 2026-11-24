@@ -105,9 +105,9 @@ pub(super) fn issue(ant: &Ant) -> String {
     let name = &ant.name;
     let domain = ant.js_domain.as_ref().map_or_default(|d| format!(" --js-domain {d}"));
     if let Some(builtin) = ant.builtin {
-        return format!("ants auth builtin {}{domain} on the machine holding the team keys", builtin.name());
+        return format!("ants auth builtin {}{domain} on the machine holding the account keys", builtin.name());
     }
-    format!("ants auth user {name}{domain} on the machine holding the team keys, or ants add {name}")
+    format!("ants auth user {name}{domain} on the machine holding the account keys, or ants add {name}")
 }
 
 /// An ant's credentials: an ant's, or an assistant's, of its name, issued for the JetStream domain it uses.
@@ -164,7 +164,7 @@ pub(super) fn check_host(host: &config::HostSettings, ants: &[Ant], hostname: &s
 /// How to give `machine` host credentials.
 fn issue_host(machine: &Machine) -> String {
     format!(
-        "ants auth host {machine} on the machine holding the team keys, then copy them to \
+        "ants auth host {machine} on the machine holding the account keys, then copy them to \
          ~/.config/ants/auth/host.creds here, or name them in `creds` of [host]"
     )
 }

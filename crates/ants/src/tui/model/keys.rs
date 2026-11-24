@@ -10,7 +10,7 @@ use crate::tui::command::{Note, Tone};
 use crate::tui::exec::Job;
 use crate::tui::help::Help;
 use crate::tui::react::Picker;
-use crate::tui::{channel, credentials, held, nav, notices, thread, work};
+use crate::tui::{ant, channel, credentials, held, nav, notices, team, thread, work};
 
 impl Model {
     pub fn key(&mut self, key: Key, now: DateTime<Utc>) -> Option<Action> {
@@ -393,6 +393,14 @@ impl Model {
             To::Note(request) => self.note_on(request, now),
             To::Tree(thread) => {
                 self.tree(thread);
+                None
+            }
+            To::Ant(ant) => {
+                self.push(Page::Ant(ant::Page::new(ant)));
+                None
+            }
+            To::Team(team) => {
+                self.push(Page::Team(team::Page::new(team)));
                 None
             }
             To::Interrupt(thread) => self.interrupt(thread),

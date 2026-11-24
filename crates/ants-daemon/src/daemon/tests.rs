@@ -78,7 +78,7 @@ struct Bus {
     redactor: Redactor,
     publisher: Option<crate::publish::Publisher>,
     restarts: Restarts,
-    /// The team's account whose assistants' records the daemon takes; none: no record is taken.
+    /// The bus's account whose assistants' records the daemon takes; none: no record is taken.
     account: Option<String>,
     /// How long a failed message waits for its redelivery.
     retry_delay: Duration,
@@ -318,6 +318,7 @@ impl Bus {
                 sense: self.sense.as_ref(),
             },
             trails: self.trails.clone(),
+            teams: crate::teams::open(&self.js, None).await.ok(),
         };
         let stop = || {
             let ctrl_c = ctrl_c.clone();

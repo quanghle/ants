@@ -425,7 +425,7 @@ fn elsewhere(left: &Elsewhere) -> String {
     let service = left.ant.builtin.expect("only built-ins are left elsewhere").name();
     format!(
         "no credentials of the built-in {name} at {}, which the server's authentication needs; to serve it here, \
-         issue them with `ants auth builtin {service}` on the machine holding the team keys and copy them there",
+         issue them with `ants auth builtin {service}` on the machine holding the account keys and copy them there",
         left.creds.display(),
         name = left.ant.name,
     )

@@ -236,8 +236,8 @@ fn an_ant_becomes_a_human_s_only_assistant_through_its_user_jwt() {
         let err = check_assistant(&team, user, of).unwrap_err().to_string();
         assert!(err.contains(why), "{user} of {of}: {err}");
     };
-    refused(&pa, &alice, "not a human of the team");
-    refused(&pa, &ants_test_support::human(), "not a human of the team");
+    refused(&pa, &alice, "not a human of the bus");
+    refused(&pa, &ants_test_support::human(), "not a human of the bus");
     Issue::new(&team, &alice, Kind::Human, Permissions::for_user(&alice, Role::Human))
         .into_file(&out("alice"))
         .unwrap();
@@ -326,7 +326,7 @@ fn credentials_expired_revoked_foreign_or_of_no_renewable_kind_are_not_renewed()
     assert!(refused(&dev_a, &stolen).contains("revoked"));
 
     issue(&other, &p("dev-a"), Role::Ant, None, &out("foreign")).unwrap();
-    assert!(refused(&jwt("foreign").0, &new()).contains("not by the team's account"));
+    assert!(refused(&jwt("foreign").0, &new()).contains("not by the bus's account"));
 
     let account = load(&team.join(ACCOUNT_SEED)).unwrap();
     let ant = Permissions::for_user(&p("dev-c"), Role::Ant);
@@ -338,7 +338,7 @@ fn credentials_expired_revoked_foreign_or_of_no_renewable_kind_are_not_renewed()
     let m1: Machine = "m1".parse().unwrap();
     issue_leaf(&team, &m1, &[(p("dev-a"), Role::Ant)], &[], EnrollApprover::Without, None, &out("leaf-m1")).unwrap();
     let system = read_creds(&leaf_system_creds(&out("leaf-m1"))).unwrap().0;
-    assert!(refused(&system, &new()).contains("team's account"), "the system account's");
+    assert!(refused(&system, &new()).contains("bus's account"), "the system account's");
 
     revoke::revoke(&team, Some("dev-a"), &[]).unwrap();
     assert!(refused(&dev_a, &new()).contains("revoked"));

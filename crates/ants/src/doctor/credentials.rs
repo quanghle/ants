@@ -1,4 +1,4 @@
-//! The credentials checks: the CLI's own, their keys in the keystore, and the backup of the team keys.
+//! The credentials checks: the CLI's own, their keys in the keystore, and the backup of the account keys.
 
 use std::path::Path;
 
@@ -35,8 +35,8 @@ pub(super) fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) 
         }
         Err(e) => {
             let fix = format!(
-                "ants auth user HUMAN --human on the machine holding the team keys, then name the file in `creds` of \
-                 [cli] in {}",
+                "ants auth user HUMAN --human on the machine holding the account keys, then name the file in \
+                 `creds` of [cli] in {}",
                 setup.config.display()
             );
             checks.push(Check::fail(check, format!("{e:#}"), vec![fix]));
@@ -91,7 +91,7 @@ pub(super) fn check_creds(check: &str, path: &Path, finding: &creds::Finding, no
         );
         return Check::new(check, status, detail, finding.renew_over_nats(path));
     }
-    let detail = format!("{holder}: {}; renew them on the machine holding the team keys{when}", problems.join("; "));
+    let detail = format!("{holder}: {}; renew them on the machine holding the account keys{when}", problems.join("; "));
     Check::new(check, status, detail, finding.renew())
 }
 
@@ -141,13 +141,13 @@ fn unloaded(check: &str, e: &anyhow::Error, issue: Vec<String>) -> Check {
     Check::fail(check, format!("{e:#}"), std::iter::once(restore.to_owned()).chain(issue).collect())
 }
 
-/// Whether a backup of `ants auth backup` holds the team keys of `team` and every key issued and revoked since
-/// ([`backup::state`]); none without team keys.
+/// Whether a backup of `ants auth backup` holds the account keys of `team` and every key issued and revoked since
+/// ([`backup::state`]); none without account keys.
 pub(super) fn check_backup(team: &Path) -> Option<Check> {
     if !auth::holds_team(team) {
         return None;
     }
-    let check = "team keys backup";
+    let check = "account keys backup";
     let dir = match auth::default_dir() {
         Ok(default) if default == team => String::new(),
         _ => format!(" --dir {}", team.display()),
@@ -159,7 +159,7 @@ pub(super) fn check_backup(team: &Path) -> Option<Check> {
         Ok(backup::State::None) => Check::warn(
             check,
             format!(
-                "no backup of the team keys in {}: without them no credentials can be issued, renewed or revoked \
+                "no backup of the account keys in {}: without them no credentials can be issued, renewed or revoked \
                  again",
                 team.display()
             ),

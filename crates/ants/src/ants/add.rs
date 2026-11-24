@@ -61,9 +61,37 @@ pub struct AddArgs {
     pub options: AntOptions,
 }
 
-/// Run `ants add` with the global `--nats` and `--js-domain`.
+/// Run `ants add` with the global `--nats` and `--js-domain`, refusing a name a team or a human holds when the server
+/// answers within a few seconds ([`check_name_free`]).
 pub async fn add(conn: &Connection<'_>, args: AddArgs) -> Result<()> {
+    check_name_free(conn, &args.name).await?;
     add_with(args, conn.nats, conn.js_domain, keystore::os()).await
+}
+
+/// Refuse `name` for a new ant when a team or a human of the bus holds it, as ants, humans and teams share names,
+/// read with the CLI's credentials; when the server cannot be reached within a few seconds, the name goes unchecked:
+/// `ants auth user` checks it again as it issues the ant's credentials.
+async fn check_name_free(conn: &Connection<'_>, name: &UserId) -> Result<()> {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+    let connected = async { conn.nats()?.connect_only("ants-add").await };
+    let js = match tokio::time::timeout(WAIT, connected).await {
+        Ok(Ok((_, js))) => js,
+        Ok(Err(e)) => {
+            tracing::debug!("not checking the name {name}: {e:#}");
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::debug!("not checking the name {name}: no answer within {WAIT:?}");
+            return Ok(());
+        }
+    };
+    crate::teams::check_no_team(&js, conn.js_domain, name).await?;
+    if let Ok(Ok(humans)) = tokio::time::timeout(WAIT, crate::people::humans::read(&js)).await
+        && humans.contains(name)
+    {
+        bail!("{name} is a human of the bus: an ant takes a name no human, ant or team holds");
+    }
+    Ok(())
 }
 
 /// [`add`], keeping a seed of the OS credential store in `store`.

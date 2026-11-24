@@ -31,7 +31,7 @@ fn ctrl_k_or_at_or_hash_focus_the_bar_which_then_takes_every_key() {
     assert!(m.ui.bar.focused && m.ui.bar.text() == "@");
     typed(&mut m, "dev-a deploy");
     let action = m.key(Key::Enter, at(0));
-    let job = Job::Ask { to: user("dev-a"), thread: None, text: "deploy".into(), quote: None };
+    let job = Job::Ask { to: user("dev-a"), thread: None, text: "deploy".into(), quote: None, team: None };
     assert_eq!(action, Some(Action::Run(job, "@dev-a deploy".into())));
     assert!(m.ui.bar.focused && m.ui.bar.is_empty(), "the bar stays for the next message");
     assert_eq!(m.ui.bar.status.as_ref().map(|s| s.tone), Some(Tone::Busy));
@@ -81,7 +81,7 @@ fn n_on_a_dm_focuses_the_bar_which_asks_its_person() {
     assert!(m.ui.bar.focused && m.ui.bar.is_empty(), "n on a thread selected writes in the bar");
     typed(&mut m, "n");
     assert_eq!(m.ui.bar.text(), "n", "the focused bar takes the keys of the DM");
-    let job = Job::Ask { to: user("bob"), thread: None, text: "n".into(), quote: None };
+    let job = Job::Ask { to: user("bob"), thread: None, text: "n".into(), quote: None, team: None };
     assert_eq!(m.key(Key::Enter, at(0)), Some(Action::Run(job, "n".into())));
 }
 

@@ -1,4 +1,4 @@
-//! `ants auth move-stores`: the one-time move of a server's streams, buckets and object stores from the team's account,
+//! `ants auth move-stores`: the one-time move of a server's streams, buckets and object stores from the bus's account,
 //! which held JetStream before the store account, into the store account.
 //!
 //! JetStream keeps an account's streams in `<store_dir>/jetstream/<account>/streams/<stream>`, each with its messages,
@@ -24,7 +24,7 @@ pub struct Moved {
     pub left: Option<PathBuf>,
 }
 
-/// Move the streams the team's account holds in the JetStream `store_dir` of a stopped server into the store account,
+/// Move the streams the bus's account holds in the JetStream `store_dir` of a stopped server into the store account,
 /// the accounts as `server_conf` (a `server.conf` of `ants auth init`) preloads them. A stream the store account holds
 /// already, created by a start on the store account's layout before the move, fails the move unless `replace`
 /// discards it.
@@ -33,7 +33,7 @@ pub fn move_stores(store_dir: &Path, server_conf: &Path, replace: bool) -> Resul
     let (account, store) = preloaded_accounts(&text).with_context(|| server_conf.display().to_string())?;
     let Some(store) = store else {
         bail!(
-            "{} preloads no store account: run `ants auth init` on the team directory to add it, and use the \
+            "{} preloads no store account: run `ants auth init` on the auth directory to add it, and use the \
              server.conf it writes",
             server_conf.display()
         );
@@ -59,7 +59,7 @@ pub fn move_stores(store_dir: &Path, server_conf: &Path, replace: bool) -> Resul
     if !replace && !replaced.is_empty() {
         bail!(
             "the store account already holds {}, created since the server started on the store account's layout: \
-             pass --replace to discard them for the team account's",
+             pass --replace to discard them for the bus's account's",
             replaced.join(", ")
         );
     }

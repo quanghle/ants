@@ -441,3 +441,35 @@ async fn a_rollup_under_an_ant_s_rights_leaves_the_trail_entries_of_others() {
 async fn js_put(js: &jetstream::Context, bucket: &str, key: &str) {
     js.publish(format!("$KV.{bucket}.{key}"), "{}".into()).await.unwrap().await.unwrap();
 }
+
+#[tokio::test]
+async fn humans_and_the_signer_write_the_team_directory_and_ants_read_it() {
+    use ants_daemon::records::direct_kv::Lookup;
+    use ants_proto::{TEAM_DIRECTORY_KEY, TEAMS_BUCKET, Team, TeamDirectory};
+    let Some(server) = Server::start() else { return };
+    let (human, dev_a) = (ants_test_support::human(), p("dev-a"));
+    let (_a, a_js) = server.connect(&dev_a).await;
+    let (_h, h_js) = server.connect(&human).await;
+    let config = ants_daemon::hub::teams_config();
+    assert!(a_js.create_stream(config.clone()).await.is_err(), "only a human creates {}", config.name);
+    h_js.create_stream(config).await.unwrap();
+
+    let mut directory = TeamDirectory::default();
+    directory.create(Team::new(p("backend"), dev_a.clone(), human.clone()), None).unwrap();
+    let written = DirectKv::whole(&h_js, None, TEAMS_BUCKET).await.unwrap().past_relays();
+    assert!(written.update(TEAM_DIRECTORY_KEY, serde_json::to_vec(&directory).unwrap(), 0).await.unwrap());
+    let read = DirectKv::whole(&a_js, None, TEAMS_BUCKET).await.unwrap().past_relays();
+    let (found, last) = read.lookup_last(TEAM_DIRECTORY_KEY).await.unwrap();
+    let Lookup::Value(bytes) = found else { panic!("the directory reads") };
+    assert_eq!(TeamDirectory::read(&bytes).unwrap(), directory);
+    assert!(read.update(TEAM_DIRECTORY_KEY, b"{}".to_vec(), last).await.is_err(), "an ant's credentials write none");
+    assert!(read.put("other", b"{}".to_vec()).await.is_err(), "nor another key");
+
+    let approver =
+        crate::credentials::approver::Approver::connect_signer(&server.url, &server.dir().join("auth"), None, WAIT)
+            .await
+            .unwrap();
+    let keeper = DirectKv::whole(approver.hub(), None, TEAMS_BUCKET).await.unwrap().past_relays();
+    assert!(keeper.update(TEAM_DIRECTORY_KEY, serde_json::to_vec(&directory).unwrap(), last).await.unwrap());
+    assert!(!written.update(TEAM_DIRECTORY_KEY, b"{}".to_vec(), last).await.unwrap(), "compare-and-set");
+}

@@ -39,7 +39,7 @@ pub fn check(issued: &[Issued], name: &UserId, github: &GithubAccount, binder: B
     }
     if !mine.is_empty() && binder == Binder::Signer {
         bail!(
-            "{name} holds credentials bound to no GitHub user: the team binds it with `ants auth user {name} --human \
+            "{name} holds credentials bound to no GitHub user: a human binds it with `ants auth user {name} --human \
              --github LOGIN`"
         );
     }

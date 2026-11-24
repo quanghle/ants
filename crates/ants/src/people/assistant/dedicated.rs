@@ -1,5 +1,5 @@
 //! `ants assistant enable` and `disable`: the dedicated assistant ant of the CLI's human. `enable` creates it in one
-//! step where the team's account key is: credentials naming the human ([`AssistantOf`](ants_proto::AssistantOf)), an
+//! step where the bus's account key is: credentials naming the human ([`AssistantOf`](ants_proto::AssistantOf)), an
 //! `[[ant]]` working in its own home with an assistant's whoami and no fetch or execute rules, and the grant. Each
 //! step finds what an earlier run did and keeps it, so a run that failed half-way completes when run again. With
 //! `--on MACHINE` it sends the daemon of that machine an add order ([`AdminOp::Add`]) naming the human the ant is to
@@ -49,7 +49,7 @@ pub struct EnableArgs {
     /// Config file to list the ant in (default: ~/.ants/config.toml).
     #[arg(long, env = "ANTS_CONFIG")]
     pub config: Option<PathBuf>,
-    /// Team directory holding the account key, which signs the ant's credentials (default: ~/.config/ants/auth).
+    /// Auth directory holding the account key, which signs the ant's credentials (default: ~/.config/ants/auth).
     #[arg(long, env = "ANTS_AUTH_DIR")]
     pub dir: Option<PathBuf>,
     /// Where to write the ant's credentials (default: the `creds` of its entry, else <dir>/<name>.creds).
@@ -111,7 +111,7 @@ pub struct DisableArgs {
     /// Config file listing the ant (default: ~/.ants/config.toml).
     #[arg(long, env = "ANTS_CONFIG")]
     pub config: Option<PathBuf>,
-    /// Team directory holding the account key, where the ant's credentials are revoked (default:
+    /// Auth directory holding the account key, where the ant's credentials are revoked (default:
     /// ~/.config/ants/auth). Without the account key there, the revocation to run where it is gets printed.
     #[arg(long, env = "ANTS_AUTH_DIR")]
     pub dir: Option<PathBuf>,
@@ -158,7 +158,7 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
     let dir = crate::auth::team_dir(args.dir.clone())?;
     if auth::account_key(&dir).is_err() {
         bail!(
-            "creating an assistant ant needs the team's account key, which signs its credentials, and {} holds none: \
+            "creating an assistant ant needs the bus's account key, which signs its credentials, and {} holds none: \
              run `ants assistant enable` on the machine holding it (or give --dir), or designate an existing ant \
              with `ants auth user ANT --assistant-of {human}` there and `ants assistant set ANT`",
             dir.display()
@@ -309,7 +309,7 @@ fn order_settings(args: &EnableArgs, ant: &UserId, human: &UserId) -> Map<String
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Held {
     Missing,
-    /// Credentials of the ant as the assistant of the human, issued with the team's account and neither revoked nor
+    /// Credentials of the ant as the assistant of the human, issued with the bus's account and neither revoked nor
     /// expired: kept.
     Live,
     /// Credentials of the assistant that expired or were revoked (the word saying which): replaced.
@@ -520,9 +520,10 @@ impl Dedicated {
         Ok(Some(Self { name: ant.clone(), creds, key: finding.key, home }))
     }
 
-    /// Unlist the ant from the config file at `path`, wait up to `wait` for its daemon to stop it as the colony
-    /// `js` shows, revoke its credentials with the account key in `dir` and push the account (unless `no_push`) to
-    /// the server of `nats`, and remove their file. Its home stays.
+    /// Unlist the ant from the config file at `path`, wait up to `wait` for its daemon to stop it as the colony `js`
+    /// shows, revoke its credentials with the account key in `dir` and push the account (unless `no_push`) to the
+    /// server of `nats`, remove their file and take the ant off its team. Its home stays. Refused while the ant leads
+    /// a team.
     async fn retire(
         &self,
         path: &Path,
@@ -562,6 +563,9 @@ impl Dedicated {
         };
         retire::forget(&self.creds)?;
         println!("{} removed", self.creds.display());
+        if let Some(line) = crate::teams::drop_ant_or_say(js, nats.domain, name).await {
+            println!("{line}");
+        }
         let seed = sealing::key_path(&self.creds);
         if seed.exists() {
             std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
@@ -690,7 +694,7 @@ mod tests {
 
         let keyless = scratch.join("keyless");
         let err = enable(&nats, enable_args(&config, &keyless, &home)).await.unwrap_err().to_string();
-        assert!(err.contains("needs the team's account key"), "{err}");
+        assert!(err.contains("needs the bus's account key"), "{err}");
         untouched();
 
         let foreign = EnableArgs { out: Some(creds.clone()), ..enable_args(&config, &team, &home) };

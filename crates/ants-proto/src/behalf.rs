@@ -2,7 +2,7 @@
 //! [`ThreadTitle`] or a [`ThreadDone`] carrying `on_behalf_of`, published under the assistant's own name.
 //!
 //! - A reader honours the claim only while the human's grant ([`crate::AssistantGrant`]) names the publisher and the
-//!   publisher's own user JWT, which the team's account signed, names the human in its assistant_of tag
+//!   publisher's own user JWT, which the bus's account signed, names the human in its assistant_of tag
 //!   ([`crate::VerifiedGrant::honours`]). Readers never see a publisher's JWT on NATS, so the assistant's daemon puts
 //!   it in [`DEVICES_BUCKET`] under [`assistant_record_key`] ([`AssistantRecord`]); a reader verifies it for its own
 //!   account and takes no tag from a JWT whose key has a revocation record ([`crate::revoked_device_key`]).

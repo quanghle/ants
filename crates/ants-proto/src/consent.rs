@@ -13,7 +13,7 @@
 //!   assistant's acts take effect unconfirmed, naming the assistant they are for, so that another assistant designated
 //!   later inherits none.
 //!
-//! A reader keeping them ([`Consents`]) verifies each for the team's account, as a grant, and refuses a record issued
+//! A reader keeping them ([`Consents`]) verifies each for the bus's account, as a grant, and refuses a record issued
 //! before one it already read: a replay. A deleted or refused record leaves the human with no answer and no rule.
 
 use std::collections::BTreeMap;
@@ -311,7 +311,7 @@ pub fn pre_allow_rule(rule: &str) -> Option<(Option<UserId>, &str)> {
     }
 }
 
-/// The consent records of the team's humans as a reader of [`HUMANS_BUCKET`] keeps them, fed each record as it reads
+/// The consent records of the bus's humans as a reader of [`HUMANS_BUCKET`] keeps them, fed each record as it reads
 /// or watches it ([`Consents::apply`]).
 #[derive(Debug, Clone, Default)]
 pub struct Consents {

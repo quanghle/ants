@@ -57,6 +57,7 @@ mod snooze;
 mod status;
 mod steps;
 pub(crate) mod style;
+mod team;
 mod terminal;
 #[cfg(test)]
 mod test_support;
@@ -515,7 +516,7 @@ impl Chat {
             outcome = self.exec.next() => {
                 // A title set through the bar shows once read back.
                 self.watched.cards.refresh();
-                if outcome.result.as_ref().is_ok_and(|done| done.channel.is_some()) {
+                if outcome.result.as_ref().is_ok_and(|done| done.channel.is_some() || done.teams) {
                     self.reads.read_directory();
                 }
                 self.model.outcome(outcome).into_iter().collect()

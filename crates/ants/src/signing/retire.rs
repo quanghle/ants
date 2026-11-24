@@ -165,7 +165,7 @@ pub fn home_note(name: &UserId, template: &str, home: &Path) -> String {
     )
 }
 
-/// Drop `ant`, whose keys `ants retire` or `ants auth revoke` revoked in the team directory `dir`, from the leaf nodes
+/// Drop `ant`, whose keys `ants retire` or `ants auth revoke` revoked in the auth directory `dir`, from the leaf nodes
 /// whose members the registry keeps it among ([`members::behind`]), as a retire order does. For this machine's leaf
 /// node (~/.config/ants/leaf.conf): renew its uplink credentials for the same key without what they allowed only for
 /// the ant ([`auth::shrink_leaf`]), have the node reconnect its uplink with them ([`crate::node::leaf::uplink::shrink_and_reconnect`]), and
@@ -305,7 +305,7 @@ pub struct RetireArgs {
     /// Config file listing the ant (default: ~/.ants/config.toml).
     #[arg(long, env = "ANTS_CONFIG")]
     pub config: Option<PathBuf>,
-    /// Team directory holding the account key, where the ant's credentials are revoked (default:
+    /// Auth directory holding the account key, where the ant's credentials are revoked (default:
     /// ~/.config/ants/auth). Without the account key there, the revocation to run where it is gets printed.
     #[arg(long, env = "ANTS_AUTH_DIR")]
     pub dir: Option<PathBuf>,
@@ -314,8 +314,9 @@ pub struct RetireArgs {
     pub no_push: bool,
 }
 
-/// Retire the ant `args` names, as a human: any ant added from a template, whichever manager added it. `colony`, the
-/// connection to read the colony through, if any, waits up to `wait` for the daemon to stop the ant; `url` is where to
+/// Retire the ant `args` names, as a human: any ant added from a template, whichever manager added it, unless it leads
+/// a team. `colony`, the connection to read the colony and the teams through, if any, waits up to `wait` for the
+/// daemon to stop the ant, and takes the ant off its team; `url` is where to
 /// push the revocation, and `js_domain` the hub's JetStream domain, if it has one.
 pub async fn retire(
     args: &RetireArgs,
@@ -389,6 +390,12 @@ pub async fn retire(
     };
     forget(&creds)?;
     println!("{} removed", creds.display());
+    if let Some(line) = match colony {
+        Some(js) => crate::teams::drop_ant_or_say(js, js_domain, name).await,
+        None => Some(format!("`ants team remove TEAM {name}` takes {name} off its team, if any")),
+    } {
+        println!("{line}");
+    }
     if let Some(u) = &unlisted {
         println!("{}", home_note(name, &u.template, &u.home));
     }

@@ -7,7 +7,7 @@ use super::*;
 fn the_backup_check_warns_until_a_backup_holds_every_key_issued() {
     let root = ants_test_support::scratch_dir("doctor-backup");
     let team = root.join("auth");
-    assert_eq!(check_backup(&team), None, "no team keys here");
+    assert_eq!(check_backup(&team), None, "no account keys here");
     auth::init(&team).unwrap();
     let check = check_backup(&team).unwrap();
     assert_eq!(check.status, Status::Warn, "{check}");
