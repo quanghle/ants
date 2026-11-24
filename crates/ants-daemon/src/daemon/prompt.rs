@@ -591,7 +591,7 @@ impl Inbox<'_> {
                     }
                 }
                 Ok(()) = &mut ready => joins = Some(self.running.steers.register(thread)),
-                Some(join) = next_join(&mut joins) => taking.extend(steer(&steer_tx, join)),
+                Some(join) = next_join(&mut joins) => taking.extend(steer(&steer_tx, join, envelope)),
                 Some((took, join)) = futures::StreamExt::next(&mut taking) => self.took(took, join, &mut joined),
                 Some(by) = cancel.recv(), if cancelled_by.is_none() => {
                     tracing::info!(%thread, by = %by.by, why = ?by.why, "cancelling the prompt");

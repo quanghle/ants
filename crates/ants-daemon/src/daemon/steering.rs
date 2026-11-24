@@ -1,6 +1,8 @@
 //! Messages joining the prompt running on their thread, for a harness that takes them into its turn (`_ants/steer`):
 //! the last message to join gets the prompt's answer, and those before it, the one the prompt started with first, a
-//! notice of where the answer went.
+//! notice of where the answer went. A joined turn runs under the tool rules of the prompt's first message, so a message
+//! whose rules ([`Envelope::allow`], as its thread's narrowing set them) those are wider than joins nothing: it waits
+//! for a prompt of its own under its rules, as a steer the harness refuses does.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -273,12 +275,28 @@ pub(super) fn join_note(by: &UserId) -> String {
     )
 }
 
-/// Hand `join` to the running prompt through `steers`: what the harness made of it, or None when the prompt takes no
-/// more, `join` then turned away.
+/// Whether tool rules `running` (None: the ant's own) allow nothing beyond `own`: each of its rules is one of `own`.
+fn within(running: Option<&[String]>, own: Option<&[String]>) -> bool {
+    match (running, own) {
+        (_, None) => true,
+        (None, Some(_)) => false,
+        (Some(running), Some(own)) => running.iter().all(|rule| own.contains(rule)),
+    }
+}
+
+/// Hand `join` to the prompt running for `running` through `steers`: what the harness made of it, or None when the
+/// prompt takes no more or runs under tool rules wider than `join`'s, `join` then turned away.
 pub(super) fn steer(
     steers: &tokio::sync::mpsc::Sender<Steer>,
     join: Join,
+    running: &Envelope,
 ) -> Option<impl Future<Output = (bool, Join)> + use<>> {
+    if !within(running.allow.as_deref(), join.envelope.allow.as_deref()) {
+        let (thread, from) = (&join.envelope.thread_id, &join.envelope.from);
+        tracing::info!(%thread, %from, "a message under narrower tool rules than the running prompt's waits for its own");
+        let _ = join.joined.send(Joined::Refused);
+        return None;
+    }
     let (accepted, took) = tokio::sync::oneshot::channel();
     if steers.try_send(Steer { text: join.text.clone(), accepted }).is_err() {
         let _ = join.joined.send(Joined::Refused);
