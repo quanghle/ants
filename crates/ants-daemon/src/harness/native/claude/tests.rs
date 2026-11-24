@@ -44,8 +44,19 @@ fn event(mut event: Value) -> String {
 }
 
 fn init() -> String {
+    init_with(&[])
+}
+
+/// The `init` event of a Claude Code advertising `capabilities`.
+fn init_with(capabilities: &[&str]) -> String {
     let servers = json!([{ "name": "ants", "status": "connected", "source": "dynamic" }]);
-    event(json!({ "type": "system", "subtype": "init", "model": "claude-haiku-5-5", "mcp_servers": servers }))
+    event(json!({ "type": "system", "subtype": "init", "model": "claude-haiku-5-5", "mcp_servers": servers,
+        "capabilities": capabilities }))
+}
+
+/// Claude Code reporting itself `state`, such as running or idle.
+fn state(state: &str) -> String {
+    event(json!({ "type": "system", "subtype": "session_state_changed", "state": state }))
 }
 
 fn stream(inner: Value) -> String {
@@ -289,7 +300,6 @@ async fn a_claude_session_streams_its_turn_and_reports_spend() {
 #[tokio::test]
 async fn a_claude_turn_takes_steers_and_ends_once_idle_with_each_replayed() {
     let native = Fixture::new("claude-steer", "");
-    let state = |state: &str| event(json!({ "type": "system", "subtype": "session_state_changed", "state": state }));
     let replay = "!echo {\"isReplay\":true,";
     native.script(None, &[]);
     native.script(
@@ -424,6 +434,122 @@ async fn a_cancelled_claude_turn_is_interrupted_and_the_session_goes_on() {
     session.close().await;
     let interrupt = json!({ "type": "control_request", "request_id": "ants-2", "request": { "subtype": "interrupt" } });
     assert_eq!(native.received(2)[2], interrupt);
+}
+
+/// The text blocks of a prompt saying `text`.
+fn said(text: &str) -> Vec<ContentBlock> {
+    vec![ContentBlock::Text(TextContent::new(text))]
+}
+
+/// A session of `fixture`'s CLI with the ant's `settings`, opened without the translator.
+async fn open_session(fixture: &Fixture, settings: &ModelSettings) -> ClaudeSession {
+    let claude = Claude::start(Cli::new(&fixture.harness, &[], settings)).await.unwrap();
+    let open = Open { cwd: fixture.dir.clone(), mcp_servers: Vec::new(), sign_ins: None, skills: None };
+    claude.new_session(open).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_cancel_drops_the_steers_queued_behind_the_turn_where_claude_code_can() {
+    let fixture = Fixture::new("claude-cancel-queued", "");
+    let marker = json!([{ "type": "text", "text": "[Request interrupted by user]" }]);
+    let aborted = json!({ "subtype": "error_during_execution", "is_error": true, "terminal_reason": "aborted_streaming",
+        "stop_reason": null });
+    let dropped = |n: u64| ok(n, json!({ "still_queued": [], "cancelled": ["queued"] }));
+    fixture.script(
+        None,
+        &[
+            vec![signed_in()],
+            vec![state("running"), init_with(&["interrupt_receipt_v1", CANCEL_QUEUED]), text("Working")],
+            // The steer waits in Claude Code's queue.
+            vec![],
+            vec![
+                dropped(2),
+                event(json!({ "type": "user", "message": { "role": "user", "content": marker } })),
+                result(0.0, aborted),
+                state("idle"),
+            ],
+            vec![state("running"), init_with(&[CANCEL_QUEUED]), text("Next"), result(0.5, json!({})), state("idle")],
+            // Interrupted before Claude Code started its turn, the prompt never runs.
+            vec![state("running")],
+            vec![dropped(3), state("idle")],
+        ],
+    );
+    let session = open_session(&fixture, &ModelSettings::default()).await;
+    let (ours, _client) = Channel::duplex();
+    let prompted = async |cx: ConnectionTo<Client>| {
+        let updates = Updates::new(cx, SessionId::new("s"));
+        let steered = async {
+            while !session.cancel_queued.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(session.steer(said("and this")).await?, "the running turn takes the steer");
+            assert_eq!(session.steers.locked().pending.len(), 1);
+            session.cancel().await;
+            assert!(session.steers.locked().pending.is_empty(), "the dropped steer is not waited for");
+            Ok::<_, Error>(())
+        };
+        let (done, steered) = tokio::join!(session.prompt(said("go"), updates.clone()), steered);
+        steered?;
+        assert_eq!(done?.stop_reason, StopReason::Cancelled);
+        assert_eq!(session.prompt(said("more"), updates.clone()).await?.stop_reason, StopReason::EndTurn);
+
+        let started = std::time::Instant::now();
+        let early = async {
+            while !session.steers.locked().open {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            session.cancel().await;
+        };
+        let (done, ()) = tokio::join!(session.prompt(said("again"), updates), early);
+        assert_eq!(done?.stop_reason, StopReason::Cancelled);
+        assert!(started.elapsed() < INTERRUPT_GRACE, "the prompt ended at once, its CLI not killed");
+        Ok(())
+    };
+    Agent.v1().name("test").connect_with(ours, prompted).await.unwrap();
+    let received = fixture.received(2);
+    let interrupt =
+        |n: u64| control_request(&format!("ants-{n}"), &json!({ "subtype": "interrupt", "cancel_queued": true }));
+    assert_eq!(received[2]["message"]["content"], json!([{ "type": "text", "text": "and this" }]));
+    assert_eq!(received[3], interrupt(2));
+    assert_eq!(received[4]["message"]["content"], json!([{ "type": "text", "text": "more" }]));
+    assert_eq!(received[6], interrupt(3));
+}
+
+#[tokio::test]
+async fn a_claude_session_switches_model_and_reasoning_effort_as_it_runs() {
+    let fixture = Fixture::new("claude-configure", "");
+    let unknown = json!({ "subtype": "error", "request_id": "ants-4", "error": "Model 'opus-9' not found",
+        "error_code": "not_found" });
+    fixture.script(
+        None,
+        &[
+            vec![signed_in()],
+            vec![ok(2, json!({ "model": "claude-sonnet-5-5" }))],
+            vec![ok(3, Value::Null)],
+            vec![json!({ "type": "control_response", "response": unknown }).to_string()],
+        ],
+    );
+    let settings = ModelSettings {
+        model: Some("haiku".to_owned()),
+        reasoning_effort: Some("high".to_owned()),
+        ..Default::default()
+    };
+    let session = open_session(&fixture, &settings).await;
+    session.configure(Setting::Model, "sonnet").await.unwrap();
+    session.configure(Setting::ReasoningEffort, "low").await.unwrap();
+    let refused = session.configure(Setting::ReasoningEffort, "extreme").await.unwrap_err();
+    assert!(refused.message.contains("takes reasoning_effort low, medium, high, xhigh, max, not extreme"), "{refused}");
+    let unknown = session.configure(Setting::Model, "opus-9").await.unwrap_err();
+    assert!(unknown.message.contains("set_model: Model 'opus-9' not found"), "{unknown}");
+    drop(session);
+
+    let received = fixture.received(2);
+    assert_eq!(received[1]["request"], json!({ "subtype": "set_model", "model": "sonnet" }));
+    let effort = json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": "low" } });
+    assert_eq!(received[2]["request"], effort);
+    assert_eq!(received[3]["request"], json!({ "subtype": "set_model", "model": "opus-9" }), "no unknown effort sent");
+    let args = fixture.cli.args(2);
+    assert!(args.windows(2).any(|pair| pair == ["--model", "haiku"]), "opened with the ant's model: {args:?}");
 }
 
 /// The answer of a session of a harness with `table`, on a launch with `allow` rules, to Claude Code's request to run
@@ -606,10 +732,7 @@ fn claude_definitions_are_checked() {
 async fn a_prompt_dropped_mid_turn_leaves_no_turn_running() {
     let fixture = Fixture::new("claude-dropped-prompt", "");
     fixture.script(None, &[vec![signed_in()], vec![init(), text("Hel")]]);
-    let claude = Claude::start(Cli::new(&fixture.harness, &[], &ModelSettings::default())).await.unwrap();
-    let open = Open { cwd: fixture.dir.clone(), mcp_servers: Vec::new(), sign_ins: None, skills: None };
-    let session = claude.new_session(open).await.unwrap();
-    let said = |text: &str| vec![ContentBlock::Text(TextContent::new(text))];
+    let session = open_session(&fixture, &ModelSettings::default()).await;
     // The session is prompted without the translator, whose own task of a prompt nothing drops.
     let (ours, _client) = Channel::duplex();
     let dropped = async |cx: ConnectionTo<Client>| {

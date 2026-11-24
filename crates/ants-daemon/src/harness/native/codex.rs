@@ -1,14 +1,18 @@
 //! Codex's app server (`protocol = "codex"`): `codex app-server`, JSON-RPC over stdio without the `"jsonrpc"` member,
 //! one server per ACP connection hosting its threads.
 //!
-//! The handshake is `initialize`, `initialized` and `account/read`, which says whether an account is signed in.
+//! The handshake is `initialize`, `initialized` and `account/read`, which says whether an account is signed in; with a
+//! ChatGPT sign-in, `account/rateLimits/read` then seeds the rate limits, its answer not waited for.
 //! Sessions are threads (`thread/start`, `thread/resume`, `thread/fork`), each opened with the definition's mode as an
 //! approval policy and sandbox, the ant's model and reasoning effort, and the session's MCP servers as per-thread
 //! config (`mcp_servers.<name>`), none of which a thread keeps when resumed or forked. A prompt is a turn
 //! (`turn/start`, `turn/steer` to add a message to it, `turn/interrupt` to cancel) whose item and token-usage
-//! notifications stream as ACP updates until `turn/completed`. Approval requests of the server are declined at once,
-//! unless the ant asks ants about its tools: then its threads run with approval policy `on-request`, and the server's
-//! requests to run a command or change files go to ants ([`super::approve`]). A closed session unsubscribes from its thread (`thread/unsubscribe`), which the server then unloads.
+//! notifications stream as ACP updates until `turn/completed`, after which `account/usage/read` gives the thread's cost
+//! as codex estimates it, where it can; a fork's estimate may start at its parent's, so its ACP id carries that base
+//! ([`based_id`]). Approval requests of the server are declined at once, unless the ant asks ants about its tools:
+//! then its threads run with approval policy `on-request`, and the server's requests to run a command or change files
+//! go to ants ([`super::approve`]). A closed session unsubscribes from its thread (`thread/unsubscribe`), which the
+//! server then unloads.
 
 mod items;
 
@@ -29,9 +33,11 @@ use tokio::sync::mpsc;
 
 use self::items::{Tokens, Turn, input};
 use super::io::older;
+use super::turn::Spent;
 use super::{
     Cli, Credentials, Harness, Incoming, Info, Native, NativeSession, Open, Process, Rpc, Setting, Updates, approve,
-    context_overflow, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited, signed_out,
+    based_id, context_overflow, cost_base, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited,
+    signed_out,
 };
 use crate::sync::MutexExt as _;
 
@@ -50,6 +56,10 @@ const MODES: [(&str, &str, &str); 3] = [
 /// The approval policy of the threads of an ant asking ants about its tools: the model asks to run what the sandbox
 /// would stop.
 const ASKING_POLICY: &str = "on-request";
+
+/// How long the server has to read a thread's usage, which it asks ChatGPT for, before the prompt ends without its
+/// cost.
+const USAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Notifications the translator reads nothing of, which the server is asked not to send.
 const UNREAD: [&str; 7] = [
@@ -167,6 +177,14 @@ impl Shared {
         }
     }
 
+    /// Merge the rate limits `account/rateLimits/read` answered: each limit's snapshot.
+    fn merge_read_limits(&self, read: &Value) {
+        self.merge_limits(&read["rateLimits"]);
+        for snapshot in read["rateLimitsByLimitId"].as_object().into_iter().flat_map(Map::values) {
+            self.merge_limits(snapshot);
+        }
+    }
+
     fn merge_limits(&self, snapshot: &Value) {
         let Some(snapshot) = snapshot.as_object() else { return };
         let id = snapshot.get("limitId").and_then(Value::as_str).unwrap_or_default().to_owned();
@@ -191,6 +209,26 @@ impl Shared {
         resets.max().filter(|&at| at > now).map(|at| Duration::from_secs(at - now))
     }
 
+    /// The US dollars codex estimates thread `thread` has cost so far, None where it tells none: without a ChatGPT
+    /// sign-in, or as the read failed.
+    async fn thread_cost(&self, thread: &str) -> Option<f64> {
+        let read = self.rpc.request("account/usage/read", json!({ "threadId": thread }));
+        let usage = match tokio::time::timeout(USAGE_TIMEOUT, read).await {
+            Ok(Ok(usage)) => usage,
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "reading a codex thread's usage");
+                return None;
+            }
+            Err(_) => {
+                tracing::debug!("codex took too long to read a thread's usage");
+                return None;
+            }
+        };
+        let usage = &usage["threadUsage"];
+        let micros = usage["estimatedUsageUsdMicros"].as_f64().or_else(|| usage["nativeUsageUsdMicros"].as_f64());
+        micros.map(|micros| micros / 1e6)
+    }
+
     /// The error of a failed turn, classified by its `codexErrorInfo`.
     fn turn_error(&self, error: &Value) -> Error {
         let message = error["message"].as_str().unwrap_or("the turn failed");
@@ -211,6 +249,10 @@ impl Shared {
         match (kind, status) {
             ("contextWindowExceeded", _) => context_overflow(detail),
             ("usageLimitExceeded", _) => quota_exhausted(self.retry_after(), detail),
+            // Raised by a human, so with no time to retry at.
+            ("apiKeySpendLimitExceeded" | "projectSpendLimitExceeded" | "organizationSpendLimitExceeded", _) => {
+                quota_exhausted(None, detail)
+            }
             ("rateLimitExceeded", _) | (_, Some(429)) => rate_limited(Some(429), self.retry_after(), detail),
             ("serverOverloaded" | "flexUnavailable" | "policyCapacityUnavailable", _) => {
                 rate_limited(status, None, detail)
@@ -336,15 +378,23 @@ impl Native for Codex {
     }
 
     async fn load_session(&self, id: &str, open: Open) -> Result<CodexSession, Error> {
+        let (id, base) = cost_base(id);
         self.offer_skills(&open).await?;
         let resumed = self.shared.request("thread/resume", self.thread(&open, Some(id))).await?;
-        self.session(&resumed)
+        let session = self.session(&resumed)?;
+        *session.spent.locked() = Spent::from(base);
+        Ok(session)
     }
 
     async fn fork_session(&self, id: &str, open: Open) -> Result<CodexSession, Error> {
         self.offer_skills(&open).await?;
-        let forked = self.shared.request("thread/fork", self.thread(&open, Some(id))).await?;
-        self.session(&forked)
+        let forked = self.shared.request("thread/fork", self.thread(&open, Some(cost_base(id).0))).await?;
+        let session = self.session(&forked)?;
+        // Should codex's estimate of the fork start at its parent's, the parent's thread already counted that.
+        if let Some(base) = self.shared.thread_cost(&session.id).await {
+            *session.spent.locked() = Spent::from(base);
+        }
+        Ok(session)
     }
 }
 
@@ -372,7 +422,29 @@ impl Codex {
         if account["account"].is_null() && account["requiresOpenaiAuth"] == true {
             return Err(signed_out("codex has no account signed in"));
         }
+        if account["account"]["type"] == "chatgpt" {
+            self.seed_limits().await;
+        }
         Ok((version, hello["codexHome"].as_str().map(PathBuf::from)))
+    }
+
+    /// Ask for the rate limits as they stand, merged once the server answers, so that a usage limit reached before a
+    /// turn reported them has the reset time of the window used up. The answer, which takes a call to ChatGPT, is not
+    /// waited for: the server answers other requests meanwhile.
+    async fn seed_limits(&self) {
+        let params = json!({ "excludeResetCreditDetails": true });
+        let Ok(response) = self.shared.rpc.send_request("account/rateLimits/read", params).await else { return };
+        let shared = Arc::downgrade(&self.shared);
+        tokio::spawn(async move {
+            match response.wait().await {
+                Ok(read) => {
+                    if let Some(shared) = shared.upgrade() {
+                        shared.merge_read_limits(&read);
+                    }
+                }
+                Err(e) => tracing::debug!(error = %e, "reading codex's rate limits"),
+            }
+        });
     }
 
     /// Make the skills `open` offers the server's extra skill roots, for the threads it opens from then on.
@@ -424,6 +496,7 @@ impl Codex {
             turn: Mutex::default(),
             overrides: Mutex::default(),
             tokens: Mutex::default(),
+            spent: Mutex::default(),
         })
     }
 }
@@ -438,6 +511,7 @@ struct Running {
 }
 
 pub(crate) struct CodexSession {
+    /// The thread's id.
     id: String,
     shared: Arc<Shared>,
     turn: Mutex<Running>,
@@ -445,6 +519,8 @@ pub(crate) struct CodexSession {
     overrides: Mutex<Map<String, Value>>,
     /// The thread's token totals at the end of the last turn.
     tokens: Mutex<Option<Tokens>>,
+    /// The context window's use and the thread's cost, as last reported.
+    spent: Mutex<Spent>,
 }
 
 /// An MCP server as codex's `mcpServerStatus/list` reports it.
@@ -474,6 +550,21 @@ impl Drop for Unroute<'_> {
 }
 
 impl CodexSession {
+    /// Report the thread's cost so far, as codex estimates it, if it does, with the context window's use `context`
+    /// reported in the turn.
+    async fn report_cost(&self, updates: &Updates, context: Option<(u64, u64)>) {
+        let Some(usd) = self.shared.thread_cost(&self.id).await else { return };
+        let spent = {
+            let mut spent = self.spent.locked();
+            if let Some((used, size)) = context {
+                (spent.used, spent.size) = (used, size);
+            }
+            spent.cost = Some(spent.cost.unwrap_or_default().max(usd - spent.base));
+            *spent
+        };
+        spent.report(updates);
+    }
+
     async fn interrupt(&self, turn: &str) {
         let params = json!({ "threadId": self.id, "turnId": turn });
         if let Err(e) = self.shared.rpc.request("turn/interrupt", params).await {
@@ -484,7 +575,7 @@ impl CodexSession {
 
 impl NativeSession for CodexSession {
     fn id(&self) -> String {
-        self.id.clone()
+        based_id(&self.id, self.spent.locked().base)
     }
 
     async fn mcp_servers(&self) -> Result<Vec<McpServerState>, Error> {
@@ -529,7 +620,7 @@ impl NativeSession for CodexSession {
             self.interrupt(id).await;
         }
         let known = *self.tokens.locked();
-        let mut turn = Turn::new(id, updates, known);
+        let mut turn = Turn::new(id, updates.clone(), known);
         let done = loop {
             let Some((method, params)) = rx.recv().await else {
                 return Err(self.shared.exited().await);
@@ -547,6 +638,7 @@ impl NativeSession for CodexSession {
             Some("failed") => return Err(self.shared.turn_error(&done["error"])),
             _ => StopReason::EndTurn,
         };
+        self.report_cost(&updates, turn.context).await;
         Ok(PromptResponse::new(stop).usage(turn.usage()))
     }
 

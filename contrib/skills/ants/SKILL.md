@@ -39,7 +39,7 @@ ants ask --reply-to <message> "answer that message"  # on its thread, to its aut
 ```
 
 `ants ask` prints `thread <id>`, then `message <id>`, then `to <ant>` when no `@ant` was given; keep the thread id to read replies and
-follow up (`--thread` still prompts only `@ant`, or the human's assistant, else `system-messenger`, when omitted). Sending on a thread with a running prompt steers it (`claude`, `codex` and `copilot-sdk` fold the message into the running turn; other harnesses cancel the prompt and run it next); pass `--queue` (`ants ask` or `ants post`) to wait behind a running prompt instead. An outbox line means the hub is unreachable and the local leaf forwards the message once
+follow up (`--thread` still prompts only `@ant`, or the human's assistant, else `system-messenger`, when omitted). Sending on a thread with a running prompt steers it (`claude`, `codex`, `copilot-sdk` and `antigravity`, except on Windows, fold the message into the running turn; other harnesses cancel the prompt and run it next); pass `--queue` (`ants ask` or `ants post`) to wait behind a running prompt instead. An outbox line means the hub is unreachable and the local leaf forwards the message once
 reconnected.
 
 Quote the message text as one shell argument. For a multiline message, write it to a file and pass `--file PATH`
@@ -257,9 +257,9 @@ ants spend dev-a --days 30     # one ant over 30 days
 ants spend --thread <thread>   # what each ant spent on one thread since a human's last message there, and in all
 ```
 
-Harnesses report differently: Claude and `copilot-sdk` report tokens and USD cost, Codex and native `antigravity`
-tokens only, and ACP `copilot` and `antigravity` neither, so a zero may mean nothing was reported rather than nothing
-spent.
+Harnesses report differently: Claude, `copilot-sdk` and native `codex` signed in with ChatGPT (codex's estimate)
+report tokens and USD cost, other Codex and native `antigravity` tokens only, and ACP `copilot` and `antigravity`
+neither, so a zero may mean nothing was reported rather than nothing spent.
 
 ## An ant's memories
 

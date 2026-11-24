@@ -10,8 +10,9 @@
 //! definition's `mode` as `--permission-mode`, and `--permission-prompts none`, so whatever Claude Code would ask a
 //! human about is denied rather than waited on; when the ant asks ants about its tools, `--permission-prompts host
 //! --permission-prompt-tool stdio` instead, so it comes as a `can_use_tool` control request, sent to ants
-//! ([`super::approve`]). Cancel is Claude Code's `interrupt`; the process is killed when the
-//! turn does not end within [`INTERRUPT_GRACE`].
+//! ([`super::approve`]). Cancel is Claude Code's `interrupt`, dropping the steers queued behind the turn where Claude
+//! Code can ([`CANCEL_QUEUED`]); the process is killed when the turn does not end within [`INTERRUPT_GRACE`]. Another
+//! model is selected with `set_model` and another reasoning effort with `apply_flag_settings` (`effortLevel`).
 
 mod control;
 mod failure;
@@ -24,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::Error;
-use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse};
+use agent_client_protocol::v1::schema::{ContentBlock, PromptResponse, StopReason};
 use ants_proto::McpServerState;
 use anyhow::bail;
 use serde_json::{Map, Value, json};
@@ -36,8 +37,8 @@ use self::turn::{Turn, token_counts, window};
 use super::io::{older, probe_version};
 use super::turn::{Spent, Tokens};
 use super::{
-    Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Updates, based_id, cost_base,
-    failed, is_flag, mcp_servers_json, signed_out,
+    Cli, Credentials, Harness, Info, JsonLines, JsonWriter, Native, NativeSession, Open, Setting, Updates, based_id,
+    cost_base, failed, is_flag, mcp_servers_json, signed_out,
 };
 use crate::harness::Skills;
 use crate::sync::MutexExt as _;
@@ -79,6 +80,10 @@ const ENV: &[(&str, &str)] = &[
 /// The environment variables Claude Code reads an API key or a token from.
 const CREDENTIAL_VARIABLES: [&str; 3] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
 
+/// The capability of `system/init` saying `interrupt` takes `cancel_queued`, which drops the user messages queued
+/// behind the turn rather than running each as a turn of its own after it.
+const CANCEL_QUEUED: &str = "interrupt_cancel_queued_v1";
+
 /// How long an interrupted turn has to end before the CLI is killed.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
 
@@ -90,6 +95,9 @@ pub(crate) struct Claude {
     version: String,
     /// The servers of the definition's `--mcp-config`, which `mcp_set_servers` would otherwise drop.
     mcp: Map<String, Value>,
+    /// Whether the CLI's interrupt takes `cancel_queued` ([`CANCEL_QUEUED`]), as the last `system/init` of any of its
+    /// sessions said.
+    cancel_queued: Arc<AtomicBool>,
 }
 
 /// Take `--mcp-config` out of `args` (repeatable, each taking one or more values, `--mcp-config VALUE...` or
@@ -178,7 +186,7 @@ impl Native for Claude {
     async fn start(mut cli: Cli) -> Result<Self, Error> {
         let mcp = take_mcp_config(&mut cli.args).map_err(|e| failed(format!("{}: {e}", cli.name())))?;
         let version = version(&cli).await?;
-        Ok(Self { cli, version, mcp })
+        Ok(Self { cli, version, mcp, cancel_queued: Arc::default() })
     }
 
     fn info(&self) -> Info {
@@ -262,12 +270,8 @@ async fn version(cli: &Cli) -> Result<String, Error> {
 
 impl Claude {
     async fn open(&self, how: How, open: Open, base: f64) -> Result<ClaudeSession, Error> {
-        if let Some(effort) = self.cli.effort().filter(|effort| !EFFORTS.contains(effort)) {
-            return Err(failed(format!(
-                "{}: Claude Code takes reasoning_effort {}, not {effort}",
-                self.cli.name(),
-                EFFORTS.join(", ")
-            )));
+        if let Some(effort) = self.cli.effort() {
+            check_effort(&self.cli, effort)?;
         }
         let servers = mcp_servers_json(&open.mcp_servers);
         let cli = ENV.iter().fold(self.cli.clone(), |cli, (name, value)| cli.with_env_default(name, value));
@@ -294,6 +298,7 @@ impl Claude {
             interrupted: AtomicBool::new(false),
             spent: Mutex::new(Spent::from(base)),
             steers: Mutex::default(),
+            cancel_queued: self.cancel_queued.clone(),
         };
         let hello = session.shared.control(json!({ "subtype": "initialize", "hooks": null })).await?;
         if no_credentials(&hello["account"]) {
@@ -364,6 +369,23 @@ impl Claude {
     }
 }
 
+/// Fails unless Claude Code takes reasoning effort `effort`.
+fn check_effort(cli: &Cli, effort: &str) -> Result<(), Error> {
+    if EFFORTS.contains(&effort) {
+        return Ok(());
+    }
+    Err(failed(format!("{}: Claude Code takes reasoning_effort {}, not {effort}", cli.name(), EFFORTS.join(", "))))
+}
+
+/// The control request interrupting the turn, dropping the user messages queued behind it when `cancel_queued`.
+fn interrupt(cancel_queued: bool) -> Value {
+    if cancel_queued {
+        json!({ "subtype": "interrupt", "cancel_queued": true })
+    } else {
+        json!({ "subtype": "interrupt" })
+    }
+}
+
 /// Whether the `account` of Claude Code's `initialize` answer has no credentials: no login, no API key, and the
 /// Anthropic API as provider (Bedrock, Vertex and Foundry bring their own).
 fn no_credentials(account: &Value) -> bool {
@@ -384,12 +406,15 @@ pub(crate) struct ClaudeSession {
     interrupted: AtomicBool,
     spent: Mutex<Spent>,
     steers: Mutex<Steers>,
+    /// Whether the interrupt drops the steers queued behind the turn ([`Claude::cancel_queued`]).
+    cancel_queued: Arc<AtomicBool>,
 }
 
 /// The messages steering the turn running ([`NativeSession::steer`]), written to stdin as it runs. Claude Code takes
 /// one between model calls, or after the turn's `result` as a turn of its own, replaying it as it does
 /// (`--replay-user-messages`). The prompt ends once the session is idle (`session_state_changed`), or at a `result`
-/// from a Claude Code that does not report its state, and only once each steer was replayed.
+/// from a Claude Code that does not report its state, and only once each steer was replayed. A cancel ends it at the
+/// interrupted turn's end, the steers not taken in dropped with it where Claude Code can ([`CANCEL_QUEUED`]).
 #[derive(Debug, Default)]
 struct Steers {
     /// Whether a turn runs that takes steers: until it ends.
@@ -407,11 +432,12 @@ impl Drop for ClaudeSession {
         };
         let shared = self.shared.clone();
         let running = self.running.borrow().is_some();
+        let cancel_queued = self.cancel_queued.load(Ordering::Relaxed);
         // Claude Code writes its cost totals to the transcript as it exits, which resuming restores: let it.
         runtime.spawn(async move {
             // Writing fails only once the CLI is gone.
             if running {
-                let interrupt = control_request("ants-close", &json!({ "subtype": "interrupt" }));
+                let interrupt = control_request("ants-close", &interrupt(cancel_queued));
                 let _ = shared.writer.send(&interrupt).await;
             }
             let _ = shared.writer.close().await;
@@ -491,6 +517,12 @@ impl ClaudeSession {
                     self.steers.locked().pending.remove(event["uuid"].as_str().unwrap_or_default());
                     continue;
                 }
+                (Some("system"), Some("init")) => {
+                    let capabilities = event["capabilities"].as_array().map_or(&[][..], Vec::as_slice);
+                    self.cancel_queued.store(capabilities.iter().any(|c| c == CANCEL_QUEUED), Ordering::Relaxed);
+                    turn.event(event);
+                    continue;
+                }
                 (Some("system"), Some("session_state_changed")) => {
                     states = true;
                     event["state"] == "idle"
@@ -506,7 +538,13 @@ impl ClaudeSession {
             if !idle {
                 continue;
             }
-            let Some(result) = last.take() else { continue };
+            let Some(result) = last.take() else {
+                // An interrupt dropping the queued messages dropped the prompt's own before its turn started.
+                if self.interrupted.load(Ordering::Relaxed) {
+                    return Ok(PromptResponse::new(StopReason::Cancelled));
+                }
+                continue;
+            };
             let mut steers = self.steers.locked();
             if steers.pending.is_empty() || self.interrupted.load(Ordering::Relaxed) {
                 steers.open = false;
@@ -586,9 +624,13 @@ impl NativeSession for ClaudeSession {
         let Some(turn) = *self.running.borrow() else { return };
         self.interrupted.store(true, Ordering::Relaxed);
         let mut running = self.running.subscribe();
-        let interrupt = self.shared.control(json!({ "subtype": "interrupt" }));
-        if let Ok(Err(e)) = tokio::time::timeout(INTERRUPT_GRACE, interrupt).await {
-            tracing::warn!(harness = self.shared.cli.name(), error = %e, "interrupting Claude Code");
+        let cancel_queued = self.cancel_queued.load(Ordering::Relaxed);
+        let interrupt = self.shared.control(interrupt(cancel_queued));
+        match tokio::time::timeout(INTERRUPT_GRACE, interrupt).await {
+            // The steers written but not taken in are dropped, so none is replayed.
+            Ok(Ok(_)) if cancel_queued => self.steers.locked().pending.clear(),
+            Ok(Err(e)) => tracing::warn!(harness = self.shared.cli.name(), error = %e, "interrupting Claude Code"),
+            _ => {}
         }
         if tokio::time::timeout(INTERRUPT_GRACE, running.wait_for(|now| *now != Some(turn))).await.is_err() {
             tracing::warn!(
@@ -599,6 +641,17 @@ impl NativeSession for ClaudeSession {
                 process.stop(Duration::ZERO).await;
             }
         }
+    }
+
+    async fn configure(&self, setting: Setting, value: &str) -> Result<(), Error> {
+        let request = match setting {
+            Setting::Model => json!({ "subtype": "set_model", "model": value }),
+            Setting::ReasoningEffort => {
+                check_effort(&self.shared.cli, value)?;
+                json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": value } })
+            }
+        };
+        self.shared.control(request).await.map(drop)
     }
 }
 

@@ -57,6 +57,16 @@ impl std::error::Error for RpcError {}
 
 type Pending = HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>;
 
+/// The response to a request sent ([`Rpc::send_request`]).
+pub(crate) struct Response(oneshot::Receiver<Result<Value, RpcError>>);
+
+impl Response {
+    /// Wait for it: the request's result, or its error, the connection's end included.
+    pub(crate) async fn wait(self) -> Result<Value, RpcError> {
+        self.0.await.unwrap_or_else(|_| Err(RpcError::closed()))
+    }
+}
+
 /// A JSON-RPC client. Dropping it stops reading.
 pub(crate) struct Rpc<W> {
     writer: JsonWriter<W>,
@@ -92,6 +102,11 @@ impl<W: AsyncWrite + Unpin> Rpc<W> {
 
     /// Send a request and wait for its response.
     pub(crate) async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.send_request(method, params).await?.wait().await
+    }
+
+    /// Send a request, its response to be waited for later, or not at all.
+    pub(crate) async fn send_request(&self, method: &str, params: Value) -> Result<Response, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         match self.pending.locked().as_mut() {
@@ -105,7 +120,7 @@ impl<W: AsyncWrite + Unpin> Rpc<W> {
             }
             return Err(RpcError::closed());
         }
-        rx.await.unwrap_or_else(|_| Err(RpcError::closed()))
+        Ok(Response(rx))
     }
 
     /// Send a notification.

@@ -1,5 +1,6 @@
 //! The codex translator against a stub `codex app-server` playing the shapes codex 0.169.0 sends: observed live where
-//! a signed-out server shows them (handshake, threads, a turn failing with 401), else as its JSON schema gives them.
+//! a signed-out server shows them (handshake, threads, a turn failing with 401, rate limits and usage refused, a
+//! compaction starting), else as its JSON schema gives them.
 
 use std::assert_matches;
 use std::path::Path;
@@ -13,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::*;
 use crate::harness::native::Protocol;
-use crate::harness::native::tests::StubHarness;
+use crate::harness::native::tests::{StubHarness, run};
 use crate::harness::{
     Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
     parse_definitions,
@@ -65,6 +66,27 @@ fn handshake_in(home: &Path, version: &str, account: Value) -> Vec<Vec<String>> 
 
 fn signed_in() -> Vec<Vec<String>> {
     handshake_of("0.169.0", json!({ "type": "apiKey" }))
+}
+
+/// The blocks of the handshake of a server signed in with ChatGPT, which then reads the rate limits (request 3),
+/// answered by `limits`.
+fn signed_in_chatgpt(limits: String) -> Vec<Vec<String>> {
+    let account = json!({ "type": "chatgpt", "email": null, "planType": "plus", "workspaceName": null });
+    [handshake_of("0.169.0", account), vec![vec![limits]]].concat()
+}
+
+/// The answer to `account/usage/read`, request `id`, of a server not signed in with ChatGPT.
+fn no_usage(id: u64) -> String {
+    error(id, -32600, "codex account authentication required to read token usage")
+}
+
+/// The answer to `account/usage/read`, request `id`, estimating thread `thread` at `usd_micros`.
+fn thread_usage(id: u64, thread: &str, usd_micros: Option<u64>) -> String {
+    let summary = json!({ "lifetimeTokens": null, "peakDailyTokens": null, "longestRunningTurnSec": null, "currentStreakDays": null, "longestStreakDays": null });
+    let usage = usd_micros.map(|usd| {
+        json!({ "threadId": thread, "estimatedUsageCreditsMicros": usd * 40, "estimatedUsageUsdMicros": usd, "nativeUsageUsdMicros": null, "groups": [] })
+    });
+    ok(id, json!({ "summary": summary, "dailyUsageBuckets": null, "threadUsage": usage }))
 }
 
 /// The answer to request `id` opening thread `thread`, as `thread/start`, `thread/resume` and `thread/fork` give it.
@@ -162,6 +184,11 @@ fn mcp_config() -> Value {
 }
 
 fn first_turn() -> Vec<String> {
+    first_turn_from(4)
+}
+
+/// [`first_turn`] started by request `id`.
+fn first_turn_from(id: u64) -> Vec<String> {
     let command = json!({
         "type": "commandExecution", "id": "c1", "pluginId": null, "scriptPath": null,
         "command": "/bin/zsh -lc 'cat README.md'", "cwd": "/w", "processId": null, "source": "agent",
@@ -177,7 +204,7 @@ fn first_turn() -> Vec<String> {
     let edit = json!({ "type": "fileChange", "id": "f1", "status": "completed", "changes": [{ "path": "/w/a.rs", "kind": { "type": "update", "move_path": null }, "diff": "@@ -1 +1 @@\n-a\n+b\n" }] });
     let plan = json!({ "explanation": null, "plan": [{ "step": "Read", "status": "completed" }, { "step": "Answer", "status": "inProgress" }] });
     let user = json!({ "type": "userMessage", "id": "u1", "clientId": null, "content": [{ "type": "text", "text": "go", "text_elements": [] }] });
-    let mut blocks = turn_started(4, TURN);
+    let mut blocks = turn_started(id, TURN);
     blocks.extend([
         item("item/started", user.clone()),
         item("item/completed", user),
@@ -208,7 +235,7 @@ fn first_turn() -> Vec<String> {
 async fn a_codex_thread_streams_its_turns_through_the_translator() {
     let codex = Fixture::new("codex-prompt", "args = [\"-c\", \"model_provider=\\\"openai\\\"\"]");
     let second = [
-        turn_started(5, "turn-2"),
+        turn_started(6, "turn-2"),
         vec![
             on("turn-2", "thread/tokenUsage/updated", json!({ "tokenUsage": { "total": tokens(2000, 1600, 400), "last": tokens(500, 400, 100), "modelContextWindow": null } })),
             on("turn-2", "item/agentMessage/delta", json!({ "itemId": "a3", "delta": "Again" })),
@@ -216,7 +243,8 @@ async fn a_codex_thread_streams_its_turns_through_the_translator() {
         ],
     ]
     .concat();
-    codex.script(None, &[signed_in(), vec![vec![opened(3, THREAD)], first_turn(), second]].concat());
+    let blocks = [vec![opened(3, THREAD)], first_turn(), vec![no_usage(5)], second, vec![no_usage(7)]];
+    codex.script(None, &[signed_in(), blocks.to_vec()].concat());
     let settings = ModelSettings {
         model: Some("gpt-6.1-sol".to_owned()),
         reasoning_effort: Some("high".to_owned()),
@@ -274,6 +302,9 @@ async fn a_codex_thread_streams_its_turns_through_the_translator() {
     assert_eq!(received[4]["method"], "turn/start");
     assert_eq!(received[4]["params"]["threadId"], THREAD);
     assert_eq!(received[4]["params"]["input"], json!([{ "type": "text", "text": "go", "text_elements": [] }]));
+    let usage = json!({ "id": 5, "method": "account/usage/read", "params": { "threadId": THREAD } });
+    assert_eq!(received[5], usage, "the thread's cost read after the turn");
+    assert_eq!(received[6]["method"], "turn/start");
 }
 
 #[tokio::test]
@@ -297,7 +328,7 @@ async fn codex_threads_open_with_the_ants_skills_as_an_extra_root() {
 async fn codex_threads_resume_and_fork_with_their_permissions_and_mcp_servers() {
     let codex = Fixture::new("codex-sessions", "mode = \"full-access\"");
     codex.script(Some(1), &[signed_in(), vec![vec![opened(3, THREAD)]]].concat());
-    codex.script(Some(2), &[signed_in(), vec![vec![opened(3, "forked")]]].concat());
+    codex.script(Some(2), &[signed_in(), vec![vec![opened(3, "forked")], vec![no_usage(4)]]].concat());
     let no_rollout = error(3, -32600, "no rollout found for thread id 01a1e331-02d0-74d2-8faa-64eac0503b15");
     codex.script(Some(3), &[signed_in(), vec![vec![no_rollout]]].concat());
     let launch = codex.launch(ModelSettings::default());
@@ -412,7 +443,10 @@ async fn codex_limits_are_classified_with_their_reset() {
     let too_many = turn_error("exceeded retry limit, last status: 429 Too Many Requests", json!("rateLimitExceeded"));
     let limited = [turn_started(4, TURN), vec![turn_completed(TURN, "failed", too_many)]].concat();
     codex.script(Some(2), &[signed_in(), vec![vec![opened(3, THREAD)], limited]].concat());
-    codex.script(Some(3), &handshake_of("0.168.2", json!({ "type": "apiKey" })));
+    let spent = turn_error("Your API project has reached its spend limit.", json!("projectSpendLimitExceeded"));
+    let capped = [turn_started(4, TURN), vec![turn_completed(TURN, "failed", spent)]].concat();
+    codex.script(Some(3), &[signed_in(), vec![vec![opened(3, THREAD)], capped]].concat());
+    codex.script(Some(4), &handshake_of("0.168.2", json!({ "type": "apiKey" })));
     let launch = codex.launch(ModelSettings::default());
 
     let session = Session::start(&launch, None).await.unwrap();
@@ -429,8 +463,146 @@ async fn codex_limits_are_classified_with_their_reset() {
     assert_eq!((limited.kind, limited.retry_after), (LimitKind::RateLimit, None), "{err:#}");
     session.close().await;
 
+    let session = Session::start(&launch, None).await.unwrap();
+    let err = session.prompt("go").await.unwrap_err();
+    let limited = err.downcast_ref::<Limited>().expect("a spend limit");
+    assert_eq!((limited.kind, limited.retry_after), (LimitKind::Quota, None), "{err:#}");
+    session.close().await;
+
     let err = format!("{:#}", Session::start(&launch, None).await.err().expect("an old codex"));
     assert!(err.contains("codex 0.168.2 is older than 0.169.0"), "{err}");
+}
+
+#[tokio::test]
+async fn a_codex_usage_limit_after_a_restart_resets_as_the_limits_read_at_start_say() {
+    let codex = Fixture::new("codex-seeded", "");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let window = |used: f64, mins: u64, resets: u64| json!({ "usedPercent": used, "windowDurationMins": mins, "resetsAt": resets });
+    let snapshot = |id: &str, primary: Value, secondary: Value| json!({ "limitId": id, "limitName": null, "normalModelSlug": null, "primary": primary, "secondary": secondary, "credits": null, "individualLimit": null, "spendControlReached": null, "planType": "plus", "rateLimitReachedType": null });
+    let codex_limit = snapshot("codex", window(40.0, 300, now + 600), Value::Null);
+    let other = snapshot("codex_other", Value::Null, window(100.0, 10080, now + 7200));
+    let read = json!({
+        "ordinaryUsageAllowed": false, "rateLimits": codex_limit, "rateLimitsByLimitId": { "codex": codex_limit, "codex_other": other },
+        "rateLimitResetCredits": null, "accountId": null, "rateLimitUpsell": null,
+    });
+    let usage_limit = turn_error("You've hit your usage limit.", json!("usageLimitExceeded"));
+    let failing = [turn_started(5, TURN), vec![turn_completed(TURN, "failed", usage_limit)]].concat();
+    codex.script(Some(1), &[signed_in_chatgpt(ok(3, read)), vec![vec![opened(4, THREAD)], failing.clone()]].concat());
+    let refused = error(3, -32600, "codex account authentication required to read rate limits");
+    codex.script(Some(2), &[signed_in_chatgpt(refused), vec![vec![opened(4, THREAD)], failing]].concat());
+    let launch = codex.launch(ModelSettings::default());
+
+    let session = Session::start(&launch, None).await.unwrap();
+    let err = session.prompt("go").await.unwrap_err();
+    let limited = err.downcast_ref::<Limited>().expect("a provider limit");
+    let retry_after = limited.retry_after.expect("the reset of the window used up");
+    assert!(retry_after > Duration::from_secs(7100) && retry_after <= Duration::from_hours(2), "{retry_after:?}");
+    session.close().await;
+    let read = json!({ "id": 3, "method": "account/rateLimits/read", "params": { "excludeResetCreditDetails": true } });
+    assert_eq!(codex.received(1)[3], read, "right after the account");
+
+    let session = Session::start(&launch, None).await.expect("a refused read fails nothing");
+    let err = session.prompt("go").await.unwrap_err();
+    let limited = err.downcast_ref::<Limited>().expect("a provider limit");
+    assert_eq!((limited.kind, limited.retry_after), (LimitKind::Quota, None), "{err:#}");
+    session.close().await;
+}
+
+#[tokio::test]
+async fn codex_threads_report_the_cost_codex_estimates_forks_only_their_own() {
+    let codex = Fixture::new("codex-cost", "");
+    let refused = || error(3, -32600, "codex account authentication required to read rate limits");
+    let second = [
+        turn_started(7, "turn-2"),
+        vec![
+            on("turn-2", "thread/tokenUsage/updated", json!({ "tokenUsage": { "total": tokens(2000, 1600, 400), "last": tokens(500, 400, 100), "modelContextWindow": 272_000 } })),
+            on("turn-2", "item/agentMessage/delta", json!({ "itemId": "a3", "delta": "Again" })),
+            turn_completed("turn-2", "completed", Value::Null),
+        ],
+    ]
+    .concat();
+    let turns = vec![
+        vec![opened(4, THREAD)],
+        first_turn_from(5),
+        vec![thread_usage(6, THREAD, Some(250_000))],
+        second,
+        vec![thread_usage(8, THREAD, None)],
+    ];
+    codex.script(Some(1), &[signed_in_chatgpt(refused()), turns].concat());
+    // The fork starts at its parent's estimate.
+    let forking = vec![vec![opened(4, THREAD)], vec![thread_usage(5, THREAD, Some(250_000))]];
+    codex.script(Some(2), &[signed_in_chatgpt(refused()), forking].concat());
+    let once =
+        [turn_started(5, TURN), vec![delta("a1", "Forked"), turn_completed(TURN, "completed", Value::Null)]].concat();
+    let resumed = vec![vec![opened(4, THREAD)], once, vec![thread_usage(6, THREAD, Some(400_000))]];
+    codex.script(Some(3), &[signed_in_chatgpt(refused()), resumed].concat());
+    let launch = codex.launch(ModelSettings::default());
+
+    let session = Session::start(&launch, None).await.unwrap();
+    let (reply, _, spends) = run(&session, Prompt::new("go")).await;
+    assert_eq!(reply.unwrap(), "Hello there\n\nDone.");
+    assert_eq!(spends, [Spend::Cost { session: SessionId::new(THREAD), total: 0.25 }, Spend::Tokens(1500)]);
+    let (reply, _, spends) = run(&session, Prompt::new("again")).await;
+    assert_eq!(reply.unwrap(), "Again");
+    let again = Spend::Cost { session: SessionId::new(THREAD), total: 0.25 };
+    assert_eq!(spends, [again, Spend::Tokens(500)], "no estimate, no more cost than the last reading's");
+    session.close().await;
+    let usage = json!({ "id": 6, "method": "account/usage/read", "params": { "threadId": THREAD } });
+    assert_eq!(codex.received(1)[6], usage);
+
+    let forked = fork(&launch, &SessionId::new("parent~100000")).await.unwrap().expect("codex forks");
+    assert_eq!(forked, SessionId::new(format!("{THREAD}~250000")), "the parent's estimate carried in the id");
+    let received = codex.received(2);
+    assert_eq!((&received[4]["method"], &received[4]["params"]["threadId"]), (&json!("thread/fork"), &json!("parent")));
+    assert_eq!(received[5], json!({ "id": 5, "method": "account/usage/read", "params": { "threadId": THREAD } }));
+
+    let clone = Session::start(&launch, Some(forked.clone())).await.unwrap();
+    assert_eq!(clone.id(), forked);
+    let (reply, _, spends) = run(&clone, Prompt::new("go")).await;
+    assert_eq!(reply.unwrap(), "Forked");
+    assert_eq!(spends.len(), 1, "{spends:?}");
+    let Spend::Cost { session, total } = &spends[0] else { panic!("{spends:?}") };
+    assert_eq!(session, &forked);
+    assert!((total - 0.15).abs() < 1e-9, "not the parent's cost again: {total}");
+    clone.close().await;
+    assert_eq!(codex.received(3)[4]["params"]["threadId"], THREAD, "resumed by the thread's own id");
+}
+
+#[tokio::test]
+async fn a_codex_compaction_shows_as_a_tool_call() {
+    let codex = Fixture::new("codex-compaction", "");
+    // As codex 0.169.0 starts one; it completes alike, with its end time.
+    let compaction =
+        json!({ "type": "contextCompaction", "id": "k1", "startedAtMs": 1_795_547_438_797_u64, "completedAtMs": null });
+    let mut compacted = compaction.clone();
+    compacted["completedAtMs"] = 1_795_547_440_000_u64.into();
+    let turn = [
+        turn_started(4, TURN),
+        vec![
+            item("item/started", compaction),
+            item("item/completed", compacted),
+            delta("a1", "Fine"),
+            turn_completed(TURN, "completed", Value::Null),
+        ],
+    ]
+    .concat();
+    codex.script(None, &[signed_in(), vec![vec![opened(3, THREAD)], turn, vec![no_usage(5)]]].concat());
+    let session = Session::start(&codex.launch(ModelSettings::default()), None).await.unwrap();
+    let (reply, updates, _) = run(&session, Prompt::new("go")).await;
+    assert_eq!(reply.unwrap(), "Fine");
+    session.close().await;
+    let compactions: Vec<_> = updates
+        .iter()
+        .filter_map(|u| match u {
+            StatusUpdate::Tool { id, title, tool_kind, status, .. } if id == "k1" => {
+                Some((title.clone(), tool_kind.clone(), status.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let started = (Some("Compact the context".to_owned()), Some("other".to_owned()), Some("in_progress".to_owned()));
+    assert_eq!(compactions.first(), Some(&started), "{updates:?}");
+    assert_eq!(compactions.last().and_then(|(.., status)| status.as_deref()), Some("completed"), "{updates:?}");
 }
 
 #[tokio::test]
@@ -454,6 +626,7 @@ async fn a_codex_turn_outgrowing_the_context_runs_again_in_a_new_thread() {
             vec![ok(5, json!({ "status": "unsubscribed" }))],
             vec![opened(6, "fresh")],
             retried,
+            vec![no_usage(8)],
         ],
     ]
     .concat();
@@ -473,6 +646,7 @@ async fn a_codex_turn_outgrowing_the_context_runs_again_in_a_new_thread() {
         "thread/unsubscribe",
         "thread/start",
         "turn/start",
+        "account/usage/read",
     ];
     assert_eq!(methods, want);
     assert_eq!(received[5]["params"], json!({ "threadId": THREAD }), "the abandoned thread unloaded");
@@ -487,7 +661,7 @@ async fn a_cancelled_codex_turn_is_interrupted() {
         note("thread/status/changed", json!({ "threadId": THREAD, "status": { "type": "idle" } })),
         turn_completed(TURN, "interrupted", Value::Null),
     ];
-    codex.script(None, &[signed_in(), vec![vec![opened(3, THREAD)], working, interrupted]].concat());
+    codex.script(None, &[signed_in(), vec![vec![opened(3, THREAD)], working, interrupted, vec![no_usage(6)]]].concat());
     let session = Session::start(&codex.launch(ModelSettings::default()), None).await.unwrap();
     let (stop, stopped) = oneshot::channel();
     let (progress, mut status) = mpsc::channel(16);
@@ -511,7 +685,7 @@ async fn a_codex_turn_takes_steers_while_it_runs() {
     let working = [turn_started(4, TURN), vec![delta("a1", "Working")]].concat();
     let steered =
         vec![ok(5, json!({ "turnId": TURN })), delta("a1", " on both"), turn_completed(TURN, "completed", Value::Null)];
-    codex.script(None, &[signed_in(), vec![vec![opened(3, THREAD)], working, steered]].concat());
+    codex.script(None, &[signed_in(), vec![vec![opened(3, THREAD)], working, steered, vec![no_usage(6)]]].concat());
     let session = Session::start(&codex.launch(ModelSettings::default()), None).await.unwrap();
     let (ready, started) = oneshot::channel();
     let (steer_tx, steers) = mpsc::channel(1);
@@ -561,6 +735,7 @@ async fn codex_approval_requests_are_declined_without_asking_ants() {
                 delta("a1", "Skipped"),
                 turn_completed(TURN, "completed", Value::Null),
             ],
+            vec![no_usage(5)],
         ],
     ]
     .concat();
@@ -607,6 +782,7 @@ async fn codex_asks_ants_to_run_a_command_or_change_files_when_the_ant_asks() {
             asking,
             vec![ask(1, "item/fileChange/requestApproval", file)],
             vec![delta("a1", "Done"), turn_completed(TURN, "completed", Value::Null)],
+            vec![no_usage(5)],
         ],
     ]
     .concat();
