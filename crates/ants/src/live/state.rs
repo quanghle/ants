@@ -18,6 +18,8 @@ use crate::tools::{HeldAct, Update};
 pub struct Progress {
     pub status: progress::Status,
     pub at: DateTime<Utc>,
+    /// When each ant shown was last heard from, by its daemon's clock, as its colony entry's times are.
+    heard: HashMap<UserId, DateTime<Utc>>,
 }
 
 /// The connection to NATS and, through it, to the hub's JetStream.
@@ -120,12 +122,18 @@ impl State {
                 ahead => self.queued.insert(message, ahead),
             };
         }
-        let progress = self
-            .progress
-            .entry(event.thread_id.clone())
-            .or_insert_with(|| Progress { status: progress::Status::new(Vec::new()), at: now });
+        let progress = self.progress.entry(event.thread_id.clone()).or_insert_with(|| Progress {
+            status: progress::Status::new(Vec::new()),
+            at: now,
+            heard: HashMap::new(),
+        });
         progress.status.apply(event);
         progress.at = now;
+        if progress.status.stand(&event.ant).is_some() {
+            progress.heard.insert(event.ant.clone(), event.at);
+        } else {
+            progress.heard.remove(&event.ant);
+        }
         if progress.status.line(usize::MAX).is_empty() {
             self.progress.remove(&event.thread_id);
         }
@@ -138,9 +146,52 @@ impl State {
         Some((progress.status.line(width), progress.at))
     }
 
+    /// Take the colony read at `now`, and drop the progress it shows to be over (`State::settle`).
     pub fn colony(&mut self, entries: Vec<ColonyEntry>, now: DateTime<Utc>) {
         self.colony = entries;
         self.colony_at = Some(now);
+        self.settle();
+    }
+
+    /// Drop each ant's progress on the threads that its colony entry shows it done with, as status updates are best
+    /// effort and the last one, `Idle`, can be lost, or missed while the connection was down. An ant is done with a
+    /// thread last heard from before its entry's heartbeat when the entry is gone, its daemon started since, or it
+    /// had fewer messages in hand at the heartbeat than such threads: those last heard from longest ago go. A thread
+    /// that waits for the ant's sign-in stays while its entry shows the harness signed out.
+    fn settle(&mut self) {
+        let mut threads: HashMap<&UserId, Vec<(DateTime<Utc>, &ThreadId)>> = HashMap::new();
+        for (thread, progress) in &self.progress {
+            for (ant, heard) in &progress.heard {
+                threads.entry(ant).or_default().push((*heard, thread));
+            }
+        }
+        let mut done = Vec::new();
+        for (ant, mut heard) in threads {
+            let Some(entry) = self.colony.iter().find(|e| e.ant == *ant) else {
+                done.extend(heard.into_iter().map(|(_, thread)| (thread.clone(), ant.clone())));
+                continue;
+            };
+            heard.retain(|(at, thread)| {
+                let signing_in = entry.signed_out.is_some()
+                    && self.progress[*thread].status.stand(ant).is_some_and(|(_, signed_out)| signed_out);
+                *at < entry.heartbeat_at && !signing_in
+            });
+            heard.sort_by(|a, b| b.cmp(a));
+            let mut in_hand = usize::try_from(entry.handling).unwrap_or(usize::MAX);
+            for (at, thread) in heard {
+                if at >= entry.started_at && in_hand > 0 {
+                    in_hand -= 1;
+                } else {
+                    done.push((thread.clone(), ant.clone()));
+                }
+            }
+        }
+        for (thread, ant) in done {
+            // An idle update takes the ant off the thread, as one heard would have.
+            let idle = StatusEvent::new(ant, thread, StatusUpdate::State { state: ants_proto::State::Idle });
+            let at = self.progress[&idle.thread_id].at;
+            self.status(&idle, at);
+        }
     }
 
     /// Take word from following the tool requests ([`crate::tools::follow`]) into the pending ones.
@@ -394,6 +445,54 @@ mod tests {
         assert_eq!(s.progress_of(&thread, 80), Some(("dev-a: working".to_owned(), at(1))));
         s.status(&event(StatusUpdate::State { state: ants_proto::State::Idle }), at(2));
         assert_eq!(s.progress_of(&thread, 80), None);
+    }
+
+    #[test]
+    fn progress_whose_idle_was_lost_goes_once_the_colony_shows_the_ant_done() {
+        use crate::test_support::colony::entry;
+        let (t, u, v) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let mut s = state();
+        let heard = |ant: &str, thread: &ThreadId, state, secs| StatusEvent {
+            at: at(secs),
+            ..StatusEvent::new(user(ant), thread.clone(), StatusUpdate::State { state })
+        };
+        let working = |ant: &str, thread: &ThreadId, secs| heard(ant, thread, ants_proto::State::Working, secs);
+        // At the heartbeat, `handling` messages in hand, started at `started`.
+        let colony = |ant: &str, started: i64, beat: i64, handling: u32| ColonyEntry {
+            handling,
+            ..entry(ant, -started, -beat, at(0))
+        };
+        s.status(&working("dev-a", &t, 1), at(1));
+        s.colony(vec![colony("dev-a", 0, 0, 0)], at(1));
+        assert!(s.progress.contains_key(&t), "heard after the heartbeat");
+        s.colony(vec![colony("dev-a", 0, 2, 1)], at(2));
+        assert!(s.progress.contains_key(&t), "in hand at the heartbeat");
+        // The ant's `Idle` is lost: its next heartbeat shows it idle.
+        s.colony(vec![colony("dev-a", 0, 3, 0)], at(3));
+        assert_eq!(s.progress_of(&t, 80), None);
+
+        // On to two threads, the update ending the first lost: at the heartbeat, one message in hand.
+        s.status(&working("dev-a", &t, 4), at(4));
+        s.status(&working("dev-a", &u, 5), at(5));
+        s.colony(vec![colony("dev-a", 0, 6, 1)], at(6));
+        assert!(!s.progress.contains_key(&t) && s.progress.contains_key(&u), "the one heard from longest ago goes");
+
+        // The connection goes down; meanwhile the ant goes idle and another's daemon restarts mid-prompt.
+        s.status(&working("dev-b", &v, 6), at(6));
+        assert!(!s.link(false, at(7)));
+        assert!(s.link(true, at(9)), "reconnected: the colony is read again");
+        s.colony(vec![colony("dev-a", 0, 9, 0), colony("dev-b", 8, 9, 1)], at(9));
+        assert!(s.progress.is_empty(), "{:?}", s.progress);
+
+        // An ant gone from the colony is served no more; a thread waiting for a sign-in stays while it is signed out.
+        s.status(&working("dev-a", &t, 10), at(10));
+        s.status(&heard("dev-b", &u, ants_proto::State::SignedOut, 10), at(10));
+        let signed_out = ants_proto::SignInNeeded { since: at(10), sign_in: None };
+        let dev_b = ColonyEntry { signed_out: Some(signed_out), ..colony("dev-b", 8, 11, 0) };
+        s.colony(vec![dev_b.clone()], at(11));
+        assert!(!s.progress.contains_key(&t) && s.progress.contains_key(&u));
+        s.colony(vec![ColonyEntry { signed_out: None, ..dev_b }], at(12));
+        assert!(s.progress.is_empty());
     }
 
     #[test]
