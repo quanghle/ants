@@ -151,7 +151,7 @@ pub async fn register(js: &jetstream::Context, me: &Me) -> Result<bool> {
     Ok(true)
 }
 
-/// The humans of the team: those the humans bucket lists, `human`, and `me` when a human. Without the bucket, or when
+/// The humans of the bus: those the humans bucket lists, `human`, and `me` when a human. Without the bucket, or when
 /// it cannot be read (with a warning), only `human` and `me`.
 pub async fn load(js: &jetstream::Context, me: &Me) -> Humans {
     let mut humans = match read(js).await {

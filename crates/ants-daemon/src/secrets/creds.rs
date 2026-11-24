@@ -1,7 +1,7 @@
 //! Checking the credentials an ants process uses: whether `ants auth` issued them with the permissions of this
 //! version ([`PERMISSIONS_VERSION`]) and whether they expire soon, each with the command that renews them: `ants renew`
 //! over NATS for credentials that may ask for it ([`Finding::renewable`]), else `ants auth` on the machine holding the
-//! team keys.
+//! account keys.
 //!
 //! The kind of credentials, and what renewing them takes, comes from the permissions their user JWT carries.
 
@@ -45,7 +45,7 @@ pub enum Kind {
         channels: Vec<ChannelId>,
     },
     ChannelManager,
-    /// Read-only credentials of a hook observing the team's events ([`ants_proto::Permissions::for_observer`]).
+    /// Read-only credentials of a hook observing the bus's events ([`ants_proto::Permissions::for_observer`]).
     Observer,
     /// The uplink of `machine`'s leaf node, carrying what its members may do.
     Leaf {
@@ -75,7 +75,7 @@ pub enum Kind {
     Enrollment {
         ant: UserId,
     },
-    /// The team's public bootstrap credentials, for `ants login` ([`ants_proto::Permissions::for_bootstrap`]).
+    /// The bus's public bootstrap credentials, for `ants login` ([`ants_proto::Permissions::for_bootstrap`]).
     Bootstrap,
 }
 
@@ -240,7 +240,7 @@ impl Finding {
         }
     }
 
-    /// The commands that renew them, in order, all but `ants leaf outbox` on the machine holding the team keys.
+    /// The commands that renew them, in order, all but `ants leaf outbox` on the machine holding the account keys.
     pub fn renew(&self) -> Vec<String> {
         let domain = self.js_domain.as_ref().map_or_default(|d| format!(" --js-domain {d}"));
         let flags = |flag: &str, ids: &[UserId]| ids.iter().map(|id| format!(" --{flag} {id}")).collect::<String>();
@@ -360,28 +360,28 @@ impl Finding {
         let quoted: Vec<String> = renew.iter().map(|c| format!("`{c}`")).collect();
         match (&self.kind, quoted.as_slice()) {
             (Kind::Leaf { .. }, [issue, outbox]) => format!(
-                "renew them on the machine holding the team keys with {issue}, put the new file in their place, \
+                "renew them on the machine holding the account keys with {issue}, put the new file in their place, \
                  restart the leaf node, then run {outbox} as a human"
             ),
             (Kind::LeafSystem { machine } | Kind::LeafStore { machine }, _) => format!(
-                "renew them on the machine holding the team keys with {}, naming the members of the uplink \
+                "renew them on the machine holding the account keys with {}, naming the members of the uplink \
                  credentials leaf-{machine}.creds, which it renews too, put the new files in their place and restart \
                  the leaf node",
                 quoted.join(" and ")
             ),
             (Kind::Leaf { .. }, _) => format!(
-                "renew them on the machine holding the team keys with {}, put the new file in their place and \
+                "renew them on the machine holding the account keys with {}, put the new file in their place and \
                  restart the leaf node",
                 quoted.join(" and ")
             ),
             _ if self.registered => format!(
                 "register the device again with `ants login --hub URL --name {}`, or renew them on the machine holding \
-                 the team keys with {} and put the new file in their place",
+                 the account keys with {} and put the new file in their place",
                 self.name,
                 quoted.join(" and ")
             ),
             _ => format!(
-                "renew them on the machine holding the team keys with {} and put the new file in their place",
+                "renew them on the machine holding the account keys with {} and put the new file in their place",
                 quoted.join(" and ")
             ),
         }

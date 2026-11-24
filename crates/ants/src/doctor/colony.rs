@@ -43,7 +43,7 @@ pub(super) async fn check_versions(js: &jetstream::Context, identity: &Identity)
         versions::Renewal::Ahead(ahead) => Check::warn(
             check,
             format!("newer than permissions version {PERMISSIONS_VERSION} of this ants: {}{notes}", ahead.join(", ")),
-            vec![format!("upgrade ants here and on the machine holding the team keys before {renewing}")],
+            vec![format!("upgrade ants here and on the machine holding the account keys before {renewing}")],
         ),
     }
 }

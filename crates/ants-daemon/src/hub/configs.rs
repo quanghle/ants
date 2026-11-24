@@ -96,7 +96,7 @@ pub fn chains_config() -> kv::Config {
 
 /// The humans bucket ([`HUMANS_BUCKET`]): a human stays one until removed.
 pub fn humans_config() -> kv::Config {
-    lasting_config(HUMANS_BUCKET, "Humans of the team, written by humans")
+    lasting_config(HUMANS_BUCKET, "Humans of the bus, written by humans")
 }
 
 /// The directory of human devices' encryption keys ([`DEVICES_BUCKET`]): a device's entry lasts until its CLI puts a

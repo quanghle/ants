@@ -352,7 +352,7 @@ pub const ALL_RENEW_REQUESTS: &str = "ants.renew.*";
 pub const ALL_RENEW_REPLIES: &str = "ants.renew.*.reply";
 
 /// Where `ants login` asks for the credentials of a new device of the human `name`
-/// ([`LoginRequest`](super::LoginRequest); core NATS, not stored). Anyone holding the team's public bootstrap
+/// ([`LoginRequest`](super::LoginRequest); core NATS, not stored). Anyone holding the bus's public bootstrap
 /// credentials publishes here.
 pub fn login(name: &UserId) -> String {
     format!("ants.login.{name}")
@@ -580,7 +580,7 @@ pub fn machine_record(machine: &Machine) -> String {
     kv(super::MACHINES_BUCKET, machine)
 }
 
-/// Where `ants signer` puts the record of the machine holding the team's account key ([`super::AccountHolder`]).
+/// Where `ants signer` puts the record of the machine holding the bus's account key ([`super::AccountHolder`]).
 pub fn account_holder() -> String {
     kv(super::MACHINES_BUCKET, super::ACCOUNT_HOLDER_KEY)
 }

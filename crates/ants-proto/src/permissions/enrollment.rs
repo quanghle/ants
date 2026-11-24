@@ -1,5 +1,5 @@
 //! What the credentials that come before a user's own allow: an ant's enrollment credentials
-//! ([`Permissions::for_enrollment`]), and the team's public bootstrap credentials, for a human's new device
+//! ([`Permissions::for_enrollment`]), and the bus's public bootstrap credentials, for a human's new device
 //! ([`Permissions::for_bootstrap`]).
 
 use super::Permissions;
@@ -13,7 +13,7 @@ impl Permissions {
         Self { publish: vec![subject::enroll(ant)], subscribe: vec![subject::enroll_reply(ant)] }
     }
 
-    /// What the team's public bootstrap credentials allow (`ants auth bootstrap`): asking for the credentials of a
+    /// What the bus's public bootstrap credentials allow (`ants auth bootstrap`): asking for the credentials of a
     /// human's new device on [`subject::login`] and hearing the answers, nothing else, JetStream included.
     pub fn for_bootstrap() -> Self {
         Self {

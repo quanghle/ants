@@ -1,5 +1,5 @@
 //! Self-service registration of humans' devices, answered by `ants signer`: a machine running `ants login` asks with
-//! the team's public bootstrap credentials ([`LoginRequest`] on [`subject::login`](ants_proto::subject::login)), the
+//! the bus's public bootstrap credentials ([`LoginRequest`] on [`subject::login`](ants_proto::subject::login)), the
 //! signer runs a GitHub device flow for it ([`Github`]), tells the machine where to sign in, reads who signed in, and
 //! signs a human's credentials for the request's key when the GitHub user falls under the signer's `[registration]`
 //! policy and may hold the name asked for ([`binding`]). A user outside the policy waits for the humans: the signer
@@ -65,7 +65,7 @@ const SWEEP_PACE: Duration = Duration::from_secs(1);
 const SWEEP_RECHECK: Duration = Duration::from_mins(10);
 /// Requests of the GitHub API rate limit's window a membership sweep leaves to registrations and renewals.
 const SWEEP_RESERVE: u64 = 100;
-/// The record, in the team directory, of the names whose keys the signer revoked as their GitHub users left the
+/// The record, in the auth directory, of the names whose keys the signer revoked as their GitHub users left the
 /// registration policy: one [`Offboarded`] per line.
 ///
 /// [`Offboarded`]: offboard::Offboarded

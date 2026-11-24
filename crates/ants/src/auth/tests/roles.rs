@@ -343,7 +343,7 @@ async fn an_assistant_takes_no_act_readers_could_not_tell_from_its_human_s() {
     assert!(v.contains("Publish to \"ants.queue.dev-a\""), "only the plain subject is refused: {v}");
 }
 
-/// An assistant watches the team's traffic and keeps its own state as a human does, under its own name, and reads
+/// An assistant watches the bus's traffic and keeps its own state as a human does, under its own name, and reads
 /// its human's read markers but never moves them, nor sends as anyone else. Of another human it reads only the inbox
 /// marker, as any ant does.
 #[tokio::test]

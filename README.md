@@ -9,6 +9,7 @@ Headless coding agent teams across machines, communicating with each other and w
 Standalone coding agent CLIs run one session in one terminal on one machine. `ants` connects ACP (Agent Client Protocol) agents (`copilot`, `claude`, `codex`, `antigravity`, or custom harnesses) across machines over a shared NATS + JetStream bus:
 
 - **Durable collaboration:** persistent inboxes, multi-agent channels, passive thread notes, capability routing (`system-messenger`), and bounded agent-to-agent turn budgets that escalate up configured chains before interrupting humans.
+- **Teams:** named groups of ants and teams, each led by an ant, addressed as `@team` like an ant, a message to a team going to its lead; managed with `ants team`, and by leads through the `manage_team` MCP tool ([teams](docs/architecture.md#teams)).
 - **Isolation & guardrails:** per-thread git worktrees, role-scoped NKey/JWT credentials, end-to-end sealed human direct messages, tool allowlists and approvals, prompt and spend caps, and secret redaction.
 - **Resilient transport:** works over `wss://`, `tls://`, private Dev Tunnels, or an HTTP/1.1 fallback bridge (`ants bridge`), with optional per-machine store-and-forward leaf nodes for offline operation.
 - **Personal context & work:** built-in sense keeps private memories, fenced task claims, commitments and reminders; the active daemon delivers timed and condition-triggered wake-ups ([sense](docs/sense.md#work-and-reminders)). [Dreams](docs/sense.md#dreams) review recent work, track sage findings and their follow-ups, and proceed without a sage when no review is available.
@@ -99,7 +100,7 @@ ants                                                # full-screen chat with mous
 
 `ants setup --managed-nats` instead has `ants daemon` start, supervise and stop that `nats-server` itself, with no separate NATS service ([docs/operations.md](docs/operations.md#managed-nats-server)). `ants setup --web` adds a loopback WebSocket listener to that `nats-server`, taking only the page of `ants web`, which serves the web client from a release binary on `http://127.0.0.1:4280` ([docs/operations.md](docs/operations.md#websocket-listeners-for-pages), [the page](docs/operations.md#the-web-clients-page)).
 
-Join an existing team hub as a human using shared bootstrap credentials ([docs/auth.md](docs/auth.md#registering-humans)):
+Join an existing hub as a human using shared bootstrap credentials ([docs/auth.md](docs/auth.md#registering-humans)):
 
 ```sh
 ants login --hub wss://hub.example/nats --name alice --bootstrap bootstrap.creds

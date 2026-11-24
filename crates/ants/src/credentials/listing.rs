@@ -27,7 +27,7 @@ pub struct Listed {
     /// It expires within [`ants_daemon::secrets::creds::EXPIRY_WARNING`].
     pub expiring: bool,
     /// The commands that renew it, when it is in use (neither revoked, reissued, expired nor an enrollment's) and
-    /// outdated or expiring: from its `.creds` file in the team directory when there is one
+    /// outdated or expiring: from its `.creds` file in the auth directory when there is one
     /// ([`ants_daemon::secrets::creds::Finding::renew`]), else with placeholders for what only that file tells.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub renew: Vec<String>,
@@ -88,7 +88,7 @@ fn renew_without_file(issued: &Issued) -> Vec<String> {
     }]
 }
 
-/// What [`ants_daemon::secrets::creds`] finds in the `.creds` files in `dir` that the team's account signed.
+/// What [`ants_daemon::secrets::creds`] finds in the `.creds` files in `dir` that the bus's account signed.
 fn team_findings(dir: &Path) -> Result<Vec<ants_daemon::secrets::creds::Finding>> {
     let account = auth::account_key(dir)?;
     let entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;

@@ -199,7 +199,7 @@ pub fn check_leaf(account: &str, jwt: &str, machine: &Machine) -> Result<Claims>
 pub(super) fn leaf_claims(account: &str, jwt: &str, machine: &Machine) -> Result<(Claims, Value)> {
     let (claims, body) = verified_body(jwt)?;
     if claims.iss != account {
-        bail!("issued by {}, not by the team's account {account}", claims.iss);
+        bail!("issued by {}, not by the bus's account {account}", claims.iss);
     }
     if claims.name != leaf_user(machine) {
         bail!("issued to {}, not to the leaf node of {machine}", claims.name);

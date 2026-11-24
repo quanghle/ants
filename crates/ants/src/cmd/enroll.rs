@@ -16,7 +16,7 @@ pub(crate) enum EnrollCommand {
     /// List the enrollment requests heard, the latest of each ant and key; machines repeat theirs every few
     /// seconds while they wait.
     List {
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
@@ -44,18 +44,18 @@ pub(crate) enum EnrollCommand {
         /// With --webhook: a channel the webhook may post to (repeatable).
         #[arg(long = "channel", value_name = "CHANNEL", value_parser = channel::parse_channel, requires = "webhook")]
         channels: Vec<ChannelId>,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
     /// List the renewal requests heard (`ants renew`), the latest of each name and key, but those of credentials a
     /// registration granted (`ants login`), which `ants signer` renews.
     Renewals {
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
-    /// Renew the credentials NAME asks for (`ants renew`): valid, unrevoked credentials of the team, for the new key,
+    /// Renew the credentials NAME asks for (`ants renew`): valid, unrevoked credentials of the bus, for the new key,
     /// with the same name, kind, members, device and --js-domain, and the permissions their kind has in this version.
     /// With --auto, renew all credentials asking, as they ask, until stopped. Credentials a registration granted
     /// (`ants login`) are left to `ants signer`.
@@ -69,7 +69,7 @@ pub(crate) enum EnrollCommand {
         /// Keep running and renew all credentials whose holders ask, without approving each.
         #[arg(long, conflicts_with = "name")]
         auto: bool,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },
@@ -82,7 +82,7 @@ pub(crate) enum EnrollCommand {
         /// Reason shown to the asking machine.
         #[arg(long)]
         reason: Option<String>,
-        /// Team directory holding the signing keys (default: ~/.config/ants/auth).
+        /// Auth directory holding the signing keys (default: ~/.config/ants/auth).
         #[arg(long, env = "ANTS_AUTH_DIR")]
         dir: Option<PathBuf>,
     },

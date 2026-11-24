@@ -509,7 +509,7 @@ B7() {
     trap "hub ants auth revoke $human >/dev/null 2>&1 || true; hub pkill -f \"^ants login .* --name $human \" || true; hub rm -rf /demo/login-$t /demo/login-$t-2 /demo/log/login-$t.log /demo/log/login-$t.status /demo/log/login-$t-2.log /demo/log/login-$t-2.status || true" EXIT
     login_bg "/demo/login-$t" "login-$t" "$human"
     signs_in "login-$t" "$human" "$id" "$human@elsewhere.example"
-    eventually 60 login_said "login-$t" "waiting for a human of the team to approve"
+    eventually 60 login_said "login-$t" "waiting for a human of the bus to approve"
     eventually 60 has_signer_request "$human"
     out=$(alice tools list)
     printf '%s\n' "$out"

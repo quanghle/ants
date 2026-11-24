@@ -57,7 +57,7 @@ impl Server {
         .map(Self)
     }
 
-    /// A server trusting a fresh team on the layout from before the store account: the team's account holds
+    /// A server trusting a fresh team on the layout from before the store account: the bus's account holds
     /// JetStream itself ([`crate::auth::write_server_conf_before_store`]).
     pub(crate) fn start_before_store() -> Option<Self> {
         NatsServer::spawn_with(|dir| {

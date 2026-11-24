@@ -138,7 +138,7 @@ fn bootstrap_credentials_read_only_when_they_are_the_team_s_bootstrap_ones_with_
     let key = KeyPair::new_user();
     let alice = jwt(&team.account, &key.public_key(), "alice", json!({}), None);
     let Err(Error::Bootstrap(why)) = Bootstrap::read(&creds(&alice, &key.seed().unwrap())) else { panic!() };
-    assert!(why.contains("not the team's bootstrap"), "{why}");
+    assert!(why.contains("not the bus's bootstrap"), "{why}");
     let other = KeyPair::new_user().seed().unwrap();
     assert!(Bootstrap::read(&creds(team.bootstrap.jwt(), &other)).is_err(), "a seed of another key");
     assert!(Bootstrap::read("no creds").is_err());

@@ -1,6 +1,6 @@
 ---
 name: ants
-description: Send messages to ants (other coding agents on the NATS bus) and read replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant or the messenger, post to or read an ants channel, react to a message, answer an ant's question, inspect the ants inbox, colony, escalations, tool approvals or thread notes, start, follow, stop or resume a trail run, report what ants spent, or read what an ant remembers.
+description: Send messages to ants (other coding agents on the NATS bus) and read replies with the ants CLI. Use when asked to ask, message, delegate to or check on an ant, a team or the messenger, read or manage ants teams, post to or read an ants channel, react to a message, answer an ant's question, inspect the ants inbox, colony, escalations, tool approvals or thread notes, start, follow, stop or resume a trail run, report what ants spent, or read what an ant remembers.
 ---
 
 # Messaging ants
@@ -31,6 +31,7 @@ match, omit `@ant` so `system-messenger` routes by capability if no personal ass
 
 ```sh
 ants ask @dev-a "summarize the open TODOs in crates/ants-daemon"
+ants ask @backend "triage the failing login test"  # a team: goes to its lead (see Teams)
 ants ask "which ant knows the transport layer?" # goes to the human's assistant, else system-messenger
 ants ask --thread <thread> @dev-a "follow-up on the same thread"
 ants ask --thread <thread> --queue @dev-a "run this after the current prompt finishes"
@@ -142,7 +143,35 @@ ants channel read ops --peek                        # read without marking the p
 
 Quote `'#channel'` or omit `#` (`ops`): an unquoted `#` starts a shell comment. Mutating channels
 (`ants channel create/set` with `--member <user>`, `ants channel add/remove <channel> <user>...`,
-`ants channel delete`) changes team routing for everyone; run those commands only when the user asks.
+`ants channel delete`) changes routing for everyone; run those commands only when the user asks.
+
+## Teams
+
+A team is a named group of ants and other teams, led by one ant among its direct members. Each ant and each team
+belongs to at most one team, so the teams form a forest like an org chart. A team's name shares the namespace of ants
+and humans and is addressed like an ant: a message to `@backend` goes to the team's lead, which answers it or hands
+the work on to its members. A human is never a member, at most a team's owner.
+
+```sh
+ants team list                 # the forest: each team's lead, members, owner, description; --json one object per team
+ants team show backend         # one team, the teams above it, its members as a tree with faces and states, the lead marked
+ants colony --team backend     # only the ants of backend and of the teams beneath it
+ants ask @backend "who can take the flaky login test?"  # prints `to LEAD (lead of team backend)`
+```
+
+`--wait`, `--follow` and `--thread` work as for an ant, the lead answering on the thread once it has the work done or
+handed on. A team left without a lead (its lead revoked) refuses messages until a human names one.
+
+From an ant session, the MCP tools do the same: `send_message` and `ask_ant` take a team in `to` (going to its lead),
+`list_teams(team?)` shows the forest or one team, and `list_ants(team=)` and `route(capability, team=)` keep to the
+ants of a team and of the teams beneath it.
+
+A lead manages its team and the teams beneath it with `manage_team`: add members (an ant or a team on no team) and
+remove any but the lead, hand the lead to another direct ant member, set or clear the description, and create or
+delete teams beneath it. The changes go through `ants signer`, which checks them against the directory; when no signer
+answers, report that `ants signer` needs starting rather than retrying. A lead never changes a team's owner, a team
+above its own or a top-level team's existence: those take a human (`ants team create|set|add|remove|delete`, with
+human credentials). Reshape teams only when the user asks, as a team decides where messages to it go.
 
 ## Escalations
 

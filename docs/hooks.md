@@ -3,7 +3,7 @@
 External programs act on bus events as read-only **observer** NATS clients against the subjects and JSON schemas below (see [Versioning](#versioning)).
 
 ```sh
-ants auth user audit --observer --js-domain hub         # audit.creds, on the machine holding the team keys
+ants auth user audit --observer --js-domain hub         # audit.creds, on the machine holding the account keys
 ants hook run --creds audit.creds --js-domain hub --on dead-letter -- ./file-ticket.sh
 ```
 

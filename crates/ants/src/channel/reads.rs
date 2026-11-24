@@ -107,7 +107,7 @@ impl Unread {
     }
 }
 
-/// The unread posts of `channel` by `markers`, for `reader` at notify level `level`, the team's humans being
+/// The unread posts of `channel` by `markers`, for `reader` at notify level `level`, the bus's humans being
 /// `humans`, but for those on the threads `archive` leaves out: only those after what the marker has read up to are
 /// read from the stream.
 pub async fn unread(

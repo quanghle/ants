@@ -22,7 +22,7 @@ pub(crate) enum KeysCommand {
     Unstore { files: Vec<PathBuf> },
     /// Delete each credentials file and the seeds it keeps in the OS credential store. The credentials, and the live
     /// ones they were renewed from, stay valid until they expire: revoke them with `ants auth revoke --key KEY
-    /// --earlier` on the machine holding the team keys.
+    /// --earlier` on the machine holding the account keys.
     Remove { files: Vec<PathBuf> },
 }
 
@@ -59,7 +59,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: KeysCommand) -> Result<(
                 let finding = keys::remove(&path, store)?;
                 println!(
                     "{} removed; the credentials of {} stay valid until they expire: revoke them with \
-                     `ants auth revoke --key {} --earlier` on the machine holding the team keys",
+                     `ants auth revoke --key {} --earlier` on the machine holding the account keys",
                     path.display(),
                     finding.holder(),
                     finding.key

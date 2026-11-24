@@ -14,7 +14,7 @@ use crate::people::assistant;
 pub(crate) enum AssistantCommand {
     /// Create the human's dedicated assistant ant and designate it, in one step: its credentials naming the human
     /// (`ants auth user ANT --assistant-of HUMAN`), an [[ant]] working in its own home with an assistant's whoami and
-    /// no fetch or execute rules, and the grant; then reload the daemon. Needs the team's account key; run again,
+    /// no fetch or execute rules, and the grant; then reload the daemon. Needs the bus's account key; run again,
     /// it keeps what is in place and completes the rest.
     #[expect(rustdoc::broken_intra_doc_links, reason = "clap help text: brackets name config tables")]
     Enable(Box<assistant::EnableArgs>),

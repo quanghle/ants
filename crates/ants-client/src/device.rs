@@ -1,5 +1,5 @@
 //! A device of a human on a server with authentication, as a page of the web client is one: its credentials, the user
-//! JWT of its NKey, read and checked before they connect ([`Credentials`]); the team's public bootstrap credentials it
+//! JWT of its NKey, read and checked before they connect ([`Credentials`]); the bus's public bootstrap credentials it
 //! registers with ([`Bootstrap`]); its registration with `ants signer` as `ants login` asks for it
 //! ([`registration`]); and the renewal of its credentials before they expire ([`renewal`]).
 //!
@@ -37,7 +37,7 @@ pub enum Error {
          ants, whose page is to be loaded"
     )]
     NewerPermissions { theirs: PermissionsVersion, ours: PermissionsVersion },
-    /// The team's bootstrap credentials do not read.
+    /// The bus's bootstrap credentials do not read.
     #[error("the bootstrap credentials: {0}")]
     Bootstrap(String),
     /// What was asked for cannot be sent, and why.
@@ -158,7 +158,7 @@ impl Credentials {
         Some(issued_at + (expires_at - issued_at) * 2 / 3)
     }
 
-    /// The command that revokes the device, on the machine holding the team keys.
+    /// The command that revokes the device, on the machine holding the account keys.
     pub fn revoke_command(&self) -> String {
         format!("ants auth revoke --key {}", self.public_key)
     }
@@ -169,7 +169,7 @@ pub fn unauthenticated() -> Session {
     Session { human: UserId::human(), domain: None, account: None, name: CONNECTION_NAME.to_owned() }
 }
 
-/// The team's public bootstrap credentials (`ants auth bootstrap`), with which a device asks `ants signer` to register
+/// The bus's public bootstrap credentials (`ants auth bootstrap`), with which a device asks `ants signer` to register
 /// it. Their seed is public: the account's signature limits them to registration requests.
 #[derive(Clone)]
 pub struct Bootstrap {
@@ -188,7 +188,7 @@ impl Bootstrap {
         let key = KeyPair::from_seed(seed).map_err(|e| Error::Bootstrap(format!("the seed: {e}")))?;
         let (claims, _) = verified_jwt(jwt).map_err(|e| Error::Bootstrap(e.to_string()))?;
         if claims.name != ants_proto::BOOTSTRAP_USER {
-            return Err(Error::Bootstrap(format!("credentials of {}, not the team's bootstrap ones", claims.name)));
+            return Err(Error::Bootstrap(format!("credentials of {}, not the bus's bootstrap ones", claims.name)));
         }
         if claims.sub != key.public_key() {
             return Err(invalid("a seed of another key than their JWT's"));

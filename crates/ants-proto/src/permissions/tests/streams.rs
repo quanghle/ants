@@ -103,7 +103,7 @@ fn reverse_matched(allowance: &str, interest: &str) -> Option<bool> {
     Some(below[..below.len() - 1].iter().all(|t| *t != "*"))
 }
 
-/// The hub sends a leaf the interest of the streams in the team's account (one per subject the store account exports)
+/// The hub sends a leaf the interest of the streams in the bus's account (one per subject the store account exports)
 /// only if the leaf's uplink allows publishing a subject `ReverseMatch` finds under it, once it checks, as after an
 /// update of the account: for each one a member stores under, there is such a subject, whatever its role.
 #[test]

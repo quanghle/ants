@@ -25,13 +25,13 @@ pub async fn list(js: &jetstream::Context) -> Result<Vec<MachineRecord>> {
     Ok(sorted(records))
 }
 
-/// The machine holding the team's account key, as `ants signer` there last recorded it; None when no signer did.
+/// The machine holding the bus's account key, as `ants signer` there last recorded it; None when no signer did.
 pub async fn holder(js: &jetstream::Context) -> Result<Option<AccountHolder>> {
     let Some((_, payload)) = latest(js, &subject::account_holder()).await?.pop() else { return Ok(None) };
     Ok(Some(serde_json::from_slice(&payload).context("the record of the machine holding the account key")?))
 }
 
-/// Where the team's account key is, in words, from `holder` as of `now`: the machine, its host and how long ago
+/// Where the bus's account key is, in words, from `holder` as of `now`: the machine, its host and how long ago
 /// `ants signer` there recorded it.
 pub fn held_on(holder: &AccountHolder, now: chrono::DateTime<Utc>) -> String {
     let host = if holder.hostname.is_empty() { String::new() } else { format!(" (host {})", holder.hostname) };
@@ -84,7 +84,7 @@ pub async fn show(nats: &crate::connection::Nats<'_>, ant: Option<UserId>, json:
         println!("{}", table(&records, Utc::now()));
     }
     if !json && let Ok(Some(holder)) = holder(&js).await {
-        println!("the team's account key is on {}", held_on(&holder, Utc::now()));
+        println!("the bus's account key is on {}", held_on(&holder, Utc::now()));
     }
     Ok(())
 }

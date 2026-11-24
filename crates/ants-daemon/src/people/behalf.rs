@@ -43,12 +43,12 @@ impl Standing for Grants {
     }
 }
 
-/// The assistants' records in [`DEVICES_BUCKET`], verified for the team's account.
+/// The assistants' records in [`DEVICES_BUCKET`], verified for the bus's account.
 #[derive(Clone)]
 pub struct Records {
     js: jetstream::Context,
     js_domain: Option<JsDomain>,
-    /// The team's account (`A...`), the issuer of the reader's credentials; none: no record is taken.
+    /// The bus's account (`A...`), the issuer of the reader's credentials; none: no record is taken.
     account: Option<String>,
 }
 

@@ -1,10 +1,10 @@
-//! `ants auth backup` and `ants auth restore`: the team keys in one file encrypted with a passphrase ([`age`]), and
-//! the record of the last backup, which `ants doctor` compares the team directory with ([`state`]).
+//! `ants auth backup` and `ants auth restore`: the account keys in one file encrypted with a passphrase ([`age`]), and
+//! the record of the last backup, which `ants doctor` compares the auth directory with ([`state`]).
 //!
-//! The team keys (the operator, account, store account and system account seeds) live in files of the team directory,
-//! never in the OS credential store, which holds only user seeds ([`crate::credentials::keys`]): a backup takes them
-//! from there, with `server.conf`, `issued.jsonl` and `revoked.json`, and a restore writes them back there. Credentials
-//! files (`.creds`) stay out: `ants auth` issues them again.
+//! The account keys (the operator, account, store account and system account seeds) live in files of the auth
+//! directory, never in the OS credential store, which holds only user seeds ([`crate::credentials::keys`]): a backup
+//! takes them from there, with `server.conf`, `issued.jsonl` and `revoked.json`, and a restore writes them back there.
+//! Credentials files (`.creds`) stay out: `ants auth` issues them again.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,14 +20,14 @@ use crate::credentials::age;
 use crate::credentials::issued::ISSUED;
 use crate::credentials::revoke::REVOKED;
 
-/// The record of the last backup, in the team directory.
+/// The record of the last backup, in the auth directory.
 pub const RECORD: &str = "backup.json";
 /// The environment variable a passphrase may come from, for scripts.
 pub const PASSPHRASE_ENV: &str = "ANTS_BACKUP_PASSPHRASE";
 const FORMAT: u32 = 1;
 /// The seeds of the team, by file, with the first letter of their public keys.
 const SEEDS: [(&str, char); 4] = [(OPERATOR_SEED, 'O'), (ACCOUNT_SEED, 'A'), (STORE_SEED, 'A'), (SYSTEM_SEED, 'A')];
-/// The other files of the team directory a backup holds; the last two only once there.
+/// The other files of the auth directory a backup holds; the last two only once there.
 const FILES: [&str; 3] = [SERVER_CONF, ISSUED, REVOKED];
 
 /// What a backup file holds, encrypted.
@@ -36,19 +36,19 @@ struct Contents {
     ants_backup: u32,
     /// Seconds since the epoch.
     created_at: u64,
-    /// The public key of the team's account.
+    /// The public key of the bus's account.
     account: String,
     /// The text of each file, by name.
     files: BTreeMap<String, String>,
 }
 
-/// The last backup of a team directory, or the backup it was restored from.
+/// The last backup of an auth directory, or the backup it was restored from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     /// When the backup was made, seconds since the epoch.
     pub at: u64,
     pub file: PathBuf,
-    /// The public key of the team's account.
+    /// The public key of the bus's account.
     pub account: String,
     /// The public key of the store account; empty in the record of a backup made before there was one.
     #[serde(default)]
@@ -59,12 +59,12 @@ pub struct Record {
     pub revoked: String,
 }
 
-/// How the team directory stands against its last backup.
+/// How the auth directory stands against its last backup.
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
-    /// No backup of these team keys was made, or none recorded.
+    /// No backup of these account keys was made, or none recorded.
     None,
-    /// The last backup holds the team directory as it is.
+    /// The last backup holds the auth directory as it is.
     Current(Record),
     /// Keys were issued or revoked since the last backup.
     Behind {
@@ -78,12 +78,12 @@ pub enum State {
 /// `ants auth backup FILE`, with the passphrase from `passphrase_file`, [`PASSPHRASE_ENV`] or the terminal.
 pub fn run_backup(dir: &Path, file: &Path, passphrase_file: Option<&Path>) -> Result<()> {
     if !auth::holds_team(dir) {
-        bail!("no team keys in {}: back them up on the machine holding them, or give --dir", dir.display());
+        bail!("no account keys in {}: back them up on the machine holding them, or give --dir", dir.display());
     }
     let passphrase = passphrase(passphrase_file, Confirm::Twice)?;
     let record = backup(dir, file, &passphrase, age::WORK_FACTOR)?;
     println!(
-        "team keys of {} ({} issued.jsonl entries) backed up to {}: keep it off this machine, and the passphrase \
+        "account keys of {} ({} issued.jsonl entries) backed up to {}: keep it off this machine, and the passphrase \
          apart from it; `ants auth restore FILE` brings them back",
         dir.display(),
         record.issued,
@@ -101,7 +101,7 @@ pub fn run_restore(dir: &Path, file: &Path, passphrase_file: Option<&Path>, forc
     let passphrase = passphrase(passphrase_file, Confirm::Once)?;
     let record = restore(dir, file, &passphrase, existing)?;
     println!(
-        "team keys of account {} restored into {}, as backed up {} ({} issued.jsonl entries); keys issued and \
+        "account keys of account {} restored into {}, as backed up {} ({} issued.jsonl entries); keys issued and \
          revocations made since are not in it: revoke any such key again, and push the account with `ants auth push`",
         record.account,
         dir.display(),
@@ -111,7 +111,7 @@ pub fn run_restore(dir: &Path, file: &Path, passphrase_file: Option<&Path>, forc
     Ok(())
 }
 
-/// Back up the team keys of `dir` into `out`, encrypted with `passphrase` at scrypt's `work_factor` and readable by
+/// Back up the account keys of `dir` into `out`, encrypted with `passphrase` at scrypt's `work_factor` and readable by
 /// its owner only, and record the backup in `dir`.
 pub fn backup(dir: &Path, out: &Path, passphrase: &str, work_factor: u8) -> Result<Record> {
     check_passphrase(passphrase)?;
@@ -146,7 +146,7 @@ pub enum Existing {
     Replace,
 }
 
-/// Restore the team keys of the backup `file`, encrypted with `passphrase`, into `dir`, over the team files there
+/// Restore the account keys of the backup `file`, encrypted with `passphrase`, into `dir`, over the team files there
 /// or not as `existing` says; the backup then counts as the last one of `dir`.
 pub fn restore(dir: &Path, file: &Path, passphrase: &str, existing: Existing) -> Result<Record> {
     let encrypted = fs::read(file).with_context(|| format!("reading {}", file.display()))?;
@@ -157,7 +157,7 @@ pub fn restore(dir: &Path, file: &Path, passphrase: &str, existing: Existing) ->
     if contents.ants_backup > FORMAT {
         bail!("{} is a backup of a newer ants (format {}): upgrade ants", file.display(), contents.ants_backup);
     }
-    check_contents(&contents).with_context(|| format!("{} holds no team keys to restore", file.display()))?;
+    check_contents(&contents).with_context(|| format!("{} holds no account keys to restore", file.display()))?;
     if existing == Existing::Refuse {
         refuse_overwrite(dir)?;
     }
@@ -181,7 +181,7 @@ pub fn restore(dir: &Path, file: &Path, passphrase: &str, existing: Existing) ->
     Ok(record)
 }
 
-/// How the team directory `dir` stands against its last backup.
+/// How the auth directory `dir` stands against its last backup.
 pub fn state(dir: &Path) -> Result<State> {
     let path = dir.join(RECORD);
     let record: Record = match fs::read(&path) {
@@ -257,7 +257,7 @@ fn digest(text: Option<&str>) -> String {
 }
 
 /// Fail unless `contents` holds the seeds of an operator, the account it names, a store account and a system account,
-/// and the server.conf, and only files of a team directory.
+/// and the server.conf, and only files of an auth directory.
 fn check_contents(contents: &Contents) -> Result<()> {
     for name in contents.files.keys() {
         if !SEEDS.iter().any(|(seed, _)| seed == name) && !FILES.contains(&name.as_str()) {
@@ -268,7 +268,7 @@ fn check_contents(contents: &Contents) -> Result<()> {
         let seed = contents.files.get(name).with_context(|| format!("no {name}"))?;
         let key = KeyPair::from_seed(seed.trim()).map_err(|e| anyhow!("{name}: {e}"))?.public_key();
         if !key.starts_with(prefix) || (name == ACCOUNT_SEED && key != contents.account) {
-            bail!("{name} holds the key {key}, not that of the team's {}", name.trim_end_matches(".nk"));
+            bail!("{name} holds the key {key}, not that of the bus's {}", name.trim_end_matches(".nk"));
         }
     }
     contents.files.get(SERVER_CONF).with_context(|| format!("no {SERVER_CONF}"))?;
@@ -281,7 +281,7 @@ fn refuse_overwrite(dir: &Path) -> Result<()> {
         SEEDS.iter().map(|(name, _)| *name).chain(FILES).filter(|name| dir.join(name).exists()).collect();
     if !there.is_empty() {
         bail!(
-            "{} already holds team files ({}): restore over them with --force, after backing them up if they may be \
+            "{} already holds auth files ({}): restore over them with --force, after backing them up if they may be \
              needed",
             dir.display(),
             there.join(", ")

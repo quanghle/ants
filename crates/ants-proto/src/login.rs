@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DeviceKey, Error, UserId, subject};
 
-/// The `name` of the user JWT of the team's bootstrap credentials (`ants auth bootstrap`).
+/// The `name` of the user JWT of the bus's bootstrap credentials (`ants auth bootstrap`).
 pub const BOOTSTRAP_USER: &str = "bootstrap";
 
 /// The user JWT tag of credentials a registration granted, which `ants signer` signs and renews, not
@@ -151,7 +151,7 @@ impl LoginReply {
 pub enum LoginAnswer {
     /// Sign in to GitHub at `url` and enter `user_code` there, before `expires_at`.
     Verify { url: String, user_code: String, expires_at: DateTime<Utc> },
-    /// Signed in as GitHub user `login`, outside the registration policy: a human of the team decides.
+    /// Signed in as GitHub user `login`, outside the registration policy: a human of the bus decides.
     Waiting { login: String, reason: String },
     /// Refused, and why.
     Refused { reason: String },

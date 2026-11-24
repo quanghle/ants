@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- ants: the signer (`ants signer`), signing the credentials of the ants manager ants ask for: at once within the
      policy of the [[ant_template]] tables of its config file, on a human's approval otherwise. Run it on the machine
-     holding the team directory (~/.config/ants/auth), whose account key it signs with.
+     holding the auth directory (~/.config/ants/auth), whose account key it signs with.
      scripts/install-units.sh --signer fills in the @...@ placeholders and installs it as
      ~/Library/LaunchAgents/ants.signer.plist. Until the hub answers, the signer fails, and KeepAlive and
      ThrottleInterval start it again.

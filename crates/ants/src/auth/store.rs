@@ -1,4 +1,4 @@
-//! What the store account exports and the team's account imports, under the same names, so permissions name the
+//! What the store account exports and the bus's account imports, under the same names, so permissions name the
 //! subjects they always did.
 //!
 //! - As services: the JetStream API, plain and in any domain's form (`$JS.<domain>.API`, which the store account
@@ -53,7 +53,7 @@ pub(super) fn exports() -> Value {
     services.chain(streams).collect()
 }
 
-/// The `imports` of the team's account's JWT, from the store account `store`.
+/// The `imports` of the bus's account's JWT, from the store account `store`.
 pub(super) fn imports(store: &str) -> Value {
     let services = services().into_iter().map(|(subject, _)| (subject, "service"));
     let streams = STREAMS.iter().map(|subject| (*subject, "stream"));

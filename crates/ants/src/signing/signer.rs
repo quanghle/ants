@@ -22,7 +22,7 @@
 //!
 //! The signer trusts only what it can check itself: the request is signed by the manager's credentials of the team's
 //! account, and its template is read from the signer's own config file ([`config::signer_templates`]), never taken
-//! from the manager's machine. How many ants a template has is counted from the keys the team issued
+//! from the manager's machine. How many ants a template has is counted from the keys the bus issued
 //! ([`issued::Issued::template`]), live ones only.
 
 use ants_daemon::bus::relayed;
@@ -144,7 +144,7 @@ struct Waiting {
 }
 
 /// `ants signer`: answer the ant requests of manager ants ([`AntRequest`]) over the server at `url`, signing with the
-/// account key in the team directory `dir`, ants' reactions requests ([`reactions::serve`]), trail saves
+/// account key in the auth directory `dir`, ants' reactions requests ([`reactions::serve`]), trail saves
 /// ([`keeper::serve`]) and team changes ([`teams::keeper::serve`]), until `stop`
 /// completes. Each run connects afresh every
 /// [`Options::reconnect`], with credentials it issues itself, and reads the revocations again; the templates are read
@@ -345,7 +345,7 @@ impl Signer<'_> {
             return refuse(format!("{manager} was added from a template, and added ants never add ants"));
         }
         if let Some(other) = issued.iter().find(|i| i.name == name.as_str() && i.key != request.public_key) {
-            return refuse(format!("the team holds credentials named {name} already (key {})", other.key));
+            return refuse(format!("the bus holds credentials named {name} already (key {})", other.key));
         }
         let waiting = self.waiting.iter().filter(|w| w.request.manager == *manager).count();
         let templates = match config::signer_templates(self.options.config) {
@@ -556,7 +556,7 @@ impl Signer<'_> {
     }
 }
 
-/// Check that `request` is its manager's: signed by the manager's credentials of the team's account, unexpired and
+/// Check that `request` is its manager's: signed by the manager's credentials of the bus's account, unexpired and
 /// unrevoked, for a well-formed key, still waited for, and if it names a leaf node, signed by the leaf's uplink
 /// credentials too.
 fn check(approver: &Approver, request: &AntRequest) -> Result<()> {
@@ -568,7 +568,7 @@ fn check(approver: &Approver, request: &AntRequest) -> Result<()> {
     let manager = &request.manager;
     let claims = auth::verified(&request.credentials).context("the manager's credentials")?;
     if claims.iss != approver.account {
-        bail!("credentials issued by {}, not by the team's account", claims.iss);
+        bail!("credentials issued by {}, not by the bus's account", claims.iss);
     }
     if claims.name != manager.as_str() {
         bail!("credentials of {}, not of {manager}", claims.name);
@@ -595,7 +595,7 @@ fn check(approver: &Approver, request: &AntRequest) -> Result<()> {
 /// Revoke the live keys of ant `name`, added from a template (by `manager` when given), and write `server.conf`
 /// again ([`revoke::revoke`]); returns the keys revoked, none when none is live. Given the `key` of the ant's
 /// credentials, only it and the keys issued before it go (those it renewed): keys issued after it, for the ant added
-/// again, stay. Fails, revoking nothing, when the team never issued `key` (or with none, any key of `name`) for an ant
+/// again, stay. Fails, revoking nothing, when the bus never issued `key` (or with none, any key of `name`) for an ant
 /// added so, or holds live keys of `name` issued otherwise.
 pub fn revoke_added(
     dir: &Path,
@@ -609,18 +609,19 @@ pub fn revoke_added(
     let by = manager.map_or_default(|m| format!(" by {m}"));
     let issued = issued::issued(dir)?;
     let before = match key {
-        Some(key) => {
-            issued.iter().filter(|i| i.key == key && added(i)).map(|i| i.issued_at).max().with_context(|| {
-                format!("the team issued no key {key} of {name} as an ant added from a template{by}")
-            })?
-        }
+        Some(key) => issued
+            .iter()
+            .filter(|i| i.key == key && added(i))
+            .map(|i| i.issued_at)
+            .max()
+            .with_context(|| format!("the bus issued no key {key} of {name} as an ant added from a template{by}"))?,
         None if issued.iter().any(added) => u64::MAX,
-        None => bail!("the team issued no credentials of {name} as an ant added from a template{by}"),
+        None => bail!("the bus issued no credentials of {name} as an ant added from a template{by}"),
     };
     let live: Vec<issued::Issued> =
         live(dir)?.into_iter().filter(|i| i.name == name.as_str() && i.issued_at <= before).collect();
     if let Some(other) = live.iter().find(|i| !added(i)) {
-        bail!("the team holds credentials of {name} not issued for an ant added{by} (key {})", other.key);
+        bail!("the bus holds credentials of {name} not issued for an ant added{by} (key {})", other.key);
     }
     if live.is_empty() {
         return Ok(Vec::new());
@@ -629,7 +630,7 @@ pub fn revoke_added(
     revoke::revoke(dir, None, &keys)
 }
 
-/// The keys the team issued that are neither revoked nor expired.
+/// The keys the bus issued that are neither revoked nor expired.
 pub(crate) fn live(dir: &Path) -> Result<Vec<issued::Issued>> {
     let revoked: BTreeSet<String> = revoke::revoked(dir)?.into_iter().map(|r| r.key).collect();
     let now = auth::now()?;

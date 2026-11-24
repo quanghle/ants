@@ -516,7 +516,7 @@ pub fn schema() -> Value {
                     "required": ["kind", "id"]
                 }
             },
-            "external_ref": {"type": ["string", "null"], "description": "Team tracker reference; null clears it."},
+            "external_ref": {"type": ["string", "null"], "description": "Issue tracker reference; null clears it."},
             "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIMIT, "default": DEFAULT_LIMIT}
         }
     })

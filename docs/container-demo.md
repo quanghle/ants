@@ -1,6 +1,6 @@
 # Container demo
 
-A local three-node team in Linux containers, run by [Apple container](https://github.com/apple/container),
+A local three-node bus in Linux containers, run by [Apple container](https://github.com/apple/container),
 [Docker](https://docs.docker.com/engine/), [Podman](https://podman.io/) or
 [wslc](https://learn.microsoft.com/en-us/windows/wsl/wsl-container):
 
@@ -16,7 +16,7 @@ flowchart TD
 Each node is a separate Linux container (a VM of its own under Apple container) with its own NATS server, persistent volume, workdir, Copilot sign-in and
 one `ants daemon` serving exactly one ant. Every ant runs Copilot through its
 [native protocol](config.md#harness-protocols) (`protocol = "copilot-sdk"`) rather than ACP. The built-in messenger is disabled. The leaves use scoped NKey/JWT uplinks
-and local JetStream domains `leaf-a` and `leaf-b`. Only the hub holds the team signing keys. The demo human `human` is
+and local JetStream domains `leaf-a` and `leaf-b`. Only the hub holds the account signing keys. The demo human `human` is
 an [admin](auth.md#admins), and each node's daemon runs with
 [host credentials](auth.md#machine-host-credentials) for its machine (`hub`, `leaf-a`, `leaf-b`), so admin orders such as
 `ants ant pause`, `ants ant set` and `ants ant restart` reach every ant. Every ant keeps its memories, tasks and

@@ -289,8 +289,8 @@ impl Steps<'_> {
         }
     }
 
-    /// Issue the machine's host credentials where the daemon finds them, `host-<machine>.creds` in the team directory,
-    /// when the config file's ants have credentials, the team's keys are here and the daemon finds none.
+    /// Issue the machine's host credentials where the daemon finds them, `host-<machine>.creds` in the auth directory,
+    /// when the config file's ants have credentials, the account keys are here and the daemon finds none.
     async fn host_creds(&mut self) {
         let (connection, config) = (self.connection, &self.paths.config);
         let step = "host credentials";
@@ -310,7 +310,7 @@ impl Steps<'_> {
             Ok(dir) if auth::holds_team(&dir) => dir,
             _ => {
                 let hint = format!(
-                    "run `ants auth host {machine}` on the machine holding the team keys and copy the file to \
+                    "run `ants auth host {machine}` on the machine holding the account keys and copy the file to \
                      ~/.config/ants/auth/host.creds here, for the daemon to record the machine's ants"
                 );
                 return self.report.step(Mark::Skip, step, hint);

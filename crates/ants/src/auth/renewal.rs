@@ -73,7 +73,7 @@ pub(super) fn renew_as(
     let account = load(&dir.join(ACCOUNT_SEED))?;
     let (claims, body) = verified_body(current)?;
     if claims.iss != account.public_key() {
-        bail!("issued by {}, not by the team's account {}", claims.iss, account.public_key());
+        bail!("issued by {}, not by the bus's account {}", claims.iss, account.public_key());
     }
     if claims.sub == public_key {
         bail!("the new key {public_key} is the key of the credentials to renew; generate a new one");

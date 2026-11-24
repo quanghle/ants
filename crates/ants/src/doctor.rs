@@ -122,7 +122,7 @@ pub struct Setup {
     pub hub_config: PathBuf,
     /// Whether to start each harness for an ACP handshake.
     pub harnesses: bool,
-    /// The team directory of `ants auth`, whose system account key, when it is there, asks the hub how it keeps
+    /// The auth directory of `ants auth`, whose system account key, when it is there, asks the hub how it keeps
     /// pushed accounts.
     pub team: PathBuf,
     /// The config file of `ants webhook serve`, checked when it is there.
@@ -135,11 +135,11 @@ pub struct Setup {
 }
 
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
-/// buckets, the versions of ants running across the team, the JetStream storage, each ant's credentials, harness,
+/// buckets, the versions of ants running across the colony, the JetStream storage, each ant's credentials, harness,
 /// workdir, reactions responder, trail saves and team changes, the trail worker and the runs of trails stuck, the team
-/// directory, the hub's account resolver and store
-/// account, the team keys' backup, the leaf node and outbox, the installed services, the WebSocket listeners' origins, the
-/// webhooks' config file and notification sinks, and the Dev Tunnel and HTTPS bridge services installed.
+/// directory, the hub's account resolver and store account, the account keys' backup, the leaf node and outbox, the
+/// installed services, the WebSocket listeners' origins, the webhooks' config file and notification sinks, and the Dev
+/// Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
     let mut checks = Vec::new();
@@ -210,7 +210,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(check_runs(connected.as_ref(), chrono::Utc::now()).await);
     checks.extend(check_teams(connected.as_ref(), setup, chrono::Utc::now()).await);
     checks.push(resolver);
-    // After the CLI's connection, which has the hub load the team's account if no member connected yet.
+    // After the CLI's connection, which has the hub load the bus's account if no member connected yet.
     checks.push(check_store_account(setup, through_leaf).await);
     checks.extend(check_backup(&setup.team));
     let human = identity.as_ref().map(|i| &i.me).filter(|me| me.role.is_human() && !me.id.is_human());

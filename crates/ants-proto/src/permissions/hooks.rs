@@ -1,4 +1,4 @@
-//! What the credentials of hooks acting on the team's events from outside allow: a webhook's, delivering its events
+//! What the credentials of hooks acting on the bus's events from outside allow: a webhook's, delivering its events
 //! to its [`Destination`]s ([`Permissions::for_webhook`]), and an observer's, reading them
 //! ([`Permissions::for_observer`]).
 
@@ -74,7 +74,7 @@ impl Permissions {
         }
     }
 
-    /// What the read-only credentials of `observer` allow, for hooks that act on the team's events from outside
+    /// What the read-only credentials of `observer` allow, for hooks that act on the bus's events from outside
     /// (`ants auth user --observer`): reading every approval request, approval decision and dead letter from the
     /// stream through its own consumers ([`Feed::consumer`], each with its filter pinned in the subject that creates
     /// it), and hearing them live; hearing every ant's status ([`subject::status`]), escalations among them

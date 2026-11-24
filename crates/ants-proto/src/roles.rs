@@ -1,6 +1,6 @@
-//! Roles a user JWT carries as tags, which only the team's account key grants: a human who administers ants
+//! Roles a user JWT carries as tags, which only the bus's account key grants: a human who administers ants
 //! ([`AdminRole`]), and an ant that is a human's assistant ([`AssistantOf`]). A reader honours a role only from a user
-//! JWT it verifies itself ([`verify_user_jwt`]): signed by the team's account, unexpired, naming the user, and for an
+//! JWT it verifies itself ([`verify_user_jwt`]): signed by the bus's account, unexpired, naming the user, and for an
 //! act, with the act signed by the JWT's key ([`verify_admin`], [`verify_assistant_of`]). No I/O here: whether the
 //! JWT's key is revoked the caller checks, against the revocation records in [`DEVICES_BUCKET`] or the account's.
 
@@ -70,7 +70,7 @@ pub enum JwtError {
     InvalidIssuer { issuer: String, reason: String },
     #[error("JWT not signed by its issuer {0}")]
     NotSignedByIssuer(String),
-    #[error("signed by {0}, not by the team's account")]
+    #[error("signed by {0}, not by the bus's account")]
     ForeignAccount(String),
     #[error("not a user JWT")]
     NotUser,

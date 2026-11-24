@@ -1,4 +1,4 @@
-//! Short-lived and narrow credentials: an ant's enrollment, the team's public bootstrap, and the approver's, signer's
+//! Short-lived and narrow credentials: an ant's enrollment, the bus's public bootstrap, and the approver's, signer's
 //! and revoker's for one task.
 
 use std::fs;
@@ -34,7 +34,7 @@ pub fn issue_enrollment(dir: &Path, ant: &UserId, ttl: Duration, out: &Path) -> 
     Ok(exp)
 }
 
-/// Issue the team's public bootstrap credentials, valid for `ttl` (zero: with no expiry), and write their `.creds`
+/// Issue the bus's public bootstrap credentials, valid for `ttl` (zero: with no expiry), and write their `.creds`
 /// file to `out`, readable by all as they are meant to be shared: they may only ask `ants signer` to register a
 /// human's device and hear its answers ([`Permissions::for_bootstrap`]), with messages of at most
 /// [`ants_proto::BOOTSTRAP_MAX_PAYLOAD`] bytes. Returns their public key and when they expire, in seconds since the

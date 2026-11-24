@@ -390,7 +390,7 @@ async fn clients_on_a_leaf_node_reach_the_hub_stream_through_its_domain() {
 }
 
 /// A human whose CLI goes through a leaf node decides approval requests, the signer's included, on which nothing on
-/// the leaf subscribes: the hub's stream stores the decision, also once the hub took an update of the team's account,
+/// the leaf subscribes: the hub's stream stores the decision, also once the hub took an update of the bus's account,
 /// as a revocation pushes.
 #[tokio::test]
 async fn a_human_behind_a_leaf_node_stores_decisions_on_approval_requests() {

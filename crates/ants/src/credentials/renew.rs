@@ -9,7 +9,7 @@
 //! As with enrollment, requests are core NATS messages, repeated every [`ants_proto::ENROLL_REPEAT`] until an answer
 //! comes, and the answer carries only a JWT, useless without the seed that never leaves the holder. Only credentials
 //! still valid and not revoked may ask: expired ones cannot connect, and are issued again with `ants auth` on the
-//! machine holding the team keys.
+//! machine holding the account keys.
 //!
 //! The uplink credentials of a leaf node connect as no client: a human's credentials carry their request
 //! (`ants renew LEAF.creds --creds HUMAN.creds`).
@@ -47,7 +47,7 @@ pub(crate) fn device_xkey(path: &Path, finding: &Finding, store: &dyn Store) -> 
 }
 
 /// The claims and findings of `jwt`, the credentials at `path`, if they may ask for their renewal now; else an error
-/// naming how to renew them on the machine holding the team keys.
+/// naming how to renew them on the machine holding the account keys.
 pub(crate) fn renewable(path: &Path, jwt: &str) -> Result<(auth::Claims, Finding)> {
     let claims = auth::verified(jwt).with_context(|| path.display().to_string())?;
     let finding = Finding::from_jwt(jwt).with_context(|| path.display().to_string())?;
@@ -62,7 +62,7 @@ pub(crate) fn renewable(path: &Path, jwt: &str) -> Result<(auth::Claims, Finding
         _ => "expired, and expired credentials connect no more",
     };
     bail!(
-        "{} ({}) {why}: renew them on the machine holding the team keys, `{}`",
+        "{} ({}) {why}: renew them on the machine holding the account keys, `{}`",
         finding.holder(),
         path.display(),
         finding.renew().join("`, then `")

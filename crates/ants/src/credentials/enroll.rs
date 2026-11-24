@@ -9,7 +9,7 @@
 //! A machine behind a leaf node asks through the leaf's uplink, which carries enrollment requests and their answers
 //! ([`ants_proto::Permissions::for_leaf`]). Its request names the leaf ([`EnrollLeaf`]), signed with the uplink key, and
 //! the approval renews the leaf's uplink credentials to carry the ant too, keeps the ant among the leaf's members in
-//! the team directory ([`crate::node::members::enrolled`]), and admits the ant into the hub's stream from the leaf's
+//! the auth directory ([`crate::node::members::enrolled`]), and admits the ant into the hub's stream from the leaf's
 //! outbox ([`crate::node::outbox::admit_ant`]).
 //!
 //! A machine without host credentials asks for its own in the same request ([`HostAsk`], [`ants_proto::EnrollHost`]),

@@ -56,10 +56,10 @@ pub(crate) struct ConfigArgs {
     /// uplink credentials, when there).
     #[arg(long)]
     pub(crate) system_creds: Option<PathBuf>,
-    /// The team's server.conf from `ants auth init` (default: <dir>/server.conf).
+    /// The bus's server.conf from `ants auth init` (default: <dir>/server.conf).
     #[arg(long)]
     pub(crate) server_conf: Option<PathBuf>,
-    /// Team directory holding server.conf and the credentials (default: ~/.config/ants/auth).
+    /// Auth directory holding server.conf and the credentials (default: ~/.config/ants/auth).
     #[arg(long, env = "ANTS_AUTH_DIR")]
     pub(crate) dir: Option<PathBuf>,
     /// CA certificate of a hub the platform does not trust (tls:// and wss:// uplinks).

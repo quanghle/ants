@@ -1,4 +1,4 @@
-//! The team's account pushed to a server through its system account: [`push`] sends the JWTs of the accounts with
+//! The bus's account pushed to a server through its system account: [`push`] sends the JWTs of the accounts with
 //! their revocations, and [`push_and_report`] prints what was applied where, and how to apply it otherwise, as `ants
 //! auth push` does and every command that revokes credentials after it.
 
@@ -82,7 +82,7 @@ async fn update(
     }
 }
 
-/// A connection to the server at `url` as a short-lived user of the team's system account, signed with its key in
+/// A connection to the server at `url` as a short-lived user of the bus's system account, signed with its key in
 /// `dir`. A refusal leaves an [`async_nats::ConnectError`] in the error's chain.
 pub async fn connect_system(url: &str, dir: &Path) -> Result<async_nats::Client> {
     ants_daemon::bus::check_url(url)?;
@@ -129,7 +129,7 @@ fn answer(payload: &[u8]) -> (String, Option<String>) {
     (server, error)
 }
 
-/// Push the team's account to the server at `url` ([`push`]), saying how to apply it otherwise on failure;
+/// Push the bus's account to the server at `url` ([`push`]), saying how to apply it otherwise on failure;
 /// once it is applied, record in the hub's directory of encryption keys, in JetStream domain `domain` if it has one,
 /// the revoked keys of humans' credentials not recorded yet ([`devices::record_revocations`]).
 pub(crate) async fn push_and_report(url: &str, domain: Option<&JsDomain>, dir: &Path) -> Result<()> {

@@ -137,7 +137,7 @@ pub(super) fn unreached(
                 Some(finding) => finding.renew(),
                 None => vec!["ants auth user HUMAN --human, then --creds FILE".to_owned()],
             };
-            let detail = format!("{url} refused the credentials ({e}): revoked, expired or of another team");
+            let detail = format!("{url} refused the credentials ({e}): revoked, expired or of another bus");
             Check::fail(check, detail, fix)
         }
         Unreached::Unreachable(e) => match through_leaf {
@@ -367,7 +367,7 @@ pub(super) fn consumers(object: hub::Object, count: usize, limit: usize) -> Chec
 }
 
 /// Whether the hub keeps the accounts `ants auth push` sends it across restarts, as only a `full` resolver does
-/// ([`push::keeps_accounts`]): asked as a user of the team's system account, which only the machine holding the team
+/// ([`push::keeps_accounts`]): asked as a user of the bus's system account, which only the machine holding the team
 /// keys can sign.
 pub(super) async fn check_resolver(setup: &Setup, through_leaf: bool) -> Check {
     let check = "hub resolver";
@@ -400,13 +400,13 @@ pub(super) async fn check_resolver(setup: &Setup, through_leaf: bool) -> Check {
     }
 }
 
-/// A connection to the hub as a user of the team's system account, which only the machine holding the team keys can
+/// A connection to the hub as a user of the bus's system account, which only the machine holding the account keys can
 /// sign; else the `check` named `check` saying why there is none.
 async fn connect_hub_system(setup: &Setup, through_leaf: bool, check: &str) -> Result<async_nats::Client, Check> {
     let conf = setup.team.join(auth::SERVER_CONF);
     if !auth::holds_team(&setup.team) {
         let detail = format!(
-            "no team keys in {}: only the team's system account can ask, so run `ants doctor` where `ants auth` runs",
+            "no account keys in {}: only the bus's system account can ask, so run `ants doctor` where `ants auth` runs",
             setup.team.display()
         );
         return Err(Check::skip(check, detail));
@@ -431,8 +431,8 @@ async fn connect_hub_system(setup: &Setup, through_leaf: bool, check: &str) -> R
                 return Err(Check::skip(check, format!("connecting to {} as the system account: {e:#}", setup.nats)));
             }
             let detail = format!(
-                "{} refuses the team's system account ({e:#}): its server.conf is of another team or lacks \
-                 the team's system account, and `ants auth push` fails",
+                "{} refuses the bus's system account ({e:#}): its server.conf is of another bus or lacks \
+                 the bus's system account, and `ants auth push` fails",
                 setup.nats
             );
             Err(Check::warn(check, detail, vec![copy_server_conf(&conf, "reload it (SIGHUP)")]))
@@ -441,7 +441,7 @@ async fn connect_hub_system(setup: &Setup, through_leaf: bool, check: &str) -> R
 }
 
 /// Whether the hub keeps the team's streams and buckets in the store account, the only one with JetStream, and the
-/// team's account has none: asked, like [`check_resolver`], as a user of the team's system account.
+/// team's account has none: asked, like [`check_resolver`], as a user of the bus's system account.
 pub(super) async fn check_store_account(setup: &Setup, through_leaf: bool) -> Check {
     let check = "store account";
     let team = setup.team.display();
@@ -452,7 +452,7 @@ pub(super) async fn check_store_account(setup: &Setup, through_leaf: bool) -> Ch
         conf.display()
     );
     if auth::holds_team(&setup.team) && !auth::holds_store(&setup.team) {
-        let detail = format!("the team in {team} has no store account: it was made before there was one");
+        let detail = format!("the account keys in {team} hold no store account: it was made before there was one");
         return Check::fail(check, detail, vec![format!("ants auth init --dir {team}"), move_stores]);
     }
     let client = match connect_hub_system(setup, through_leaf, check).await {
@@ -462,14 +462,14 @@ pub(super) async fn check_store_account(setup: &Setup, through_leaf: bool) -> Ch
     };
     let server = client.server_info().server_name;
     let (Ok(account), Ok(store)) = (auth::account_key(&setup.team), auth::store_key(&setup.team)) else {
-        return Check::skip(check, format!("the team keys in {team} do not read"));
+        return Check::skip(check, format!("the account keys in {team} do not read"));
     };
     let ask = |key: String| account_jetstream(&client, key);
     let (account, store) = tokio::join!(ask(account), ask(store));
     match account {
         Ok(Some(true)) => {
             let detail = format!(
-                "the team's account holds JetStream on server {server}: it runs a server.conf from before the store \
+                "the bus's account holds JetStream on server {server}: it runs a server.conf from before the store \
                  account, through which no reply subject can name a stored subject"
             );
             return Check::fail(check, detail, vec![move_stores]);
@@ -477,14 +477,14 @@ pub(super) async fn check_store_account(setup: &Setup, through_leaf: bool) -> Ch
         Ok(Some(false)) => {}
         Ok(None) => {
             let detail =
-                format!("server {server} has not loaded the team's account: no member connected since it started");
+                format!("server {server} has not loaded the bus's account: no member connected since it started");
             return Check::skip(check, detail);
         }
-        Err(e) => return Check::skip(check, format!("server {server} did not tell about the team's account: {e}")),
+        Err(e) => return Check::skip(check, format!("server {server} did not tell about the bus's account: {e}")),
     }
     match store {
         Ok(Some(true)) => {
-            Check::ok(check, format!("server {server}: the store account holds JetStream, the team's none"))
+            Check::ok(check, format!("server {server}: the store account holds JetStream, the bus's account none"))
         }
         Ok(Some(false)) => Check::fail(
             check,
@@ -493,7 +493,7 @@ pub(super) async fn check_store_account(setup: &Setup, through_leaf: bool) -> Ch
         ),
         Ok(None) => Check::fail(
             check,
-            format!("server {server} knows no store account of the team: its streams and buckets cannot be reached"),
+            format!("server {server} knows no store account of the bus: its streams and buckets cannot be reached"),
             vec![copy_server_conf(&conf, "restart it")],
         ),
         Err(e) => Check::skip(check, format!("server {server} did not tell about the store account: {e}")),

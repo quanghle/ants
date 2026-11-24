@@ -35,6 +35,6 @@ fn a_team_made_before_the_store_account_gets_one_with_its_operator_and_revocatio
     assert_eq!(team["nats"]["limits"]["disk_storage"], 0, "{team}");
     assert!(team["nats"]["revocations"].get(&revoked[0].key).is_some(), "{team}");
     assert_eq!(preloaded(&conf, &store).unwrap()["nats"]["limits"]["disk_storage"], -1);
-    assert!(add_store(&dir).unwrap_err().to_string().contains("already holds a team with a store account"));
+    assert!(add_store(&dir).unwrap_err().to_string().contains("already holds account keys with a store account"));
     fs::remove_dir_all(dir).unwrap();
 }

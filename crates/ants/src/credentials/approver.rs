@@ -29,17 +29,17 @@ pub struct Approver {
     pub(crate) client: async_nats::Client,
     hub: async_nats::jetstream::Context,
     js_domain: Option<JsDomain>,
-    /// The team's account, which must have issued the credentials a request proves.
+    /// The bus's account, which must have issued the credentials a request proves.
     pub(crate) account: String,
-    /// User keys revoked in the team directory (`ants auth revoke`), whose credentials prove nothing.
+    /// User keys revoked in the auth directory (`ants auth revoke`), whose credentials prove nothing.
     pub(crate) revoked: HashSet<String>,
     pub(crate) listen: Duration,
-    /// The team directory, whose registry tells which credentials a registration granted.
+    /// The auth directory, whose registry tells which credentials a registration granted.
     pub(crate) dir: PathBuf,
 }
 
 impl Approver {
-    /// Connect to the server at `url`, signing the credentials with the account key in the team directory `dir`, for
+    /// Connect to the server at `url`, signing the credentials with the account key in the auth directory `dir`, for
     /// the hub's JetStream domain if it has one, and listen for `listen` each time requests are gathered.
     pub async fn connect(url: &str, dir: &Path, js_domain: Option<&JsDomain>, listen: Duration) -> Result<Self> {
         Self::connect_with(url, &auth::approver_creds(dir, js_domain)?, dir, js_domain, listen).await

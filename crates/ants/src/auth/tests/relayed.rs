@@ -1,7 +1,7 @@
 //! Messages a stream relayed: an ant stores a message under a key of its own and asks for it by a direct get naming a
 //! reply subject it may not publish to, where the stream sends it with the headers the ant stored. Likewise what the
 //! server itself answers such a subject with: the ack of a publish into a stream, or the status of a direct get finding
-//! nothing. The answer reaches the subject in the team's account, never the store account's, so no stream stores it;
+//! nothing. The answer reaches the subject in the bus's account, never the store account's, so no stream stores it;
 //! each reader hearing such a subject live refuses it.
 
 use ants_daemon::bus::relayed;

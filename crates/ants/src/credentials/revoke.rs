@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::issued::{ISSUED, Issued, Kind, issued, latest, record};
 use crate::auth;
 
-/// The revocations in the team directory.
+/// The revocations in the auth directory.
 pub const REVOKED: &str = "revoked.json";
 
 /// One revoked user key, an entry of [`REVOKED`].

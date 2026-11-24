@@ -3,7 +3,7 @@
 //!
 //! ```toml
 //! [registration]
-//! client_id = "Ov23li..."             # the team's GitHub OAuth App, with the device flow enabled
+//! client_id = "Ov23li..."             # the bus's GitHub OAuth App, with the device flow enabled
 //! orgs = ["acme"]                     # members of these organizations are signed at once
 //! teams = ["acme/core"]               # ... and of these teams, as org/team
 //! email_domains = ["acme.example"]    # ... and users with a verified email address in these domains
@@ -39,7 +39,7 @@ pub const GITHUB_API_URL: &str = "https://api.github.com";
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Registration {
-    /// The client id of the team's GitHub OAuth App, whose device flow `ants login` users go through.
+    /// The client id of the bus's GitHub OAuth App, whose device flow `ants login` users go through.
     pub client_id: String,
     /// GitHub organizations whose members are signed at once, lowercase.
     #[serde(default)]

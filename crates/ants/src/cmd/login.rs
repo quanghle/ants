@@ -49,7 +49,7 @@ pub struct LoginArgs {
     /// the hub.
     #[arg(long)]
     pub store_key: bool,
-    /// The team's public bootstrap credentials, from `ants auth bootstrap` (default:
+    /// The bus's public bootstrap credentials, from `ants auth bootstrap` (default:
     /// ~/.config/ants/auth/bootstrap.creds).
     #[arg(long, value_name = "FILE")]
     pub bootstrap: Option<PathBuf>,
@@ -148,7 +148,7 @@ pub fn device_page(github_url: &str) -> Result<String> {
 fn not_shown(page: &str) -> anyhow::Error {
     anyhow!(
         "the signer sent a sign-in page other than the device login page {page}: not shown; with a GitHub Enterprise \
-         Server, run `ants login` again with --github-url set to the server's URL as known to the team"
+         Server, run `ants login` again with --github-url set to the server's URL as known to the bus"
     )
 }
 
@@ -156,15 +156,15 @@ fn not_shown(page: &str) -> anyhow::Error {
 pub(crate) fn bootstrap_account(path: &Path) -> Result<String> {
     let get = || {
         format!(
-            "reading the bootstrap credentials {}: get the team's bootstrap.creds (`ants auth bootstrap` on the \
-             machine holding the team keys) and give --bootstrap FILE",
+            "reading the bootstrap credentials {}: get the bus's bootstrap.creds (`ants auth bootstrap` on the \
+             machine holding the account keys) and give --bootstrap FILE",
             path.display()
         )
     };
     let (jwt, _) = auth::read_creds(path).with_context(get)?;
     let finding = Finding::from_jwt(&jwt).with_context(get)?;
     if finding.kind != Kind::Bootstrap {
-        bail!("{} are the credentials of {}, not the team's bootstrap credentials", path.display(), finding.holder());
+        bail!("{} are the credentials of {}, not the bus's bootstrap credentials", path.display(), finding.holder());
     }
     Ok(auth::verified(&jwt).with_context(get)?.iss)
 }
@@ -222,7 +222,7 @@ async fn ask(
                         format!("sign in to GitHub at {page} and enter the code {user_code} (before {until})")
                     }
                     LoginAnswer::Waiting { login, reason } => {
-                        format!("signed in to GitHub as {login}: {reason}; waiting for a human of the team to approve")
+                        format!("signed in to GitHub as {login}: {reason}; waiting for a human of the bus to approve")
                     }
                 };
                 eprintln!("{line}");
@@ -296,7 +296,7 @@ async fn write(login: &Login<'_>, jwt: &str, key: &KeyPair, xkey: &XKey, store: 
     if let Ok(finding) = Finding::from_creds(&earlier) {
         eprintln!(
             "replaced the earlier credentials of {} (key {}) in {}: they stay valid until they expire, or \
-             `ants auth revoke --key {} --earlier` on the machine holding the team keys",
+             `ants auth revoke --key {} --earlier` on the machine holding the account keys",
             finding.holder(),
             finding.key,
             out.display(),

@@ -135,7 +135,7 @@ struct HumanBus {
     present: Present,
     /// The human's holds ([`NotifyPrefs`]).
     prefs: DirectKv,
-    /// The humans of the team, kept current while `_watching` lives.
+    /// The humans of the bus, kept current while `_watching` lives.
     humans: Registry,
     _watching: Watching,
     /// Where the notices held back are counted for a digest ([`HeldNotices`]); none without `digest`, or when the

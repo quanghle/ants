@@ -109,7 +109,7 @@ pub struct Threads {
     by_id: HashMap<ThreadId, Summary>,
     /// `--grep`'s text, lowercased.
     grep: Option<String>,
-    /// With `--escalated`, the team's humans.
+    /// With `--escalated`, the bus's humans.
     humans: Option<Humans>,
 }
 

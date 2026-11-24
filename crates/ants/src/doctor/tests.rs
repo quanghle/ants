@@ -673,8 +673,8 @@ async fn a_leaf_s_store_and_system_uplinks_pass_after_the_uplink_is_respelled() 
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// With the team keys, the hub is asked whether it keeps pushed accounts: a warning without a `full` resolver, and
-/// for a hub of another team, which refuses the system account.
+/// With the account keys, the hub is asked whether it keeps pushed accounts: a warning without a `full` resolver, and
+/// for a hub of another bus, which refuses the system account.
 #[tokio::test]
 async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory() {
     for full in [false, true] {
@@ -712,7 +712,7 @@ async fn the_hub_resolver_check_warns_of_a_hub_keeping_pushed_accounts_in_memory
         let other = Setup { team: hub.dir().join("other"), ..setup };
         let check = check_resolver(&other, false).await;
         assert_eq!(check.status, Status::Warn, "{check}");
-        assert!(check.detail.contains("refuses the team's system account"), "{check}");
+        assert!(check.detail.contains("refuses the bus's system account"), "{check}");
         let none = Setup { team: hub.dir().join("no-team"), ..other };
         assert_eq!(check_resolver(&none, false).await.status, Status::Skip);
     }
@@ -742,7 +742,7 @@ async fn the_store_account_check_fails_until_the_hub_keeps_jetstream_in_the_stor
     let (client, _js) = hub.connect(&human).await;
     let check = check_store_account(&setup(&hub), false).await;
     assert_eq!(check.status, Status::Fail, "{check}");
-    assert!(check.detail.contains("the team's account holds JetStream"), "{check}");
+    assert!(check.detail.contains("the bus's account holds JetStream"), "{check}");
     assert!(check.fix[0].contains("ants auth move-stores --store-dir DIR"), "{check}");
     assert_eq!(check_store_account(&setup(&hub), true).await.status, Status::Skip, "through the leaf node");
 
@@ -759,14 +759,14 @@ async fn the_store_account_check_fails_until_the_hub_keeps_jetstream_in_the_stor
     std::fs::remove_file(team.join(auth::STORE_SEED)).unwrap();
     let check = check_store_account(&setup(&hub), false).await;
     assert_eq!(check.status, Status::Fail, "{check}");
-    assert!(check.detail.contains("has no store account") && check.fix[0].starts_with("ants auth init"), "{check}");
+    assert!(check.detail.contains("hold no store account") && check.fix[0].starts_with("ants auth init"), "{check}");
 }
 
 #[test]
 fn the_backup_check_warns_until_a_backup_holds_every_key_issued() {
     let root = ants_test_support::scratch_dir("doctor-backup");
     let team = root.join("auth");
-    assert_eq!(check_backup(&team), None, "no team keys here");
+    assert_eq!(check_backup(&team), None, "no account keys here");
     auth::init(&team).unwrap();
     let check = check_backup(&team).unwrap();
     assert_eq!(check.status, Status::Warn, "{check}");

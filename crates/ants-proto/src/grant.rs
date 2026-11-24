@@ -1,7 +1,7 @@
 //! A human's designation of its assistant ant: an [`AssistantGrant`], signed by one of the human's devices and kept
 //! in [`HUMANS_BUCKET`] under [`assistant_grant_key`].
 //!
-//! - The grant carries the user JWT of the device's credentials, which the team's account signed, and the device's
+//! - The grant carries the user JWT of the device's credentials, which the bus's account signed, and the device's
 //!   signature of what it says ([`AssistantGrant::signed`]): a reader checks both against the account of its own
 //!   credentials ([`AssistantGrant::verify`]), so no one but a device of the human makes a grant the reader honours.
 //! - Clearing puts a signed withdrawal ([`AssistantGrant::assistant`] none) in its place, rather than deleting it, so
@@ -140,7 +140,7 @@ impl AssistantGrant {
 }
 
 /// Check that `signature` (base64url without padding) over `signed` was made by the credentials whose user JWT is
-/// `jwt`: a device of `human` the team's account `account` signed, not expired at `issued_at`. Returns the device and
+/// `jwt`: a device of `human` the bus's account `account` signed, not expired at `issued_at`. Returns the device and
 /// the public key (`U...`) that signed. For every record a human's device signs ([`AssistantGrant`],
 /// [`crate::Confirmations`], [`crate::PreAllow`]).
 pub(crate) fn device_signed(
@@ -154,7 +154,7 @@ pub(crate) fn device_signed(
     let jwt = UserJwt::verify(jwt).map_err(|e| GrantError::Signer(e.to_string()))?;
     let signer = |reason: String| Err(GrantError::Signer(reason));
     if jwt.iss != account {
-        return signer(format!("signed by {}, not by the team's account {account}", jwt.iss));
+        return signer(format!("signed by {}, not by the bus's account {account}", jwt.iss));
     }
     if jwt.name != human.as_str() {
         return signer(format!("named {}, not {human}", jwt.name));
@@ -276,7 +276,7 @@ impl UserJwt {
     }
 }
 
-/// The grants of the team's humans as a reader of [`HUMANS_BUCKET`] keeps them, fed each record as it reads or
+/// The grants of the bus's humans as a reader of [`HUMANS_BUCKET`] keeps them, fed each record as it reads or
 /// watches it ([`Grants::apply`]), so that a withdrawal holds from the moment the reader sees it.
 #[derive(Debug, Clone, Default)]
 pub struct Grants {
@@ -450,7 +450,7 @@ mod tests {
         assert_matches!(refused(&grant, "bob.assistant"), GrantError::ForeignKey { .. });
         let other_account = Team::new();
         let err = grant.verify("alice.assistant", &other_account.account(), now).unwrap_err().to_string();
-        assert!(err.contains("not by the team's account"), "{err}");
+        assert!(err.contains("not by the bus's account"), "{err}");
 
         let mut tampered = grant.clone();
         tampered.assistant = Some(p("pb"));

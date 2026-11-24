@@ -4,7 +4,7 @@
 //! no human asked again.
 //!
 //! The signer trusts neither the machine nor the order without checking both: the request must prove the machine's
-//! live host credentials of the team's account (a request failing that gets no answer, as an enrollment request
+//! live host credentials of the bus's account (a request failing that gets no answer, as an enrollment request
 //! failing its proof does), and the order must verify as an admin's ([`AdminOrder::verify`]) at the time the signer
 //! hears it, for that machine and the ant asked about: the ant an order adds or retires, or the clone a clone order
 //! names, never the ant it clones. An order adds one key only: another key asking on the same order is refused, and a
@@ -83,13 +83,13 @@ impl Ordered {
     }
 }
 
-/// The machine whose live host credentials of the team's account `request` proves, sent no further from `now` than
+/// The machine whose live host credentials of the bus's account `request` proves, sent no further from `now` than
 /// [`ORDER_CLOCK_SKEW`].
 fn host(approver: &Approver, request: &EnrollRequest, now: DateTime<Utc>) -> Result<Machine> {
     auth::check_user_key(&request.public_key)?;
     let claims = auth::verified(&request.enrollment).context("the host credentials")?;
     if claims.iss != approver.account {
-        bail!("credentials issued by {}, not by the team's account", claims.iss);
+        bail!("credentials issued by {}, not by the bus's account", claims.iss);
     }
     let CredsKind::Host { machine } = Finding::from_jwt(&request.enrollment)?.kind else {
         bail!("credentials of {}, not a machine's host credentials", claims.name);
@@ -103,7 +103,7 @@ fn host(approver: &Approver, request: &EnrollRequest, now: DateTime<Utc>) -> Res
     }
     let name = host_user(&machine);
     if !issued::issued(&approver.dir)?.iter().any(|i| i.key == claims.sub && i.kind == Kind::Host && i.name == name) {
-        bail!("host credentials of {machine} the team never issued");
+        bail!("host credentials of {machine} the bus never issued");
     }
     auth::check_signature(&claims.sub, &request.signed(), &request.signature).context("the host credentials")?;
     if (request.sent_at - now).abs() > ORDER_CLOCK_SKEW {
@@ -212,7 +212,7 @@ async fn add(
         bail!("the key {key} was issued to {} already", other.name);
     }
     if let Some(other) = live(dir)?.iter().find(|i| i.name == ant.as_str() && i.key != key) {
-        bail!("the team holds credentials named {ant} already (key {})", other.key);
+        bail!("the bus holds credentials named {ant} already (key {})", other.key);
     }
     let domain = Finding::from_jwt(&request.enrollment)?.js_domain;
     let leaf_jwt = match &request.leaf {
@@ -269,7 +269,7 @@ async fn retire(
             .filter(|i| i.key == key && i.name == ant.as_str() && matches!(i.kind, Kind::Ant | Kind::Assistant))
             .min_by_key(|i| i.issued_at)
     };
-    let asked = of_ant(key).with_context(|| format!("the team issued no key {key} of the ant {ant}"))?;
+    let asked = of_ant(key).with_context(|| format!("the bus issued no key {key} of the ant {ant}"))?;
     let mut first = asked;
     for _ in 0..issued.len() {
         match first.renewed_from.as_deref().and_then(of_ant) {

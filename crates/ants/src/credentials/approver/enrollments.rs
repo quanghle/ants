@@ -58,14 +58,14 @@ pub struct LeafApproved {
 }
 
 impl Approver {
-    /// Check that `request` proves its enrollment credentials of the team's account for its ant, unexpired, and if it
+    /// Check that `request` proves its enrollment credentials of the bus's account for its ant, unexpired, and if it
     /// names a leaf node, the leaf's uplink credentials.
     fn check(&self, request: &EnrollRequest) -> Result<()> {
         auth::check_user_key(&request.public_key)?;
         let signed = request.signed();
         let enrollment = auth::verified(&request.enrollment).context("the enrollment credentials")?;
         if enrollment.iss != self.account {
-            bail!("enrollment credentials issued by {}, not by the team's account", enrollment.iss);
+            bail!("enrollment credentials issued by {}, not by the bus's account", enrollment.iss);
         }
         let name = ants_proto::enrollment_user(&request.ant);
         if enrollment.name != name {
@@ -247,7 +247,7 @@ impl Approver {
         }
         if let Some(other) = live.iter().find(|i| i.name == name && i.kind == Kind::Host && i.key != key) {
             bail!(
-                "the team holds live host credentials of {machine} (key {}); revoke them first with `ants auth \
+                "the bus holds live host credentials of {machine} (key {}); revoke them first with `ants auth \
                  revoke --key {}` if the machine lost them",
                 other.key,
                 other.key
