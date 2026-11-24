@@ -3,9 +3,11 @@
 //! starts, then runs a turn for each `user` line it reads, streaming `step_update` events and ending the turn with one
 //! `result`. A session resumes with `--conversation <id>`; agy cannot fork one.
 //!
-//! agy takes per-run settings only as one `--settings` (the last given wins) and MCP servers only from files, so each
-//! session gets a private directory holding its settings (the definition's own `--settings` merged in) and, given to
-//! agy with `--add-dir`, `.agents/mcp_config.json` with ants' MCP servers; the directory goes with the session.
+//! agy takes per-run settings only as one `--settings` (the last given wins), and MCP servers, hooks and skills only
+//! from files, so each session gets a private directory holding its settings (the definition's own `--settings` merged
+//! in) and, given to agy with `--add-dir`, `.agents/mcp_config.json` with ants' MCP servers, `.agents/hooks.json` with
+//! the hook that steers the running turn ([`Steers`]) and `.agents/skills` with copies of the ant's skills; the
+//! directory goes with the session.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -32,7 +34,7 @@ use crate::sync::MutexExt as _;
 const AUTO_UPDATE: &str = "AGY_CLI_DISABLE_AUTO_UPDATE";
 
 /// The oldest agy whose headless stream-json this speaks.
-const OLDEST: [u64; 3] = [1, 5, 9];
+const OLDEST: [u64; 3] = [1, 5, 15];
 
 /// agy's tool permission modes (its `toolPermission` setting), which `mode` names.
 const MODES: &[&str] = &["request-review", "proceed-in-sandbox", "always-proceed", "strict"];
@@ -56,9 +58,6 @@ const OWN_FLAGS: &[&str] = &[
 
 /// How long an ants MCP server has to connect, and each of its tool calls to answer: `ask_ant` waits up to 30 minutes.
 const MCP_TIMEOUT_SECS: u64 = 31 * 60;
-
-/// How a `result` error begins that agy keeps reporting after a retry of the turn succeeded, and on every later turn.
-const STALE_RETRY: &str = "API error (attempt ";
 
 /// The error of a `result` agy prints instead of `init` when it is not signed in.
 const NOT_SIGNED_IN: &str = "authentication failed or timed out";
@@ -113,7 +112,8 @@ impl Native for Antigravity {
             fork: false,
             images: false,
             http_mcp: true,
-            steer: false,
+            // The hook taking steers in is a POSIX shell command.
+            steer: cfg!(unix),
         }
     }
 
@@ -275,8 +275,53 @@ fn mcp_config(open: &Open) -> Value {
     json!({ "mcpServers": config })
 }
 
+/// The command of agy's `PreInvocation` hook, run before each model call with the call's JSON on stdin: it moves the
+/// steer file in `dir` of the call's conversation away, so the translator finds it gone ([`take_back`]), and prints
+/// it, injecting its steps into the turn; else `{}`, injecting none.
+#[cfg(unix)]
+fn steer_hook(dir: &Path) -> String {
+    let dir = dir.display().to_string().replace('\'', r"'\''");
+    format!(
+        r#"d='{dir}'; id=$(sed -n 's/.*"conversationId": *"\([0-9A-Za-z-]*\)".*/\1/p'); f="$d/steer-$id.json"; if [ -n "$id" ] && mv -f "$f" "$f.$$" 2>/dev/null; then cat "$f.$$"; rm -f "$f.$$"; else echo '{{}}'; fi"#
+    )
+}
+
+/// Write `steers` to the steer file `file` for agy's hook to inject ([`steer_hook`]), whole or not at all.
+fn write_steers(file: &Path, steers: &[String]) -> std::io::Result<()> {
+    let steps: Vec<Value> = steers.iter().map(|text| json!({ "userMessage": text })).collect();
+    let written = file.with_extension("json.new");
+    std::fs::write(&written, json!({ "injectSteps": steps }).to_string())?;
+    std::fs::rename(written, file)
+}
+
+/// Take the steer file `file` back from agy's hook, removing it: whether the hook had not taken it.
+fn take_back(file: &Path) -> bool {
+    let back = file.with_extension("json.back");
+    let untaken = std::fs::rename(file, &back).is_ok();
+    if untaken {
+        let _ = std::fs::remove_file(back);
+    }
+    untaken
+}
+
+/// Copy directory `from` to `to`: its files and directories, not what its symbolic links point to.
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
 /// A directory only the daemon's user reads, removed when dropped: a session's settings and MCP servers, which carry
-/// the ant's token.
+/// the ant's token, its hook, steers and skills.
 struct Private(PathBuf);
 
 impl Private {
@@ -300,6 +345,33 @@ impl Private {
         written.map_err(|e| failed(format!("{}: writing {}: {e}", cli.name(), path.display())))?;
         Ok(path)
     }
+
+    /// The file agy's hook takes the steers of conversation `id` from.
+    fn steer_file(&self, id: &str) -> PathBuf {
+        self.0.join(format!("steer-{id}.json"))
+    }
+
+    /// Copy the skills of `skills`, each a directory holding a `SKILL.md`, to `.agents/skills` in it, replacing those
+    /// an earlier start copied: agy loads no skill through a symbolic link. A copy failing leaves the skill to the
+    /// brief.
+    fn copy_skills(&self, cli: &Cli, skills: &Path) {
+        let to = self.0.join(".agents/skills");
+        if let Err(e) = std::fs::remove_dir_all(&to)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(harness = cli.name(), error = %e, dir = %to.display(), "removing agy's skills");
+            return;
+        }
+        let entries = std::fs::read_dir(skills).into_iter().flatten().flatten();
+        for skill in entries.filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir())) {
+            if !skill.path().join("SKILL.md").is_file() {
+                continue;
+            }
+            if let Err(e) = copy_dir(&skill.path(), &to.join(skill.file_name())) {
+                tracing::warn!(harness = cli.name(), error = %e, skill = %skill.path().display(), "copying a skill for agy");
+            }
+        }
+    }
 }
 
 impl Drop for Private {
@@ -321,7 +393,33 @@ pub(crate) struct AgySession {
     running: tokio::sync::Mutex<Option<Running>>,
     /// Ends the prompt running.
     cancel: Mutex<Option<oneshot::Sender<()>>>,
-    _private: Private,
+    steers: Mutex<Steers>,
+    /// The ant's skills, copied for each start of agy.
+    skills: Option<PathBuf>,
+    private: Private,
+}
+
+/// The messages steering the prompt running ([`NativeSession::steer`]), in the session's steer file
+/// ([`Private::steer_file`]), which agy's `PreInvocation` hook ([`steer_hook`]) takes before agy's next model call,
+/// injecting them into the turn as user input. A turn ending before the hook took them runs them as a turn of its own,
+/// the prompt ending after it.
+#[derive(Debug, Default)]
+struct Steers {
+    /// Whether a prompt runs that takes steers: until it ends or is cancelled.
+    open: bool,
+    /// Those written to the steer file, unless the hook took them since.
+    written: Vec<String>,
+    /// Whether the last write of the steer file failed, leaving `written` out of it.
+    unwritten: bool,
+}
+
+impl Steers {
+    /// The steers agy has not taken, taken back from the steer file `file`.
+    fn reclaim(&mut self, file: &Path) -> Vec<String> {
+        let written = std::mem::take(&mut self.written);
+        let unwritten = std::mem::take(&mut self.unwritten);
+        if take_back(file) || unwritten { written } else { Vec::new() }
+    }
 }
 
 /// A running agy, and the events it prints.
@@ -359,6 +457,17 @@ impl AgySession {
         launch.push(settings.display().to_string());
         if !open.mcp_servers.is_empty() {
             private.write(cli, ".agents/mcp_config.json", &mcp_config(&open))?;
+        }
+        #[cfg(unix)]
+        {
+            let hook = json!({ "type": "command", "command": steer_hook(&private.0), "timeout": 5 });
+            private.write(cli, ".agents/hooks.json", &json!({ "ants": { "PreInvocation": [hook] } }))?;
+        }
+        let skills = open.skills.map(|skills| skills.dir);
+        if let Some(skills) = &skills {
+            private.copy_skills(cli, skills);
+        }
+        if cfg!(unix) || !open.mcp_servers.is_empty() || skills.is_some() {
             launch.extend(["--add-dir".to_owned(), private.0.display().to_string()]);
         }
         for (name, value) in [("--model", cli.model()), ("--effort", cli.effort())] {
@@ -375,7 +484,9 @@ impl AgySession {
             cwd: open.cwd,
             running: tokio::sync::Mutex::new(Some(running)),
             cancel: Mutex::default(),
-            _private: private,
+            steers: Mutex::default(),
+            skills,
+            private,
         })
     }
 }
@@ -456,8 +567,6 @@ struct Steps {
     total: u64,
     /// The tool calls seen.
     tools: ToolCalls,
-    /// An API error the turn has not answered after.
-    unanswered: bool,
 }
 
 impl Steps {
@@ -476,11 +585,7 @@ impl Steps {
                 if let Some(text) = step["text_delta"].as_str().filter(|text| !text.is_empty()) {
                     updates.message(text);
                 }
-                if step["state"] != "ACTIVE" {
-                    self.unanswered = false;
-                }
             }
-            Some("error_message") => self.unanswered = true,
             Some("tool" | "subagent") => self.tool(step, updates),
             _ => {}
         }
@@ -553,8 +658,8 @@ enum Outcome {
     Failed(String),
 }
 
-/// How the turn whose steps came to `steps` ended, by its `result`, `interrupted` telling whether it was cancelled.
-fn outcome(result: &Value, steps: &Steps, interrupted: bool) -> Outcome {
+/// How a turn ended, by its `result`, `interrupted` telling whether it was cancelled.
+fn outcome(result: &Value, interrupted: bool) -> Outcome {
     let error = result["error"].as_str().unwrap_or_default();
     if result["finished_reason"] == "interrupted" {
         if interrupted {
@@ -562,12 +667,15 @@ fn outcome(result: &Value, steps: &Steps, interrupted: bool) -> Outcome {
         }
         return Outcome::Failed(format!("agy was interrupted: {error}"));
     }
-    // After a retry that succeeded, agy reports the turn, and every later one, as failed with the retry's error.
-    let stale = error.starts_with(STALE_RETRY) && !steps.unanswered;
-    if result["status"] == "SUCCESS" || stale {
+    if result["status"] == "SUCCESS" {
         return Outcome::Ended(StopReason::EndTurn);
     }
     Outcome::Failed(error.to_owned())
+}
+
+/// The user line of a turn of `text`.
+fn user(text: &str) -> Value {
+    json!({ "event": "user", "message": { "content": text } })
 }
 
 impl NativeSession for AgySession {
@@ -578,20 +686,52 @@ impl NativeSession for AgySession {
     async fn prompt(&self, prompt: Vec<ContentBlock>, updates: Updates) -> Result<PromptResponse, Error> {
         let (cancel, cancelled) = oneshot::channel();
         *self.cancel.locked() = Some(cancel);
-        let done = self.prompted(&prompt_text(&prompt), &updates, cancelled).await;
-        self.cancel.locked().take();
-        done
+        self.steers.locked().open = true;
+        let _ended = Ended(self);
+        self.prompted(&prompt_text(&prompt), &updates, cancelled).await
+    }
+
+    async fn steer(&self, prompt: Vec<ContentBlock>) -> Result<bool, Error> {
+        let mut steers = self.steers.locked();
+        if !steers.open {
+            return Ok(false);
+        }
+        let file = self.private.steer_file(&self.id);
+        let mut written = steers.reclaim(&file);
+        written.push(prompt_text(&prompt));
+        if let Err(e) = write_steers(&file, &written) {
+            tracing::warn!(harness = self.cli.name(), error = %e, file = %file.display(), "writing a steer for agy");
+            // Refused, it runs after the prompt; those before it run as a turn of the prompt.
+            written.pop();
+            *steers = Steers { open: false, unwritten: !written.is_empty(), written };
+            return Ok(false);
+        }
+        steers.written = written;
+        Ok(true)
     }
 
     async fn cancel(&self) {
+        self.steers.locked().open = false;
         if let Some(cancel) = self.cancel.locked().take() {
             let _ = cancel.send(());
         }
     }
 }
 
+/// Ends the session's prompt however it ends: it takes no more steers, and those agy did not take are dropped.
+struct Ended<'a>(&'a AgySession);
+
+impl Drop for Ended<'_> {
+    fn drop(&mut self) {
+        self.0.cancel.locked().take();
+        *self.0.steers.locked() = Steers::default();
+        take_back(&self.0.private.steer_file(&self.0.id));
+    }
+}
+
 impl AgySession {
-    /// Run a turn of `text`, starting agy again on the conversation if a cancel or failure ended it.
+    /// Run a turn of `text`, starting agy again on the conversation, with the skills as they are now, if a cancel or
+    /// failure ended it.
     async fn prompted(
         &self,
         text: &str,
@@ -600,6 +740,9 @@ impl AgySession {
     ) -> Result<PromptResponse, Error> {
         let mut slot = self.running.lock().await;
         if slot.is_none() {
+            if let Some(skills) = &self.skills {
+                self.private.copy_skills(&self.cli, skills);
+            }
             let (running, id) = run(&self.cli, &self.launch, &self.cwd, Some(&self.id)).await?;
             if id != self.id {
                 return Err(failed(format!("agy did not resume conversation {}", self.id)));
@@ -626,8 +769,7 @@ impl AgySession {
         if cancelled.try_recv().is_ok() {
             return (Ok(PromptResponse::new(StopReason::Cancelled)), true);
         }
-        let line = json!({ "event": "user", "message": { "content": text } });
-        if running.writer.send(&line).await.is_err() {
+        if running.writer.send(&user(text)).await.is_err() {
             return (Err(running.process.exited().await), false);
         }
         let (mut steps, mut listening, mut interrupted) = (Steps::default(), true, false);
@@ -652,37 +794,56 @@ impl AgySession {
                 }
                 return (Err(running.process.exited().await), false);
             };
-            match event["event"].as_str() {
-                Some("step_update") => steps.step(&event["step_update"], updates),
-                Some("result") => return self.finish(running, &event["result"], &steps, interrupted).await,
-                _ => tracing::debug!(harness = self.cli.name(), ?event, "an agy event not translated"),
+            let result = match event["event"].as_str() {
+                Some("step_update") => {
+                    steps.step(&event["step_update"], updates);
+                    continue;
+                }
+                Some("result") => &event["result"],
+                _ => {
+                    tracing::debug!(harness = self.cli.name(), ?event, "an agy event not translated");
+                    continue;
+                }
+            };
+            self.denials(running, result);
+            let stop = match outcome(result, interrupted) {
+                Outcome::Ended(stop) => stop,
+                Outcome::Failed(error) => {
+                    // A failed turn ends agy, which says why on stderr too.
+                    let _ = running.process.exited().await;
+                    return (Err(failure(&error, &running.process.stderr())), false);
+                }
+            };
+            let untaken = if interrupted { Vec::new() } else { self.untaken() };
+            if untaken.is_empty() {
+                return (Ok(PromptResponse::new(stop).usage(steps.usage())), !interrupted);
+            }
+            if running.writer.send(&user(&untaken.join("\n\n"))).await.is_err() {
+                return (Err(running.process.exited().await), false);
             }
         }
     }
 
-    /// The response to a turn that ended with `result`, and whether the process serves the next turn.
-    async fn finish(
-        &self,
-        running: &mut Running,
-        result: &Value,
-        steps: &Steps,
-        interrupted: bool,
-    ) -> (Result<PromptResponse, Error>, bool) {
-        // agy denies at once what its permission settings would ask a human about, and ends the turn.
+    /// Warn of the actions agy denied by `result`: it denies at once what its permission settings would ask a human
+    /// about, and ends the turn.
+    fn denials(&self, running: &mut Running, result: &Value) {
         let denials = result["denied_actions"].as_array().map_or(&[][..], Vec::as_slice);
         for denied in denials.iter().skip(running.denied) {
             let (action, name) = (denied["action"].as_str(), denied["display_name"].as_str());
             deny_approval(&self.cli, &format!("{} ({})", action.unwrap_or("tool"), name.unwrap_or_default()));
         }
         running.denied = running.denied.max(denials.len());
-        match outcome(result, steps, interrupted) {
-            Outcome::Ended(stop) => (Ok(PromptResponse::new(stop).usage(steps.usage())), !interrupted),
-            Outcome::Failed(error) => {
-                // A failed turn ends agy, which says why on stderr too.
-                let _ = running.process.exited().await;
-                (Err(failure(&error, &running.process.stderr())), false)
-            }
+    }
+
+    /// At the end of a turn, the steers agy did not take into it, which then run as a turn of their own; with none,
+    /// the prompt takes no more.
+    fn untaken(&self) -> Vec<String> {
+        let mut steers = self.steers.locked();
+        let untaken = steers.reclaim(&self.private.steer_file(&self.id));
+        if untaken.is_empty() {
+            steers.open = false;
         }
+        untaken
     }
 }
 

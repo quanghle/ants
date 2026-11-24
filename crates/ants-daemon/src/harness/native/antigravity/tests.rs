@@ -1,4 +1,4 @@
-//! The antigravity translator against a stub of `agy`, its events as agy 1.5.9 prints them.
+//! The antigravity translator against a stub of `agy`, its events as agy 1.5.16 prints them.
 
 use std::assert_matches;
 use std::path::PathBuf;
@@ -14,7 +14,8 @@ use super::*;
 use crate::harness::native::Protocol;
 use crate::harness::native::tests::StubHarness;
 use crate::harness::{
-    Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, handshake, parse_definitions,
+    Harnesses, Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Skills, Spend, Steer, Steering, handshake,
+    parse_definitions,
 };
 use crate::limits::breaker::StartFailed;
 use crate::limits::overflow::ContextOverflow;
@@ -108,10 +109,29 @@ impl Agy {
         let args = self.cli.args(run);
         args.iter().position(|arg| arg == flag).and_then(|at| args.get(at + 1).cloned())
     }
+
+    /// The private directory of the session run `run` serves.
+    fn private(&self, run: usize) -> PathBuf {
+        PathBuf::from(self.arg(run, "--add-dir").expect("the session's directory added"))
+    }
 }
 
-fn user(text: &str) -> Value {
-    json!({ "event": "user", "message": { "content": text } })
+/// Run `prompt` on `session`, steering it with `text` at its first status update: the answer, and whether the prompt
+/// took the steer.
+async fn steered(session: &Session, prompt: &str, text: &str) -> (String, bool) {
+    let (ready, started) = oneshot::channel();
+    let (steer_tx, steers) = mpsc::channel(1);
+    let (progress, mut status) = mpsc::channel(16);
+    let prompt = Prompt { progress: Some(progress), steering: Some(Steering { ready, steers }), ..Prompt::new(prompt) };
+    let steer = async {
+        started.await.expect("agy takes steers");
+        status.recv().await;
+        let (accepted, took) = oneshot::channel();
+        steer_tx.send(Steer { text: text.to_owned(), accepted }).await.unwrap();
+        took.await.unwrap()
+    };
+    let (reply, took) = tokio::join!(session.run(prompt), steer);
+    (reply.unwrap().text, took)
 }
 
 #[tokio::test]
@@ -119,7 +139,7 @@ async fn an_agy_turn_streams_its_steps_and_runs_with_the_ant_settings() {
     let settings = r#"{"modelProvider":"gemini","permissions":{"allow":["command(git)"]}}"#;
     let table = format!("args = [\"--settings\", {settings:?}, \"--dangerously-skip-permissions\"]\nmode = \"strict\"");
     let agy = Agy::new("agy-turn", &table);
-    agy.version(1, "1.5.9");
+    agy.version(1, "1.5.16");
     let id = "c1";
     let command = json!({ "name": "run_command", "parameters": { "CommandLine": "touch x" } });
     let mut turn = vec![step(id, 0, "DONE", "user_input", json!({}))];
@@ -152,7 +172,7 @@ async fn an_agy_turn_streams_its_steps_and_runs_with_the_ant_settings() {
         .for_thread(&thread);
 
     let session = Session::start(&launch, None).await.unwrap();
-    let named = HarnessAgent { name: "agy".to_owned(), version: "1.5.9".to_owned() };
+    let named = HarnessAgent { name: "agy".to_owned(), version: "1.5.16".to_owned() };
     assert_eq!((session.agent(), session.id()), (Some(&named), SessionId::new(id)));
     let private = PathBuf::from(agy.arg(2, "--add-dir").expect("the session's directory added"));
     let written =
@@ -237,16 +257,16 @@ async fn an_agy_turn_streams_its_steps_and_runs_with_the_ant_settings() {
 async fn agy_resumes_its_conversations_and_a_cancel_interrupts_it() {
     let agy = Agy::new("agy-resume", "");
     let launch = agy.launch(ModelSettings::default());
-    agy.version(1, "1.5.9");
+    agy.version(1, "1.5.16");
     agy.session(2, &[vec![init("c1")]]);
     let resumed = Session::start(&launch, Some(SessionId::new("c1"))).await.unwrap();
     assert_eq!(resumed.id(), SessionId::new("c1"));
     resumed.close().await;
     assert_eq!(agy.arg(2, "--conversation").as_deref(), Some("c1"));
-    assert_eq!(agy.arg(2, "--add-dir"), None, "no MCP servers, no directory added");
+    assert!(agy.arg(2, "--add-dir").is_some(), "no MCP servers, the directory added for its hook");
 
     // agy opens a new conversation for an id it does not know; the session opens on it.
-    agy.version(3, "1.5.9");
+    agy.version(3, "1.5.16");
     agy.session(
         4,
         &[vec![init("c2")], vec![step("c2", 0, "ACTIVE", "agent_response", json!({ "text_delta": "Working" }))]],
@@ -277,6 +297,108 @@ async fn agy_resumes_its_conversations_and_a_cancel_interrupts_it() {
 }
 
 #[tokio::test]
+async fn steers_join_the_running_agy_turn_through_its_hook_or_run_after_it() {
+    let agy = Agy::new("agy-steer", "");
+    agy.version(1, "1.5.16");
+    agy.session(2, &[vec![init("c1")]]);
+    let session = Session::start(&agy.launch(ModelSettings::default()), None).await.unwrap();
+    let private = agy.private(2);
+    let hooks: Value =
+        serde_json::from_str(&std::fs::read_to_string(private.join(".agents/hooks.json")).unwrap()).unwrap();
+    let hook = &hooks["ants"]["PreInvocation"][0];
+    assert_eq!((&hook["type"], &hook["timeout"]), (&json!("command"), &json!(5)), "{hooks}");
+    let script = agy.dir.join("hook.sh");
+    std::fs::write(&script, hook["command"].as_str().unwrap()).unwrap();
+    // agy runs the hook before each model call of a conversation, the call's JSON on stdin; here into `hook.<n>`.
+    let call = |conversation: &str, n: usize| {
+        let input = json!({ "conversationId": conversation, "hookEventName": "PreInvocation", "invocationNum": 1 });
+        format!("!sh printf '%s' '{input}' | sh {} > {}", script.display(), agy.dir.join(format!("hook.{n}")).display())
+    };
+    let hooked = |n: usize| std::fs::read_to_string(agy.dir.join(format!("hook.{n}"))).unwrap();
+    let file = private.join("steer-c1.json");
+    let steer_written = format!("!sh while [ ! -f {} ]; do sleep 0.02; done", file.display());
+    let mut taken = vec![step("c1", 0, "DONE", "user_input", json!({}))];
+    taken.push(step("c1", 1, "ACTIVE", "agent_response", json!({ "text_delta": "Working" })));
+    taken.extend([steer_written.clone(), call("subagent", 0), call("c1", 1)]);
+    taken.push(step("c1", 2, "DONE", "user_input", json!({})));
+    taken.extend(reply("c1", 3, " on both"));
+    taken.push(result("c1", "SUCCESS", "Working\n on both\n", json!({})));
+    // A turn ending before the hook took the steer.
+    let mut ended = vec![step("c1", 4, "ACTIVE", "agent_response", json!({ "text_delta": "Again" })), steer_written];
+    ended.push(step("c1", 4, "DONE", "agent_response", json!({ "text_delta": "\n" })));
+    ended.push(result("c1", "SUCCESS", "Again\n", json!({})));
+    let mut own = vec![call("c1", 3)];
+    own.extend(reply("c1", 6, "Late"));
+    own.push(result("c1", "SUCCESS", "Late\n", json!({})));
+    agy.session(2, &[vec![init("c1")], taken, ended, own]);
+
+    assert_eq!(steered(&session, "go", "and this").await, ("Working on both\n".to_owned(), true));
+    assert_eq!(hooked(0), "{}\n", "a subagent's call takes no steer");
+    let injected: Value = serde_json::from_str(&hooked(1)).unwrap();
+    assert_eq!(injected, json!({ "injectSteps": [{ "userMessage": "and this" }] }));
+    assert!(!file.exists(), "taken once");
+
+    assert_eq!(steered(&session, "two", "late").await, ("Again\nLate\n".to_owned(), true), "one answer, both turns");
+    assert_eq!(hooked(3), "{}\n", "taken back for a turn of its own");
+    assert_eq!(agy.prompts(2), [user("go"), user("two"), user("late")]);
+    assert!(!file.exists());
+    session.close().await;
+}
+
+#[tokio::test]
+async fn agy_sessions_get_copies_of_the_ants_skills_at_each_start() {
+    let agy = Agy::new("agy-skills", "");
+    let skills = agy.dir.join(".sense/skills");
+    let skill = |name: &str| {
+        std::fs::create_dir_all(skills.join(name).join("scripts")).unwrap();
+        std::fs::write(skills.join(name).join("SKILL.md"), format!("---\nname: {name}\ndescription: Do.\n---\n"))
+            .unwrap();
+        std::fs::write(skills.join(name).join("scripts/run.sh"), "echo run\n").unwrap();
+    };
+    skill("deploy");
+    std::fs::create_dir_all(skills.join("draft")).unwrap();
+    let offered = Skills { dir: skills.clone(), plugin: agy.dir.join(".sense") };
+    let launch = agy.launch(ModelSettings::default()).with_skills(offered);
+    agy.version(1, "1.5.16");
+    let working = step("c1", 0, "ACTIVE", "agent_response", json!({ "text_delta": "Working" }));
+    agy.session(2, &[vec![init("c1")], vec![working]]);
+    agy.session(
+        3,
+        &[vec![init("c1")], [reply("c1", 2, "Back"), vec![result("c1", "SUCCESS", "Back\n", json!({}))]].concat()],
+    );
+    let session = Session::start(&launch, None).await.unwrap();
+    let copied = agy.private(2).join(".agents/skills");
+    let names = || {
+        let mut names: Vec<String> = std::fs::read_dir(&copied)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(), ["deploy"], "each skill a directory holding a SKILL.md");
+    assert_eq!(std::fs::read_to_string(copied.join("deploy/scripts/run.sh")).unwrap(), "echo run\n");
+    assert!(!std::fs::symlink_metadata(copied.join("deploy")).unwrap().is_symlink(), "agy follows no symbolic link");
+
+    // A cancel ends agy; started again, it gets the skills as they are then.
+    std::fs::remove_dir_all(skills.join("deploy")).unwrap();
+    skill("review");
+    let (stop, stopped) = oneshot::channel();
+    let (progress, mut status) = mpsc::channel(16);
+    let prompt = Prompt { stop: Some(stopped), progress: Some(progress), ..Prompt::new("go") };
+    let cancel = async {
+        status.recv().await;
+        stop.send("Stopped by a human".to_owned()).unwrap();
+    };
+    let (cut, ()) = tokio::join!(session.run(prompt), cancel);
+    assert_eq!(cut.unwrap().cut.as_deref(), Some("Stopped by a human"));
+    assert_eq!(session.prompt("again").await.unwrap(), "Back\n");
+    assert_eq!(agy.private(3), agy.private(2));
+    assert_eq!(names(), ["review"]);
+    session.close().await;
+}
+
+#[tokio::test]
 async fn a_signed_out_or_misconfigured_agy_fails_to_open_a_session() {
     let agy = Agy::new("agy-signin", "");
     let launch = agy.launch(ModelSettings::default());
@@ -293,7 +415,7 @@ async fn a_signed_out_or_misconfigured_agy_fails_to_open_a_session() {
         "!exit 1".to_owned(),
     ];
     for run in [1, 3] {
-        agy.version(run, "1.5.9");
+        agy.version(run, "1.5.16");
         agy.session(run + 1, std::slice::from_ref(&signed_out));
     }
     let checked = handshake(&launch).await;
@@ -303,26 +425,26 @@ async fn a_signed_out_or_misconfigured_agy_fails_to_open_a_session() {
     let signed_out = err.downcast_ref::<SignedOut>().expect("a sign-in error");
     assert_eq!((signed_out.harness.as_str(), signed_out.sign_in.as_deref()), ("agy", Some("agy")));
 
-    agy.version(5, "1.5.9");
+    agy.version(5, "1.5.16");
     let unknown = r#"invalid model selection (--model "nope" --effort ""): model nope is not recognized"#;
     agy.session(6, &[vec![refused(unknown), "!exit 1".to_owned()]]);
     let err = Session::start(&launch, None).await.err().expect("an unknown model");
     let failed = err.downcast_ref::<StartFailed>().expect("a start failure");
     assert!(failed.detail.contains("model nope is not recognized"), "{failed:?}");
 
-    agy.version(7, "1.5.9");
+    agy.version(7, "1.5.16");
     agy.session(8, &[lines(&["!stderr Error: --settings: unknown setting \"bogus\"", "!exit 1"])]);
     let Readiness::Failed { detail } = handshake(&launch).await.readiness else { panic!("a failing agy") };
     assert!(detail.contains("exited with exit status: 1: Error: --settings: unknown setting"), "{detail}");
 
-    agy.version(9, "agy 1.5.8");
+    agy.version(9, "agy 1.5.14");
     let Readiness::Failed { detail } = handshake(&launch).await.readiness else { panic!("an old agy") };
-    assert!(detail.contains("agy 1.5.8 is older than 1.5.9"), "{detail}");
+    assert!(detail.contains("agy 1.5.14 is older than 1.5.15"), "{detail}");
     assert_eq!(agy.cli.runs(), 9, "no session of an old agy");
 
-    agy.version(10, "1.5.9");
+    agy.version(10, "1.5.16");
     agy.session(11, &[vec![init("c1")]]);
-    assert_eq!(handshake(&launch).await.readiness, Readiness::Ready { agent: "agy 1.5.9".to_owned() });
+    assert_eq!(handshake(&launch).await.readiness, Readiness::Ready { agent: "agy 1.5.16".to_owned() });
 }
 
 #[tokio::test]
@@ -340,9 +462,9 @@ async fn agy_turn_errors_are_classified() {
     let quota = "agent executor error: generating and executing: Error 429, Message: You exceeded your current \
                  quota, please check your plan and billing details.\nPlease retry in 7h3m2s., Status: RESOURCE_EXHAUSTED";
     let reported = json!({ "status": "RESOURCE_EXHAUSTED", "error_code": 429, "code_kind": "http", "retryable": true });
-    agy.version(1, "1.5.9");
+    agy.version(1, "1.5.16");
     agy.session(2, &[vec![init("c1")], fatal(RATE_LIMITED, reported.clone())]);
-    agy.version(3, "1.5.9");
+    agy.version(3, "1.5.16");
     agy.session(4, &[vec![init("c1")], fatal(quota, reported)]);
     for (kind, retry_after) in [(LimitKind::RateLimit, None), (LimitKind::Quota, Some(Duration::from_secs(25_382)))] {
         let session = Session::start(&launch, None).await.unwrap();
@@ -356,7 +478,7 @@ async fn agy_turn_errors_are_classified() {
     let overflow = "agent executor error: generating and executing: Error 400, Message: The input token count \
                     (1100000) exceeds the maximum number of tokens allowed (1048576)., Status: INVALID_ARGUMENT";
     let reported = json!({ "status": "INVALID_ARGUMENT", "error_code": 400 });
-    agy.version(5, "1.5.9");
+    agy.version(5, "1.5.16");
     agy.session(6, &[vec![init("c1")], fatal(overflow, reported.clone())]);
     agy.session(7, &[vec![init("c2")], fatal(overflow, reported)]);
     let session = Session::start(&launch, None).await.unwrap();
@@ -364,34 +486,6 @@ async fn agy_turn_errors_are_classified() {
     assert!(err.downcast_ref::<ContextOverflow>().is_some(), "{err:#}");
     assert_eq!(agy.cli.runs(), 7, "retried in a new session");
     assert!(agy.prompts(7)[0]["message"]["content"].as_str().unwrap().contains("go"));
-}
-
-#[tokio::test]
-async fn a_retry_agy_recovered_from_is_no_failure() {
-    let agy = Agy::new("agy-stale", "");
-    let stale = format!("API error (attempt 1): {}", &RATE_LIMITED[RATE_LIMITED.find("Error 429").unwrap()..]);
-    let failing = json!({ "error": stale, "finished_reason": "error" });
-    let recovered = [
-        vec![step("c1", 1, "DONE", "error_message", json!({}))],
-        reply("c1", 2, "Hi"),
-        vec![result("c1", "ERROR", "Hi\n", failing.clone())],
-    ];
-    // Denied tools end the turn without a reply.
-    let denied = json!({ "error": stale, "denied_actions": [{ "action": "command", "display_name": "Bash" }] });
-    let blocks = [
-        vec![init("c1")],
-        recovered.concat(),
-        vec![result("c1", "ERROR", "", denied)],
-        [vec![step("c1", 4, "DONE", "error_message", json!({}))], vec![result("c1", "ERROR", "", failing)]].concat(),
-    ];
-    agy.version(1, "1.5.9");
-    agy.session(2, &blocks);
-    let session = Session::start(&agy.launch(ModelSettings::default()), None).await.unwrap();
-    assert_eq!(session.prompt("one").await.unwrap(), "Hi\n");
-    assert_eq!(session.prompt("two").await.unwrap(), "");
-    let err = session.prompt("three").await.unwrap_err();
-    assert_matches!(err.downcast_ref::<Limited>(), Some(Limited { kind: LimitKind::RateLimit, .. }), "{err:#}");
-    session.close().await;
 }
 
 #[tokio::test]
@@ -406,7 +500,7 @@ async fn an_api_key_refused_at_a_prompt_keeps_agy_signed_out_until_it_changes() 
         format!("!stderr AGY_ERROR: {reported}"),
         "!exit 3".to_owned(),
     ];
-    agy.version(1, "1.5.9");
+    agy.version(1, "1.5.16");
     agy.session(2, &[vec![init("c1")], refused]);
     let revoked = agy.launch_with_key("AIza-revoked", ModelSettings::default());
     let session = Session::start(&revoked, None).await.unwrap();
@@ -414,13 +508,13 @@ async fn an_api_key_refused_at_a_prompt_keeps_agy_signed_out_until_it_changes() 
     assert!(err.downcast_ref::<SignedOut>().is_some(), "{err:#}");
     session.close().await;
 
-    agy.version(3, "1.5.9");
+    agy.version(3, "1.5.16");
     let Readiness::SignedOut { detail } = handshake(&revoked).await.readiness else {
         panic!("signed out although agy opens a session with the refused key")
     };
     assert!(detail.contains("API key not valid") && detail.contains("GEMINI_API_KEY unchanged since"), "{detail}");
     assert_eq!(agy.cli.runs(), 3, "no agy started for a session");
-    agy.version(4, "1.5.9");
+    agy.version(4, "1.5.16");
     agy.session(5, &[vec![init("c2")]]);
     let replaced = agy.launch_with_key("AIza-replaced", ModelSettings::default());
     assert_matches!(handshake(&replaced).await.readiness, Readiness::Ready { .. });
@@ -450,17 +544,14 @@ fn agy_signs_in_with_the_api_key_where_its_settings_choose_gemini() {
 
 #[test]
 fn an_agy_turn_ends_as_its_result_says() {
-    let steps = Steps::default();
     let interrupted =
         json!({ "status": "ERROR", "response": "Hel", "error": "interrupted", "finished_reason": "interrupted" });
-    assert_eq!(outcome(&interrupted, &steps, true), Outcome::Ended(StopReason::Cancelled));
-    assert_eq!(outcome(&interrupted, &steps, false), Outcome::Failed("agy was interrupted: interrupted".to_owned()));
-    let stale = json!({ "status": "ERROR", "response": "", "error": "API error (attempt 2): Error 503" });
-    assert_eq!(outcome(&stale, &steps, false), Outcome::Ended(StopReason::EndTurn));
-    let unanswered = Steps { unanswered: true, ..Steps::default() };
-    assert_eq!(outcome(&stale, &unanswered, false), Outcome::Failed("API error (attempt 2): Error 503".to_owned()));
-    let fatal = json!({ "status": "ERROR", "response": "partial", "error": "agent executor error: boom" });
-    assert_eq!(outcome(&fatal, &steps, false), Outcome::Failed("agent executor error: boom".to_owned()));
+    assert_eq!(outcome(&interrupted, true), Outcome::Ended(StopReason::Cancelled));
+    assert_eq!(outcome(&interrupted, false), Outcome::Failed("agy was interrupted: interrupted".to_owned()));
+    let done = json!({ "status": "SUCCESS", "response": "Hi" });
+    assert_eq!(outcome(&done, false), Outcome::Ended(StopReason::EndTurn));
+    let fatal = json!({ "status": "ERROR", "response": "partial", "error": "API error (attempt 2): Error 503" });
+    assert_eq!(outcome(&fatal, false), Outcome::Failed("API error (attempt 2): Error 503".to_owned()));
 
     assert_eq!(failure("authentication failed or timed out", "").code, ErrorCode::AUTH_REQUIRED);
     assert_eq!(failure("Error 400, Message: API key not valid.", "").code, ErrorCode::AUTH_REQUIRED);

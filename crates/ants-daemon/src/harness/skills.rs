@@ -1,6 +1,6 @@
 //! The ant's confirmed sense skills, offered through each harness's own Agent Skills mechanism: Copilot CLI's skill
-//! directories, a Claude Code plugin and Codex's extra skill roots. Harnesses without a clean way to add a directory
-//! of skills see them only through the brief's index and `sense_skill`.
+//! directories, a Claude Code plugin, Codex's extra skill roots and copies in agy's session directory. Harnesses
+//! without a clean way to add a directory of skills see them only through the brief's index and `sense_skill`.
 
 use std::path::{Path, PathBuf};
 

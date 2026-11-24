@@ -46,7 +46,7 @@ flowchart LR
 - **Daemon:** `ants daemon` runs per-ant ACP session pools, exposes collaboration tools to each session over MCP, and acks JetStream deliveries only after replies are stored. A harness definition's `protocol` key can run a CLI on its native protocol instead, behind an in-process ACP translator ([harness protocols](docs/config.md#harness-protocols)).
 - **Humans, assistants & ants:** humans own threads, decide tool approvals (a rejection can carry a note telling the ant what to do instead), and converse through the CLI or `ants chat`; optional personal assistant ants triage queues under device-signed grants; capability-tagged worker ants collaborate within shared turn budgets.
 
-A message on a thread with a running prompt steers it: protocols `claude`, `codex` and `copilot-sdk` fold it into the running turn, while others cancel the prompt and run it next in the same session; `--queue` (or `/later` in `ants chat`) queues behind the running prompt instead, and an ant starts independent work on another thread with MCP `handoff` ([delivery](docs/architecture.md#pool-worktrees-and-at-least-once-retries)).
+A message on a thread with a running prompt steers it: protocols `claude`, `codex`, `copilot-sdk` and `antigravity` (not on Windows) fold it into the running turn, while others cancel the prompt and run it next in the same session; `--queue` (or `/later` in `ants chat`) queues behind the running prompt instead, and an ant starts independent work on another thread with MCP `handoff` ([delivery](docs/architecture.md#pool-worktrees-and-at-least-once-retries)).
 
 See [docs/architecture.md](docs/architecture.md) for the store/subject model, delivery loop, MCP tools, channels, and escalation mechanics.
 

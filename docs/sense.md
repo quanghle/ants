@@ -475,10 +475,12 @@ ant's workdir or repositories:
   has the Claude Agent ACP adapter load `.sense` as a local plugin (skills named `.sense:<name>`);
 - protocol `copilot-sdk` opens sessions with `.sense/skills` among their skill directories;
 - protocol `claude` starts Claude Code with `--plugin-dir` on `.sense`, as the adapter does;
-- protocol `codex` sets the app server's extra skill roots (`skills/extraRoots/set`) to `.sense/skills`.
+- protocol `codex` sets the app server's extra skill roots (`skills/extraRoots/set`) to `.sense/skills`;
+- protocol `antigravity` copies each skill into `.agents/skills` of the session's private directory, which agy works
+  in beside the workdir, as agy starts ([config.md](config.md#antigravity-protocol--antigravity)).
 
-`codex-acp` and Antigravity, whose skill directories lie only in the workspace or in configuration every ant shares,
-keep to the brief's list and `sense_skill`. The brief shows the persona after the identity ([Brief](#brief)).
+`codex-acp` and the ACP Antigravity (`agy acp`), whose skill directories lie only in the workspace or in configuration
+every ant shares, keep to the brief's list and `sense_skill`. The brief shows the persona after the identity ([Brief](#brief)).
 
 ## Resume registers and handoffs
 
