@@ -17,7 +17,7 @@
 //! Between prompts Claude Code runs turns of its own, as when a background command it started ends after the turn
 //! that started it: each is reported as it starts ([`control::Own`]) and its events are kept for the prompt taking it
 //! ([`NativeSession::take_own_turn`]), which streams and answers with them, a prompt coming first waiting for it to
-//! end.
+//! end. The events of a turn the report refuses are dropped, a prompt coming first still waiting for it to end.
 
 mod control;
 mod failure;
@@ -526,8 +526,8 @@ impl ClaudeSession {
     }
 
     /// Keep what the CLI sent between prompts in the stash: the events of each turn it ran of its own, the rest
-    /// dropped, such as a background task's notice. Waits for a turn of its own it still runs to end, unless it is
-    /// `own`, which the prompt takes as it runs.
+    /// dropped, such as a background task's notice or a turn the daemon refused. Waits for a turn of its own it still
+    /// runs to end, unless it is `own`, which the prompt takes as it runs.
     async fn settle(&self, events: &mut mpsc::UnboundedReceiver<Value>, own: Option<&str>) -> Result<(), Error> {
         loop {
             let event = match events.try_recv() {
@@ -545,11 +545,13 @@ impl ClaudeSession {
             };
             let mut stash = self.stash.locked();
             if event["type"] == OWN_TURN {
-                if stash.turns.len() >= STASHED {
-                    stash.turns.pop_front();
-                }
                 let id = event["id"].as_str().unwrap_or_default().to_owned();
-                stash.turns.push_back((id.clone(), VecDeque::new()));
+                if event["dropped"] != true {
+                    if stash.turns.len() >= STASHED {
+                        stash.turns.pop_front();
+                    }
+                    stash.turns.push_back((id.clone(), VecDeque::new()));
+                }
                 stash.current = Some(id);
                 continue;
             }

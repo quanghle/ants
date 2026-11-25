@@ -1,7 +1,8 @@
 //! The turns a harness runs of its own between prompts, such as Claude Code's as a background command it started ends
 //! after the turn that started it: its translator reports each as it starts ([`OwnTurns`]), the daemon prompts the
 //! ant on the thread with a message saying why, and that prompt takes the turn the harness runs rather than prompting
-//! anew, its key `ants/own_turn` in the `_meta` of `session/prompt` naming the turn ([`meta`]).
+//! anew, its key `ants/own_turn` in the `_meta` of `session/prompt` naming the turn ([`meta`]). The daemon may refuse
+//! a turn, as it does past a cap, the translator then dropping its events.
 
 use std::fmt;
 use std::sync::Arc;
@@ -22,8 +23,8 @@ pub struct OwnTurn {
     pub text: String,
 }
 
-/// Where the turns of its own a thread's harness starts go: the thread, and the turn.
-pub type OwnTurns = Arc<dyn Fn(&ThreadId, OwnTurn) + Send + Sync>;
+/// Where the turns of its own a thread's harness starts go: the thread, and the turn; whether a prompt is to take it.
+pub type OwnTurns = Arc<dyn Fn(&ThreadId, OwnTurn) -> bool + Send + Sync>;
 
 /// Where the turns of its own the harness of one thread starts go ([`OwnTurns`]).
 #[derive(Clone)]
@@ -37,10 +38,10 @@ impl OwnTurnReport {
         Self { thread, sink }
     }
 
-    /// Hand over `turn`.
-    pub(crate) fn send(&self, turn: OwnTurn) {
+    /// Hand over `turn`: whether a prompt is to take it, else its events are for no one.
+    pub(crate) fn send(&self, turn: OwnTurn) -> bool {
         tracing::info!(thread = %self.thread, turn = turn.id, why = turn.text, "the harness runs a turn of its own");
-        (self.sink)(&self.thread, turn);
+        (self.sink)(&self.thread, turn)
     }
 }
 

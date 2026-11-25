@@ -48,7 +48,8 @@ pub(super) const OWN_TURN: &str = "ants_own_turn";
 
 /// The turns Claude Code runs of its own between prompts, as it does once a background task it started ends after the
 /// turn that started it (`system/task_notification`) or a wakeup it scheduled comes: the reader reports each as it
-/// starts ([`OwnTurnReport`]) and puts a line of [`OWN_TURN`] before its events, for the prompt that takes it.
+/// starts ([`OwnTurnReport`]) and puts a line of [`OWN_TURN`] before its events, for the prompt that takes it, marked
+/// `dropped` when the report refused it.
 #[derive(Debug, Default)]
 pub(super) struct Own {
     /// Whether a prompt runs, or a fork's first message: the turns are then the prompt's.
@@ -127,16 +128,19 @@ impl Shared {
         own.open = Some(id.clone());
         let notices = std::mem::take(&mut own.notices);
         drop(own);
-        forward(events, json!({ "type": OWN_TURN, "id": id }));
         let text = if notices.is_empty() {
             "[ants] Claude Code started a turn of its own.".to_owned()
         } else {
             notices.iter().map(|notice| format!("[ants] {notice}")).collect::<Vec<_>>().join("\n")
         };
-        match &self.own_turns {
-            Some(report) => report.send(OwnTurn { id, text }),
-            None => tracing::debug!(harness = self.cli.name(), why = text, "Claude Code runs a turn of its own"),
-        }
+        let taken = match &self.own_turns {
+            Some(report) => report.send(OwnTurn { id: id.clone(), text }),
+            None => {
+                tracing::debug!(harness = self.cli.name(), why = text, "Claude Code runs a turn of its own");
+                true
+            }
+        };
+        forward(events, json!({ "type": OWN_TURN, "id": id, "dropped": !taken }));
     }
 
     /// Send control request `request` and await its response.

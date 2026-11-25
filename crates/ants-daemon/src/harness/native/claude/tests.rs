@@ -903,7 +903,7 @@ fn reporting_own_turns(native: &Fixture) -> (Launch, mpsc::UnboundedReceiver<(Th
     let launch = native
         .launch(ModelSettings::default())
         .with_own_turns(Arc::new(move |thread: &ThreadId, turn: crate::harness::OwnTurn| {
-            let _ = tx.send((thread.clone(), turn));
+            tx.send((thread.clone(), turn)).is_ok()
         }))
         .for_thread(&"t1".parse().unwrap());
     (launch, reported)
