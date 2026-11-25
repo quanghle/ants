@@ -300,24 +300,30 @@ async fn a_thread_out_of_turns_escalates_once_per_level_whatever_wakes_the_ant()
     assert_eq!(sent.iter().map(|(e, _)| &e.to).collect::<Vec<_>>(), [&p("alice")], "{sent:?}");
 }
 
+/// Stuck on a daily or pool cap, which 00:00 UTC renews, under message id `id`.
+fn stuck_on_daily_cap(id: &str) -> Stuck {
+    Stuck { daily: true, ..stuck_on(EscalationReason::Cap, id) }
+}
+
 #[tokio::test]
-async fn a_cap_escalation_left_unanswered_goes_out_again_the_next_utc_day() {
+async fn a_daily_cap_escalation_left_unanswered_goes_out_again_the_next_utc_day() {
     for chain in [&[][..], &["lead"]] {
         let (escalator, sent) = recording(chain);
-        let first = escalator.escalate(stuck_on(EscalationReason::Cap, "e-1")).await.unwrap();
+        let first = escalator.escalate(stuck_on_daily_cap("e-1")).await.unwrap();
         let sends = sent.lock().unwrap().len();
         assert!(sends >= 1, "{chain:?}");
-        escalator.escalate(stuck_on(EscalationReason::Cap, "e-2")).await.unwrap();
+        escalator.escalate(stuck_on_daily_cap("e-2")).await.unwrap();
         assert_eq!(sent.lock().unwrap().len(), sends, "the same day it waits, up {chain:?}");
 
         // A day later, still unanswered: the allowance renewed at 00:00 UTC was spent again.
         let mut pending = escalator.ledger.pending(&t()).await.unwrap().unwrap();
         pending.sent.as_mut().unwrap().day = "2000-01-01".to_owned();
         escalator.ledger.set_pending(&t(), Some(pending.clone())).await.unwrap();
-        // Out of turns rather than allowance, nothing came back at midnight: it still waits.
+        // Out of turns, or of a thread cap's allowance, nothing came back at midnight: it still waits.
         escalator.escalate(stuck_on(EscalationReason::TurnBudget, "e-3")).await.unwrap();
+        escalator.escalate(stuck_on(EscalationReason::Cap, "e-3b")).await.unwrap();
         assert_eq!(sent.lock().unwrap().len(), sends, "{chain:?}");
-        let again = escalator.escalate(stuck_on(EscalationReason::Cap, "e-4")).await.unwrap();
+        let again = escalator.escalate(stuck_on_daily_cap("e-4")).await.unwrap();
         assert_eq!(again, first, "the same members, at the same level, up {chain:?}");
         {
             let sent = sent.lock().unwrap();
@@ -325,11 +331,30 @@ async fn a_cap_escalation_left_unanswered_goes_out_again_the_next_utc_day() {
             assert_eq!(sent[sends].0.to, sent[0].0.to, "{chain:?}");
         }
         // And once that day.
-        escalator.escalate(stuck_on(EscalationReason::Cap, "e-5")).await.unwrap();
+        escalator.escalate(stuck_on_daily_cap("e-5")).await.unwrap();
         assert_eq!(sent.lock().unwrap().len(), 2 * sends, "{chain:?}");
         let stored = escalator.ledger.pending(&t()).await.unwrap().unwrap();
         assert_eq!(stored.escalation.level, pending.escalation.level, "{chain:?}");
         assert_ne!(stored.sent.unwrap().day, "2000-01-01", "{chain:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_thread_cap_escalation_left_unanswered_goes_out_once_whatever_the_day() {
+    for chain in [&[][..], &["lead"]] {
+        let (escalator, sent) = recording(chain);
+        escalator.escalate(stuck_on(EscalationReason::Cap, "e-1")).await.unwrap();
+        let sends = sent.lock().unwrap().len();
+        assert!(sends >= 1, "{chain:?}");
+
+        // A day later, still unanswered: midnight renews no thread cap, so asking again would say nothing new.
+        let mut pending = escalator.ledger.pending(&t()).await.unwrap().unwrap();
+        pending.sent.as_mut().unwrap().day = "2000-01-01".to_owned();
+        escalator.ledger.set_pending(&t(), Some(pending)).await.unwrap();
+        escalator.escalate(stuck_on(EscalationReason::Cap, "e-2")).await.unwrap();
+        assert_eq!(sent.lock().unwrap().len(), sends, "it still waits, up {chain:?}");
+        let stored = escalator.ledger.pending(&t()).await.unwrap().unwrap();
+        assert_eq!(stored.sent.unwrap().day, "2000-01-01", "{chain:?}");
     }
 }
 

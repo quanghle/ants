@@ -46,7 +46,7 @@ pub struct Pending {
     pub question: Option<Box<ants_proto::Questions>>,
     /// The message the escalation last went out under, if it went out at this level: the stuck ant escalating the
     /// thread again for want of turns or allowance, under another id, sends nothing more until the escalation is
-    /// answered, or, out of allowance, until the next UTC day.
+    /// answered, or, out of a daily or pool cap's allowance, until the next UTC day.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent: Option<Sent>,
 }

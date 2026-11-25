@@ -230,7 +230,7 @@ async fn an_answer_whose_escalation_a_full_store_refuses_is_sent_once_there_is_r
         assert!(stored_texts(&bus, &to_human).await.is_empty(), "no escalation stored while full");
         assert!(stored_texts(&bus, &to_dev_b).await.is_empty(), "no reply stored while full");
         let given = bus.marks.answered.given(&held).await.expect("the answer is kept on the machine");
-        assert_eq!(given.limit.as_deref(), Some(cap));
+        assert_eq!(given.limit.as_ref().map(|l| l.why.as_str()), Some(cap));
         assert_eq!(bus.consumer().await.num_redelivered, 0, "in hand, not redelivered");
 
         free(&bus.js).await;
@@ -297,7 +297,7 @@ async fn a_joined_prompt_a_full_store_refuses_the_outcome_of_is_settled_once_the
         assert_eq!(log.locked().prompted, 1, "neither message prompted again");
         assert!(bus.marks.answered.unsent(&first).await.is_some(), "the notice is kept on the machine");
         let given = bus.marks.answered.given(&joining).await.expect("the answer is kept on the machine");
-        assert_eq!((given.limit.as_deref(), given.title.as_deref()), (Some(cap), Some("Fix the build")));
+        assert_eq!((given.limit.map(|l| l.why), given.title.as_deref()), (Some(cap.to_owned()), Some("Fix the build")));
 
         free(&bus.js).await;
         bus.until_acked(seq).await;

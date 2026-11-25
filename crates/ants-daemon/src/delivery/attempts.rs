@@ -349,7 +349,7 @@ pub struct Given {
     pub text: String,
     /// The limit or cap the prompt reached, escalated with the reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<String>,
+    pub limit: Option<crate::limits::caps::Limit>,
     /// Why the turn sends no reply, if it sends none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unanswered: Option<(NoReplyWhy, Option<String>)>,
