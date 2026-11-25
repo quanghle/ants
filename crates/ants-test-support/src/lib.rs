@@ -300,7 +300,8 @@ pub fn executable(path: &Path, contents: &str) {
 /// `<stub>.script`: block 0 when it starts, then block N after reading its Nth line of input, until its input ends. A
 /// line of a block is printed to stdout as it is, except `!stderr TEXT`, printed to stderr, `!echo TEXT`, which prints
 /// the line just read with its first character replaced by TEXT, `!sleep SECONDS`, `!sh COMMAND`, which runs a shell
-/// command on no input, and `!exit CODE`, which ends the run. Blocks are separated by `---` lines. The run records its
+/// command on no input, `!bg COMMAND`, which starts one in the background, a child of the stub, with neither input nor
+/// output, and `!exit CODE`, which ends the run. Blocks are separated by `---` lines. The run records its
 /// input lines, its arguments, its environment and its working directory beside the stub ([`StubCli::received`],
 /// [`StubCli::args`], [`StubCli::env`], [`StubCli::cwd`]), and the end of its input ([`StubCli::ended`]).
 #[cfg(unix)]
@@ -329,6 +330,7 @@ play() {
         '!echo '*) printf '%s%s\n' "${line#!echo }" "${input#?}" ;;
         '!sleep '*) sleep "${line#!sleep }" ;;
         '!sh '*) sh -c "${line#!sh }" < /dev/null ;;
+        '!bg '*) sh -c "${line#!bg }" < /dev/null > /dev/null 2>&1 & ;;
         *) printf '%s\n' "$line" ;;
         esac
     done < "$stub.block.$run"
