@@ -927,7 +927,10 @@ then notes on stderr the tokens the human's summaries spent this UTC day, as the
 an overlay. With `summaries = "ahead"` (and `summary_daily_tokens` above 0), `ants chat` also asks for the TL;DR of
 each thread its work view lists whose TL;DR is missing or older than its last entry, one request at a time, and stops
 for the UTC day once the human's summaries spent `summary_daily_tokens` that day; a config with `ahead` and no daily
-tokens fails to load. No service generates summaries on its own.
+tokens fails to load. A summary ant whose harness or a fallback reports no tokens (by its definition's `reports`, as
+for [spending caps](#prompt-limits-and-spending-caps)) never reaches `summary_daily_tokens`, so `ants chat` asks ahead
+without bound: where the config file serves the summary ant, `ants doctor` warns of it as `cli summaries`, naming the
+harness. No service generates summaries on its own.
 
 ## Prompt limits and spending caps
 
