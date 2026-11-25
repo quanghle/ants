@@ -16,7 +16,7 @@ use crate::limits::signin::{self, SignIn};
 use crate::monitoring::status;
 use crate::sync::MutexExt as _;
 
-use super::{Inbox, Incoming, mcp_sign_in};
+use super::{Inbox, Incoming, mcp_sign_in, own_turn};
 
 /// What holds the messages while the ant's own harness cannot answer, and the sign-ins to MCP servers to tell.
 #[derive(Default)]
@@ -31,6 +31,8 @@ pub(super) struct Holds {
     pub(super) failover: Failover,
     /// The sign-ins to MCP servers the harness's sessions made as they opened, until told.
     pub(super) mcp_sign_ins: mcp_sign_in::Untold,
+    /// The turns of its own the harness runs, until the prompts of their messages take them.
+    pub(super) own_turns: own_turn::OwnTurns,
     /// Whether messages wait in hand for the hub to store what they need, holding the messages.
     pub(super) stall: Stall,
     /// The messages never to be answered whose dead letter waits in hand for the hub.

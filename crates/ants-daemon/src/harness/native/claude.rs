@@ -13,12 +13,17 @@
 //! ([`super::approve`]). Cancel is Claude Code's `interrupt`, dropping the steers queued behind the turn where Claude
 //! Code can ([`CANCEL_QUEUED`]); the process is killed when the turn does not end within [`INTERRUPT_GRACE`]. Another
 //! model is selected with `set_model` and another reasoning effort with `apply_flag_settings` (`effortLevel`).
+//!
+//! Between prompts Claude Code runs turns of its own, as when a background command it started ends after the turn
+//! that started it: each is reported as it starts ([`control::Own`]) and its events are kept for the prompt taking it
+//! ([`NativeSession::take_own_turn`]), which streams and answers with them, a prompt coming first waiting for it to
+//! end.
 
 mod control;
 mod failure;
 mod turn;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,7 +36,7 @@ use anyhow::bail;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
 
-use self::control::{Shared, control_request, read};
+use self::control::{OWN_TURN, Shared, control_request, read};
 use self::failure::{ended, error_text};
 use self::turn::{Turn, token_counts, window};
 use super::io::{older, probe_version};
@@ -89,6 +94,9 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
 
 /// How long a closed session's CLI has to exit, writing its cost totals to the transcript, before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// The most turns the CLI ran of its own whose events are kept for the prompts yet to take them.
+const STASHED: usize = 8;
 
 pub(crate) struct Claude {
     cli: Cli,
@@ -286,6 +294,8 @@ impl Claude {
             process: tokio::sync::Mutex::new(Some(process)),
             pending: Mutex::new(Some(HashMap::new())),
             requests: AtomicU64::new(0),
+            own: Mutex::default(),
+            own_turns: open.own_turns.clone(),
         });
         let reader = tokio::spawn(read(JsonLines::new(stdout), shared.clone(), events));
         let session = ClaudeSession {
@@ -300,6 +310,7 @@ impl Claude {
             spent: Mutex::new(Spent::from(base)),
             steers: Mutex::default(),
             cancel_queued: self.cancel_queued.clone(),
+            stash: Mutex::default(),
         };
         let hello = session.shared.control(json!({ "subtype": "initialize", "hooks": null })).await?;
         if no_credentials(&hello["account"]) {
@@ -409,6 +420,17 @@ pub(crate) struct ClaudeSession {
     steers: Mutex<Steers>,
     /// Whether the interrupt drops the steers queued behind the turn ([`Claude::cancel_queued`]).
     cancel_queued: Arc<AtomicBool>,
+    stash: Mutex<Stash>,
+}
+
+/// The turns the CLI ran of its own between prompts, as the session's events hold them, each after a line of
+/// [`OWN_TURN`] naming it: kept for the prompt taking it ([`NativeSession::take_own_turn`]).
+#[derive(Debug, Default)]
+struct Stash {
+    /// The turn whose events come next, until it ends.
+    current: Option<String>,
+    /// The events of each turn no prompt took yet, oldest first, at most [`STASHED`].
+    turns: VecDeque<(String, VecDeque<Value>)>,
 }
 
 /// The messages steering the turn running ([`NativeSession::steer`]), written to stdin as it runs. Claude Code takes
@@ -472,6 +494,7 @@ impl ClaudeSession {
     /// an empty message that queries nothing. Its result tells what the fork's totals start at.
     async fn keep(&self) -> Result<(), Error> {
         let mut events = self.events.lock().await;
+        let _prompting = self.shared.prompting();
         let message = json!({ "type": "user", "message": { "role": "user", "content": [] }, "shouldQuery": false });
         if self.shared.writer.send(&message).await.is_err() {
             return Err(self.shared.exited().await);
@@ -502,21 +525,105 @@ impl ClaudeSession {
         })
     }
 
+    /// Keep what the CLI sent between prompts in the stash: the events of each turn it ran of its own, the rest
+    /// dropped, such as a background task's notice. Waits for a turn of its own it still runs to end, unless it is
+    /// `own`, which the prompt takes as it runs.
+    async fn settle(&self, events: &mut mpsc::UnboundedReceiver<Value>, own: Option<&str>) -> Result<(), Error> {
+        loop {
+            let event = match events.try_recv() {
+                Ok(event) => event,
+                Err(_) => {
+                    let current = self.stash.locked().current.clone();
+                    if current.is_none() || current.as_deref() == own {
+                        return Ok(());
+                    }
+                    match events.recv().await {
+                        Some(event) => event,
+                        None => return Err(self.shared.exited().await),
+                    }
+                }
+            };
+            let mut stash = self.stash.locked();
+            if event["type"] == OWN_TURN {
+                if stash.turns.len() >= STASHED {
+                    stash.turns.pop_front();
+                }
+                let id = event["id"].as_str().unwrap_or_default().to_owned();
+                stash.turns.push_back((id.clone(), VecDeque::new()));
+                stash.current = Some(id);
+                continue;
+            }
+            let Some(current) = stash.current.clone() else { continue };
+            if self.shared.ends_turn(&event) {
+                stash.current = None;
+            }
+            if let Some((_, turn)) = stash.turns.iter_mut().rev().find(|(id, _)| *id == current) {
+                turn.push_back(event);
+            }
+        }
+    }
+
+    /// The events of turn `id` the CLI ran of its own, so far, taken from the stash; None when it holds none.
+    fn take(&self, id: &str) -> Option<VecDeque<Value>> {
+        let mut stash = self.stash.locked();
+        let at = stash.turns.iter().position(|(stashed, _)| stashed == id)?;
+        if stash.current.as_deref() == Some(id) {
+            stash.current = None;
+        }
+        stash.turns.remove(at).map(|(_, events)| events)
+    }
+
+    /// Run a prompt: with `prompt` as its message, else taking turn `own` the CLI runs of its own, should it hold it.
+    async fn run(&self, own: Option<&str>, prompt: &[ContentBlock], updates: Updates) -> Result<PromptResponse, Error> {
+        let mut events = self.events.lock().await;
+        let turn = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
+        self.interrupted.store(false, Ordering::Relaxed);
+        *self.steers.locked() = Steers::default();
+        self.running.send_replace(Some(turn));
+        *self.shared.asking.locked() = Some(updates.clone());
+        let _ended = Ended(self);
+        let _prompting = self.shared.prompting();
+        self.settle(&mut events, own).await?;
+        let taken = own.and_then(|id| self.take(id));
+        if taken.is_none() {
+            // A turn of its own the CLI runs first: the message would steer it.
+            self.settle(&mut events, None).await?;
+            if self.interrupted.load(Ordering::Relaxed) {
+                return Ok(PromptResponse::new(StopReason::Cancelled));
+            }
+        }
+        self.turn(&mut events, taken, prompt, &updates).await
+    }
+
+    /// Run a turn, prompted with `prompt` unless `taken` holds the events so far of the turn the CLI runs of its own.
     async fn turn(
         &self,
         events: &mut mpsc::UnboundedReceiver<Value>,
+        taken: Option<VecDeque<Value>>,
         prompt: &[ContentBlock],
         updates: &Updates,
     ) -> Result<PromptResponse, Error> {
-        let message = self.message(prompt, &uuid::Uuid::new_v4().to_string());
-        if self.shared.writer.send(&message).await.is_err() {
-            return Err(self.shared.exited().await);
-        }
+        let mut taken = match taken {
+            Some(taken) => taken,
+            None => {
+                let message = self.message(prompt, &uuid::Uuid::new_v4().to_string());
+                if self.shared.writer.send(&message).await.is_err() {
+                    return Err(self.shared.exited().await);
+                }
+                VecDeque::new()
+            }
+        };
         self.steers.locked().open = true;
         let mut turn = Turn::new(&self.shared.cli, &self.cwd, updates);
         let (mut counts, mut last, mut states) = (Tokens::default(), None, false);
         let result = loop {
-            let Some(event) = events.recv().await else { return Err(self.shared.exited().await) };
+            let event = match taken.pop_front() {
+                Some(event) => event,
+                None => match events.recv().await {
+                    Some(event) => event,
+                    None => return Err(self.shared.exited().await),
+                },
+            };
             let idle = match (event["type"].as_str(), event["subtype"].as_str()) {
                 (Some("user"), _) if event["isReplay"] == true => {
                     self.steers.locked().pending.remove(event["uuid"].as_str().unwrap_or_default());
@@ -597,16 +704,16 @@ impl NativeSession for ClaudeSession {
     }
 
     async fn prompt(&self, prompt: Vec<ContentBlock>, updates: Updates) -> Result<PromptResponse, Error> {
-        let mut events = self.events.lock().await;
-        // Whatever came between turns, such as a background task's notice, belongs to no prompt.
-        while events.try_recv().is_ok() {}
-        let turn = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
-        self.interrupted.store(false, Ordering::Relaxed);
-        *self.steers.locked() = Steers::default();
-        self.running.send_replace(Some(turn));
-        *self.shared.asking.locked() = Some(updates.clone());
-        let _ended = Ended(self);
-        self.turn(&mut events, &prompt, &updates).await
+        self.run(None, &prompt, updates).await
+    }
+
+    async fn take_own_turn(
+        &self,
+        id: &str,
+        prompt: Vec<ContentBlock>,
+        updates: Updates,
+    ) -> Result<PromptResponse, Error> {
+        self.run(Some(id), &prompt, updates).await
     }
 
     async fn steer(&self, prompt: Vec<ContentBlock>) -> Result<bool, Error> {

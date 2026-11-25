@@ -619,6 +619,7 @@ impl Inbox<'_> {
             channel,
             team: self.teams.clone().map(|kv| crate::teams::Note { kv, ant: self.ant.clone() }),
             began: Some(began),
+            own_turn: self.holds.own_turns.take(envelope, self.ant),
         };
         let ready = futures::FutureExt::fuse(ready);
         (prompt, Taps { spend, stop: Some(stop_tx), updates, ready, steer: steer_tx }, measured)

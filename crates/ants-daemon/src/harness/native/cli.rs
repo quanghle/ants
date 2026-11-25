@@ -11,7 +11,9 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 
 use super::Process;
 use super::leftovers::Runs;
+use crate::harness::launch::Reports;
 use crate::harness::mcp_sign_in::Report;
+use crate::harness::own_turn::OwnTurnReport;
 use crate::harness::{Harness, ModelSettings, Tools};
 
 /// A native CLI as an ant runs it: the definition with the ant's environment and model settings.
@@ -27,8 +29,8 @@ pub(crate) struct Cli {
     /// The ant's model, with the suffix its `context` selects.
     model: Option<String>,
     effort: Option<String>,
-    /// Where its sessions serving a thread report their sign-ins to MCP servers.
-    report: Option<Report>,
+    /// Where its sessions serving a thread report their sign-ins to MCP servers and the turns of their own.
+    reports: Reports,
     /// The runs of its processes, shared by its clones: walked at the end of each turn.
     runs: Runs,
 }
@@ -42,14 +44,15 @@ impl Cli {
             env: harness.launch_env(env),
             model: settings.model_id(harness),
             effort: settings.reasoning_effort.clone(),
-            report: None,
+            reports: Reports::default(),
             runs: Runs::default(),
         }
     }
 
-    /// The CLI with its sessions serving a thread reporting their sign-ins to MCP servers to `report`, if any.
-    pub(super) fn reporting(self, report: Option<Report>) -> Self {
-        Self { report, ..self }
+    /// The CLI with its sessions serving a thread reporting their sign-ins to MCP servers and the turns of their own
+    /// to `reports`.
+    pub(super) fn reporting(self, reports: Reports) -> Self {
+        Self { reports, ..self }
     }
 
     /// The CLI with `value` for environment variable `name`, unless the definition or the ant set it.
@@ -70,7 +73,12 @@ impl Cli {
 
     /// Where its sessions serving a thread report their sign-ins to MCP servers, if anywhere.
     pub(super) fn report(&self) -> Option<Report> {
-        self.report.clone()
+        self.reports.sign_ins.clone()
+    }
+
+    /// Where its sessions serving a thread report the turns they start of their own, if anywhere.
+    pub(super) fn own_turns(&self) -> Option<OwnTurnReport> {
+        self.reports.own_turns.clone()
     }
 
     /// The definition's `sign_in`: the command signing the CLI in, if it names one.

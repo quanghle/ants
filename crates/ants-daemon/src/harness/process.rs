@@ -34,9 +34,9 @@ impl Harness {
         &self,
         env: &[(String, String)],
         settings: &ModelSettings,
-        report: Option<super::mcp_sign_in::Report>,
+        reports: super::launch::Reports,
     ) -> DynConnectTo<Client> {
-        native::agent(self, env, settings, report)
+        native::agent(self, env, settings, reports)
     }
 
     /// Where the harness's executable is, with the ant's `env` over the definition's over the daemon's: the path its

@@ -47,6 +47,7 @@ mod handling;
 mod holds;
 mod incoming;
 mod mcp_sign_in;
+mod own_turn;
 mod prompt;
 mod queue;
 mod redacting;
@@ -323,7 +324,11 @@ async fn serve(
         humans: &humans,
         behalf: Records::new(js.clone(), config.connection.js_domain.clone(), account()),
         pacing: Pacing::default(),
-        holds: holds::Holds { mcp_sign_ins: services.mcp_sign_ins.clone(), ..holds::Holds::default() },
+        holds: holds::Holds {
+            mcp_sign_ins: services.mcp_sign_ins.clone(),
+            own_turns: services.own_turns.clone(),
+            ..holds::Holds::default()
+        },
         provider,
         trails: trails(shared, &services).await,
         teams: crate::teams::open(&js, config.connection.js_domain.as_ref()).await.ok(),

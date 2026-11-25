@@ -1,5 +1,6 @@
 //! The control channel of a Claude Code process: the control requests sent to it, each awaiting its response, and
-//! its own, a tool request among them, answered.
+//! its own, a tool request among them, answered; and the turns it runs of its own between prompts, reported as they
+//! start ([`Own`]).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::turn::describe;
 use crate::harness::native::io::forward;
 use crate::harness::native::{Cli, JsonLines, JsonWriter, Process, Updates, approve, failed};
+use crate::harness::own_turn::{OwnTurn, OwnTurnReport};
 use crate::sync::MutexExt as _;
 
 /// What a tool request Claude Code asks about is answered with, unless ants allow it.
@@ -36,9 +38,107 @@ pub(super) struct Shared {
     /// Control requests awaiting their response, by id; None once the CLI's output ended.
     pub(super) pending: Mutex<Option<HashMap<String, oneshot::Sender<Value>>>>,
     pub(super) requests: AtomicU64,
+    pub(super) own: Mutex<Own>,
+    /// Where the turns the CLI runs of its own go: a session serving a thread.
+    pub(super) own_turns: Option<OwnTurnReport>,
+}
+
+/// The type of the line the reader puts before the events of a turn Claude Code runs of its own, naming it by `id`.
+pub(super) const OWN_TURN: &str = "ants_own_turn";
+
+/// The turns Claude Code runs of its own between prompts, as it does once a background task it started ends after the
+/// turn that started it (`system/task_notification`) or a wakeup it scheduled comes: the reader reports each as it
+/// starts ([`OwnTurnReport`]) and puts a line of [`OWN_TURN`] before its events, for the prompt that takes it.
+#[derive(Debug, Default)]
+pub(super) struct Own {
+    /// Whether a prompt runs, or a fork's first message: the turns are then the prompt's.
+    prompting: bool,
+    /// The background tasks whose end the CLI told since the last turn, as their notices say it.
+    notices: Vec<String>,
+    /// The turn the CLI runs of its own, until it ends.
+    open: Option<String>,
+    /// Whether the CLI reports its state (`session_state_changed`): a turn then ends once it is idle, else at its
+    /// `result`.
+    states: bool,
+}
+
+impl Own {
+    /// Whether `event` ends a turn.
+    pub(super) fn ends(&self, event: &Value) -> bool {
+        match (event["type"].as_str(), event["subtype"].as_str()) {
+            (Some("system"), Some("session_state_changed")) => event["state"] == "idle",
+            (Some("result"), _) => !self.states,
+            _ => false,
+        }
+    }
+}
+
+/// A prompt running ([`Own::prompting`]), until dropped.
+pub(super) struct Prompting<'a>(&'a Shared);
+
+impl Drop for Prompting<'_> {
+    fn drop(&mut self) {
+        self.0.own.locked().prompting = false;
+    }
 }
 
 impl Shared {
+    /// Count the turns the CLI runs as a prompt's until the guard drops.
+    pub(super) fn prompting(&self) -> Prompting<'_> {
+        self.own.locked().prompting = true;
+        Prompting(self)
+    }
+
+    /// Whether `event` ends a turn ([`Own::ends`]).
+    pub(super) fn ends_turn(&self, event: &Value) -> bool {
+        self.own.locked().ends(event)
+    }
+
+    /// Note what `event`, about to go to `events`, says of a turn of the CLI's own: the notice of a background task
+    /// that ended, or the start of a turn while no prompt runs, which is reported and marked in `events` before it.
+    fn own_turn(&self, event: &Value, events: &mpsc::UnboundedSender<Value>) {
+        let mut own = self.own.locked();
+        let kind = (event["type"].as_str(), event["subtype"].as_str());
+        if kind == (Some("system"), Some("session_state_changed")) {
+            own.states = true;
+        }
+        if own.open.is_some() {
+            if own.ends(event) {
+                own.open = None;
+            }
+            return;
+        }
+        if own.prompting {
+            return;
+        }
+        let starts = match kind {
+            (Some("system"), Some("task_notification")) => {
+                own.notices.push(notice(event));
+                return;
+            }
+            (Some("system"), Some("session_state_changed")) => event["state"] == "running",
+            (Some("system"), Some("init")) => true,
+            _ => false,
+        };
+        if !starts {
+            return;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        own.open = Some(id.clone());
+        let notices = std::mem::take(&mut own.notices);
+        drop(own);
+        forward(events, json!({ "type": OWN_TURN, "id": id }));
+        let text = if notices.is_empty() {
+            "[ants] Claude Code started a turn of its own.".to_owned()
+        } else {
+            notices.iter().map(|notice| format!("[ants] {notice}")).collect::<Vec<_>>().join("\n")
+        };
+        match &self.own_turns {
+            Some(report) => report.send(OwnTurn { id, text }),
+            None => tracing::debug!(harness = self.cli.name(), why = text, "Claude Code runs a turn of its own"),
+        }
+    }
+
     /// Send control request `request` and await its response.
     pub(super) async fn control(&self, request: Value) -> Result<Value, Error> {
         let id = format!("ants-{}", self.requests.fetch_add(1, Ordering::Relaxed) + 1);
@@ -99,6 +199,23 @@ impl Shared {
     }
 }
 
+/// What the notice of a background task's end (`system/task_notification`) says of it: its summary, such as
+/// `Background command "…" completed (exit code 0)`, and where its output is.
+fn notice(event: &Value) -> String {
+    let summary = match event["summary"].as_str().filter(|summary| !summary.is_empty()) {
+        Some(summary) => summary.to_owned(),
+        None => {
+            let (task, status) =
+                (event["task_id"].as_str().unwrap_or("?"), event["status"].as_str().unwrap_or("ended"));
+            format!("Background task {task} {status}")
+        }
+    };
+    match event["output_file"].as_str().filter(|file| !file.is_empty()) {
+        Some(file) => format!("{summary}; its output is in {file}."),
+        None => format!("{summary}."),
+    }
+}
+
 /// Control request `request` as Claude Code reads it, the response coming under `id`.
 pub(super) fn control_request(id: &str, request: &Value) -> Value {
     json!({ "type": "control_request", "request_id": id, "request": request })
@@ -131,7 +248,10 @@ pub(super) async fn read(mut lines: JsonLines<ChildStdout>, shared: Arc<Shared>,
                 tokio::spawn(async move { shared.answer(&message).await });
             }
             Some("control_cancel_request") => {}
-            _ => forward(&events, message),
+            _ => {
+                shared.own_turn(&message, &events);
+                forward(&events, message);
+            }
         }
     }
     shared.pending.locked().take();

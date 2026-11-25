@@ -13,7 +13,8 @@ use ants_proto::ThreadId;
 #[cfg(test)]
 use super::Protocol;
 use super::mcp_sign_in::Report;
-use super::{Harness, McpSignIns, ModelSettings, Skills, skills};
+use super::own_turn::OwnTurnReport;
+use super::{Harness, McpSignIns, ModelSettings, OwnTurns, Skills, skills};
 use crate::permission::PermissionPolicy;
 
 /// Makes the transport to a fresh harness: a process, or an in-process agent in tests.
@@ -57,6 +58,8 @@ pub struct Launch {
     pub(super) mcp: Option<McpServers>,
     /// Where the sign-ins to MCP servers of the thread's sessions go.
     pub(super) mcp_sign_ins: Option<McpSignIns>,
+    /// Where the turns of their own the thread's sessions start go.
+    pub(super) own_turns: Option<OwnTurns>,
     pub(super) instructions: String,
     /// The environment the harness process gets over the daemon's, to find its executable; None for an in-process
     /// agent.
@@ -74,7 +77,7 @@ impl Launch {
         policy: PermissionPolicy,
         settings: ModelSettings,
     ) -> Self {
-        let connect = connector(&harness, &settings, env.clone(), None, None);
+        let connect = connector(&harness, &settings, env.clone(), Reports::default(), None);
         let process_env = Some(env);
         Self {
             harness,
@@ -85,6 +88,7 @@ impl Launch {
             thread: None,
             mcp: None,
             mcp_sign_ins: None,
+            own_turns: None,
             instructions: String::new(),
             process_env,
             skills: None,
@@ -95,7 +99,7 @@ impl Launch {
     #[must_use]
     pub fn with_fallback(&self, fallback: &crate::limits::fallback::Fallback) -> Self {
         let env = self.process_env.clone().unwrap_or_default();
-        let connect = connector(&fallback.harness, &fallback.settings, env, self.report(), self.skills.clone());
+        let connect = connector(&fallback.harness, &fallback.settings, env, self.reports(), self.skills.clone());
         Self { harness: fallback.harness.clone(), settings: fallback.settings.clone(), connect, ..self.clone() }
     }
 
@@ -152,16 +156,28 @@ impl Launch {
         Self { mcp_sign_ins: Some(sign_ins), ..self }.reporting()
     }
 
-    /// Where the sign-ins to MCP servers of the thread's sessions go, once both are known: sessions of no thread, such
-    /// as the probes of a harness, sign in to none.
-    fn report(&self) -> Option<Report> {
-        Some(Report::new(self.thread.clone()?, self.mcp_sign_ins.clone()?))
+    /// The same launch, sending the turns of their own its sessions serving a thread start to `own_turns`.
+    #[must_use]
+    pub fn with_own_turns(self, own_turns: OwnTurns) -> Self {
+        Self { own_turns: Some(own_turns), ..self }.reporting()
     }
 
-    /// The same launch, its harness processes reporting the sign-ins to MCP servers of their sessions ([`Self::report`]).
+    /// Where the sign-ins to MCP servers and the turns of their own of the thread's sessions go, once the thread and
+    /// where each goes are known: sessions of no thread, such as the probes of a harness, report none.
+    fn reports(&self) -> Reports {
+        let thread = self.thread.as_ref();
+        Reports {
+            sign_ins: thread.zip(self.mcp_sign_ins.clone()).map(|(thread, sink)| Report::new(thread.clone(), sink)),
+            own_turns: thread
+                .zip(self.own_turns.clone())
+                .map(|(thread, sink)| OwnTurnReport::new(thread.clone(), sink)),
+        }
+    }
+
+    /// The same launch, its harness processes reporting what their sessions do ([`Self::reports`]).
     fn reporting(self) -> Self {
         let Some(env) = self.process_env.clone() else { return self };
-        Self { connect: connector(&self.harness, &self.settings, env, self.report(), self.skills.clone()), ..self }
+        Self { connect: connector(&self.harness, &self.settings, env, self.reports(), self.skills.clone()), ..self }
     }
 
     /// The same launch, offering its harness `skills` through the harness's own skills mechanism.
@@ -241,6 +257,7 @@ impl Launch {
             thread: None,
             mcp: None,
             mcp_sign_ins: None,
+            own_turns: None,
             instructions: String::new(),
             process_env: None,
             skills: None,
@@ -314,13 +331,22 @@ impl fmt::Debug for Launch {
     }
 }
 
-/// A connector starting `harness` with the ant's `env` and `settings`, reporting sign-ins to MCP servers to `report`
-/// and offering `skills` when it starts.
+/// Where a harness's sessions serving a thread report what they do.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Reports {
+    /// Their sign-ins to MCP servers.
+    pub(crate) sign_ins: Option<Report>,
+    /// The turns of their own they start.
+    pub(crate) own_turns: Option<OwnTurnReport>,
+}
+
+/// A connector starting `harness` with the ant's `env` and `settings`, its sessions reporting to `reports`, and
+/// offering `skills` when it starts.
 fn connector(
     harness: &Arc<Harness>,
     settings: &ModelSettings,
     env: Vec<(String, String)>,
-    report: Option<Report>,
+    reports: Reports,
     skills: Option<Skills>,
 ) -> Connector {
     #[cfg(test)]
@@ -331,8 +357,8 @@ fn connector(
     Arc::new(move || {
         let offered = skills.as_ref().and_then(skills::offered);
         match offered.and_then(|offered| skills::env(&harness, &env, &offered.dir)) {
-            Some(skills) => harness.agent(&[env.as_slice(), &[skills]].concat(), &settings, report.clone()),
-            None => harness.agent(&env, &settings, report.clone()),
+            Some(skills) => harness.agent(&[env.as_slice(), &[skills]].concat(), &settings, reports.clone()),
+            None => harness.agent(&env, &settings, reports.clone()),
         }
     })
 }
