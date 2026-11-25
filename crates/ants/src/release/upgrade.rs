@@ -86,6 +86,7 @@ pub fn exit() -> ! {
         status = EXIT_CODE,
         "exiting for the service manager to start the new executable; started by hand, start it again"
     );
+    crate::messages::progress::flush_logs();
     std::process::exit(EXIT_CODE)
 }
 

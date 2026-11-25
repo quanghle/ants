@@ -3,7 +3,9 @@
 //! is printed stays clean; off a terminal nothing is shown.
 
 use std::io::{IsTerminal as _, Write as _};
-use std::sync::Mutex;
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
+use std::sync::{Mutex, OnceLock, mpsc};
+use std::time::Duration;
 
 use ants_daemon::sync::MutexExt as _;
 use ants_proto::{State, StatusEvent, StatusUpdate, UserId, Uuid};
@@ -63,6 +65,79 @@ pub fn last_held_log() -> Option<String> {
     HELD.locked().as_ref().and_then(|held| held.last().cloned())
 }
 
+/// The log lines on their way to the thread writing them, once [`write_logs_apart`] started it.
+static APART: OnceLock<Option<SyncSender<Apart>>> = OnceLock::new();
+/// How many log lines wait for the thread writing them before the next one waits for room.
+const APART_MAX: usize = 1024;
+/// How many bytes of waiting log lines the thread writes at once.
+const APART_BATCH: usize = 64 * 1024;
+/// How long the end of the process waits for the log lines still to be written ([`flush_logs`]).
+const FLUSH_WAIT: Duration = Duration::from_secs(1);
+/// The name of the thread writing the log lines.
+const LOG_THREAD: &str = "ants-log";
+
+enum Apart {
+    Line(Vec<u8>),
+    /// Answered once every line before it is written.
+    Flush(mpsc::Sender<()>),
+}
+
+/// Write log lines to stderr from a thread of their own from now on, for `ants daemon`: a write to stderr, a
+/// terminal or a pipe read late, would otherwise hold the thread logging, the runtime's one thread, for the time of
+/// the system call. A panic writes the lines waiting first; the end of the process waits for them ([`flush_logs`]).
+pub fn write_logs_apart() {
+    APART.get_or_init(|| {
+        let (lines, apart) = mpsc::sync_channel(APART_MAX);
+        let thread = std::thread::Builder::new().name(LOG_THREAD.to_owned()).stack_size(64 * 1024);
+        thread.spawn(move || write_apart(&apart, &mut std::io::stderr())).ok()?;
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            flush_logs();
+            hook(info);
+        }));
+        Some(lines)
+    });
+}
+
+/// Write the log lines `apart` brings to `out` until every sender is gone, those waiting together.
+fn write_apart(apart: &Receiver<Apart>, out: &mut impl std::io::Write) {
+    let mut batch = Vec::new();
+    while let Ok(mut next) = apart.recv() {
+        loop {
+            match next {
+                Apart::Line(line) => batch.extend_from_slice(&line),
+                Apart::Flush(done) => {
+                    _ = out.write_all(&batch).and_then(|()| out.flush());
+                    batch.clear();
+                    _ = done.send(());
+                }
+            }
+            if batch.len() >= APART_BATCH {
+                break;
+            }
+            match apart.try_recv() {
+                Ok(more) => next = more,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        _ = out.write_all(&batch);
+        batch.clear();
+    }
+}
+
+/// Wait, a second at most, for the log lines handed to the thread writing them ([`write_logs_apart`]) to be written.
+pub fn flush_logs() {
+    let Some(Some(lines)) = APART.get() else { return };
+    // A panic of the writing thread itself would wait for it.
+    if std::thread::current().name() == Some(LOG_THREAD) {
+        return;
+    }
+    let (done, written) = mpsc::channel();
+    if lines.send(Apart::Flush(done)).is_ok() {
+        _ = written.recv_timeout(FLUSH_WAIT);
+    }
+}
+
 /// Stderr for log lines: the status line goes off the screen before one and comes back after it.
 pub fn log_writer() -> LogWriter {
     LogWriter { hid: false }
@@ -78,6 +153,11 @@ impl std::io::Write for LogWriter {
             held.extend(String::from_utf8_lossy(buf).lines().map(str::to_owned));
             let over = held.len().saturating_sub(HELD_MAX);
             held.drain(..over);
+            return Ok(buf.len());
+        }
+        if let Some(Some(lines)) = APART.get()
+            && lines.send(Apart::Line(buf.to_vec())).is_ok()
+        {
             return Ok(buf.len());
         }
         if !self.hid {
@@ -381,6 +461,25 @@ pub fn start(mut sub: ants_daemon::bus::relayed::Heard, mut status: Status, inte
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_lines_written_apart_come_out_in_order_by_a_flush() {
+        let (lines, apart) = mpsc::sync_channel(APART_MAX);
+        let out = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            write_apart(&apart, &mut out);
+            out
+        });
+        let (done, written) = mpsc::channel();
+        for line in ["one\n", "two\n"] {
+            lines.send(Apart::Line(line.as_bytes().to_vec())).unwrap();
+        }
+        lines.send(Apart::Flush(done)).unwrap();
+        written.recv_timeout(Duration::from_secs(10)).unwrap();
+        lines.send(Apart::Line(b"three\n".to_vec())).unwrap();
+        drop(lines);
+        assert_eq!(String::from_utf8(out.join().unwrap()).unwrap(), "one\ntwo\nthree\n");
+    }
 
     #[test]
     fn log_lines_held_before_the_screen_opens_stay_held_with_those_after() {

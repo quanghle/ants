@@ -69,6 +69,7 @@ fn main() -> Result<()> {
     }
     completions::answer();
     let result = run();
+    messages::progress::flush_logs();
     if let Err(e) = &result
         && e.downcast_ref::<trails::follow::Unread>().is_some()
     {

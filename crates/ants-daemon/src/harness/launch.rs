@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_client_protocol::v1::schema::McpServer;
-use agent_client_protocol::{Client, DynConnectTo};
+use agent_client_protocol::{Agent, Channel, Client, ConnectTo, ConnectionDriver, DynConnectTo};
 use ants_proto::ThreadId;
 
 #[cfg(test)]
@@ -257,6 +257,48 @@ impl Launch {
     pub(crate) fn named(self, name: &str) -> Self {
         let harness = Arc::new(Harness { name: name.to_owned(), ..(*self.harness).clone() });
         self.with_harness(harness)
+    }
+
+    /// The transport to a fresh harness, its process started in the blocking pool: the fork and exec of a harness, as
+    /// of any program, hold the calling thread for the time of the system call, which in a burst of sessions would
+    /// hold the runtime's one thread.
+    pub(super) async fn transport(&self) -> Started {
+        let connect = self.connect.clone();
+        match tokio::task::spawn_blocking(move || ConnectTo::<Client>::into_channel_and_future(connect())).await {
+            Ok((channel, driver)) => Started(channel, driver),
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => {
+                let (channel, peer) = Channel::duplex();
+                let error = agent_client_protocol::Error::internal_error().data(format!("starting the harness: {e}"));
+                Started(
+                    channel,
+                    Some(ConnectionDriver::new(async move {
+                        drop(peer);
+                        Err(error)
+                    })),
+                )
+            }
+        }
+    }
+}
+
+/// A harness's transport whose process, if it has one, is already started ([`Launch::transport`]): the channel to it
+/// and the work driving it, as the transport gave them, so a finished connection still closes the harness's stdin and
+/// waits for it to exit.
+pub(super) struct Started(Channel, Option<ConnectionDriver>);
+
+impl ConnectTo<Client> for Started {
+    async fn connect_to(self, client: impl ConnectTo<Agent>) -> agent_client_protocol::Result<()> {
+        let Self(channel, driver) = self;
+        let relay = ConnectTo::<Client>::connect_to(channel, client);
+        match driver {
+            Some(driver) => futures::try_join!(relay, driver).map(drop),
+            None => relay.await,
+        }
+    }
+
+    fn into_channel_and_future(self) -> (Channel, Option<ConnectionDriver>) {
+        (self.0, self.1)
     }
 }
 

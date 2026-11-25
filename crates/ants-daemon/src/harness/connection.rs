@@ -56,6 +56,7 @@ pub(super) async fn serve(
     let (policy, thread, workdir) = (launch.policy.clone(), launch.thread.clone(), launch.cwd.clone());
     let mut opened = Some(opened);
     let methods = Mutex::new(Vec::new());
+    let transport = launch.transport().await;
     let result = Client
         .v1()
         .name("ants")
@@ -84,7 +85,7 @@ pub(super) async fn serve(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
+        .connect_with(transport, async |cx: ConnectionTo<Agent>| {
             let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
             methods.locked().clone_from(&init.auth_methods);
             let caps = &init.agent_capabilities;
