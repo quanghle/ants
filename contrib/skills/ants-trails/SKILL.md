@@ -91,14 +91,14 @@ Nothing else of the host is reachable: these names are defined before the script
 
 - `await agent(prompt, ant=None, capability=None, schema=None, label=None, tips=None)`: one step. The conductor sends
   `prompt` on a fresh thread: to the ant `ant=` names, to an ant advertising `capability=` (picked as the `route` MCP
-  tool picks one), or with neither to the conductor itself. The step's thread keeps the run's owner and links to the
-  run's thread. Returns the reply's text; with `schema=`, a JSON Schema as a dict, returns the reply parsed as JSON. A
-  reply that does not match the schema is asked for again on the step's thread, naming the mismatch, at most twice;
-  then the call raises. `label=` names the step in the run's thread and status events, kept as one line of at most 200
-  characters, control characters left out. `tips=` is the step's tip key
-  (one line of 1-120 characters): the step carries the best [tips](#tips) left under it on earlier runs, and a tip
-  left answering it goes under it. A step's ant may ask the run's owner with the `ask_human` MCP tool: the step then
-  waits on the human, and the ant's answer once the human answered is the reply.
+  tool picks one), or with neither to the conductor itself; the call raises given both. The step's thread keeps the
+  run's owner and links to the run's thread. Returns the reply's text; with `schema=`, a JSON Schema as a dict,
+  returns the reply parsed as JSON. A reply that does not match the schema is asked for again on the step's thread,
+  naming the mismatch, at most twice; then the call raises. `label=` names the step in the run's thread and status
+  events, kept as one line of at most 200 characters, control characters left out. `tips=` is the step's tip key (one
+  line of 1-120 characters): the step carries the best [tips](#tips) left under it on earlier runs, and a tip left
+  answering it goes under it. A step's ant may ask the run's owner with the `ask_human` MCP tool: the step then waits
+  on the human, and the ant's answer once the human answered is the reply.
 - `await human(questions)`: asks the run's owner, as the `ask_human` MCP tool does. `questions` is a list of 1-4
   dicts, each with a `question` (1-500 characters) and 2-9 `options` (labels, or dicts with a `label` and a
   `description`), and optionally a `header`, `multi_select` (default False) and `free_text` (default True). Returns the
@@ -259,9 +259,9 @@ A step's message may carry tips from earlier runs of its trail: hints to verify,
   misled. Voting again replaces the earlier vote; no ant votes on its own tip. When tips of different writers share an
   id, `writer` names the one meant.
 - **Merge the branch a step names.** With worktrees, each step works in a checkout of its own from the repository's
-  `HEAD`. A step ending `[ants] The work of this run's steps so far is on branch NAME, …` builds on the earlier steps'
-  commits only once `NAME` is merged into its own checkout; commits made answering a step are named to the later steps
-  the same way.
+  `HEAD`. A step ending `[ants] The work so far is on branch NAME, …` builds on the earlier steps' commits, or those of
+  the thread the run was started from with `run_trail`, only once `NAME` is merged into its own checkout; commits made
+  answering a step are named to the later steps the same way.
 - **Leave a tip when something non-obvious was learnt** that a later step would otherwise rediscover: `leave_tip`, at
   most 1000 characters, specific and checkable, never the step's result nor what any ant would try first. A tip saying
   what a live tip says is refused (vote that one helpful instead); one much like live tips needs `force`.

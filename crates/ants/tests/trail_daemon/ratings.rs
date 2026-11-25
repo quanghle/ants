@@ -74,6 +74,7 @@ async fn a_run_s_end_invites_its_conductor_to_rate_it_once_unless_a_waited_answe
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
         spends_from: None,
+        work_branch: None,
     };
     let run = lead.trails.start(start.clone()).await.unwrap();
     assert_eq!(lead.ended(&run).await, RunState::Done { result: json!(2) });

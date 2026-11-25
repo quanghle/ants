@@ -21,6 +21,7 @@ impl Conductor {
             thread,
             limits,
             spends_from: None,
+            work_branch: None,
         };
         self.trails.start(start).await.unwrap()
     }

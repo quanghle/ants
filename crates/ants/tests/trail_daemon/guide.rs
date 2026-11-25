@@ -87,6 +87,7 @@ async fn run_examples(markdown: &str, dir: &str) -> Ran {
             thread: ThreadId::generate(),
             limits: TrailLimits::default(),
             spends_from: None,
+            work_branch: None,
         };
         let run = lead.trails.start(start).await.unwrap();
         let mut runs = vec![run.clone()];

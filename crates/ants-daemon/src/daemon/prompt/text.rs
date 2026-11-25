@@ -137,15 +137,23 @@ impl Inbox<'_> {
     }
 
     pub(super) async fn stored_description(&self, channel: &ants_proto::ChannelId) -> Option<String> {
+        self.stored_entry(channel).await?.description
+    }
+
+    /// The entry of `channel` as stored now; None for a channel with none, or one that cannot be read.
+    pub(in crate::daemon) async fn stored_entry(
+        &self,
+        channel: &ants_proto::ChannelId,
+    ) -> Option<ants_proto::ChannelEntry> {
         let read = async {
             let kv = self.js.get_key_value(ants_proto::CHANNELS_BUCKET).await?;
             anyhow::Ok(match channel::load(&kv, channel).await? {
-                channel::Stored::Entry(entry, _) => entry.description,
+                channel::Stored::Entry(entry, _) => Some(entry),
                 _ => None,
             })
         };
         read.await.unwrap_or_else(|e| {
-            tracing::warn!(%channel, error = format!("{e:#}"), "reading the description of a channel");
+            tracing::warn!(%channel, error = format!("{e:#}"), "reading the entry of a channel");
             None
         })
     }

@@ -301,8 +301,8 @@ impl Mcp {
         let _ = self.hub.provided.provider.set(provider);
     }
 
-    /// Name to `handoff`'s new prompt the branch of the handing thread's worktree among `worktrees`, when it holds
-    /// commits the repository's `HEAD` lacks.
+    /// Name to `handoff`'s new prompt, and to the first agent() steps of a run `run_trail` starts, the branch of the
+    /// thread's worktree among `worktrees`, when it holds commits the repository's `HEAD` lacks.
     pub fn with_worktrees(&self, worktrees: Arc<crate::worktrees::Worktrees>) {
         let _ = self.hub.worktrees.set(worktrees);
     }

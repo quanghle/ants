@@ -913,3 +913,40 @@ async fn a_later_human_post_on_a_channel_thread_gives_it_the_configured_turn_bud
     };
     tokio::join!(bus.serve(&pool, &ctrl_c), check);
 }
+
+#[tokio::test]
+async fn a_team_an_answer_posted_to_a_channel_mentions_stands_for_its_lead_or_wakes_nobody_with_a_note() {
+    let Some((bus, _)) = Bus::start().await else { return };
+    bus.js.create_stream(crate::hub::teams_config()).await.unwrap();
+    let kv = crate::teams::open(&bus.js, None).await.unwrap();
+    let mut directory = ants_proto::TeamDirectory::default();
+    let human = ants_test_support::human();
+    directory
+        .create(ants_proto::Team::new("eng".parse().unwrap(), "boss".parse().unwrap(), human.clone()), None)
+        .unwrap();
+    directory.create(ants_proto::Team::unled("web".parse().unwrap(), human.clone()), None).unwrap();
+    assert!(crate::teams::write(&kv, &directory, 0).await.unwrap());
+    let (launch, _, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let (ops, mut replies) = bus.channel("ops", &["dev-a", "boss"]).await;
+    let entry: ChannelEntry = serde_json::from_slice(&bus.channels.get("ops").await.unwrap().unwrap()).unwrap();
+    // The fake harness answers with the prompt, which holds the post: dev-a's answer mentions what the post does.
+    let asked = ChannelPost::new(ops.clone(), human.clone(), "@dev-a tell @eng and @web");
+    let asked_seq = bus.post(&asked).await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        let note = "[ants] A team this answer mentions wakes nobody: team web has no lead, nor has any team above it";
+        let boss: UserId = "boss".parse().unwrap();
+        let reply = next_post(&mut replies).await;
+        assert!(reply.mentions(&boss) && !reply.mentions(&"eng".parse().unwrap()), "{:?}", reply.mentions);
+        assert!(reply.mentions(&"web".parse().unwrap()), "a team refused stays as it is: {:?}", reply.mentions);
+        let teams: Vec<_> = reply.teams.iter().map(|t| (t.team.as_str(), t.lead.as_str())).collect();
+        assert_eq!(teams, [("eng", "boss")]);
+        assert!(reply.text.contains(&format!("\n\n{note}")), "{}", reply.text);
+        assert!(entry.woken(&reply, &bus.humans.humans()).contains(&boss));
+        bus.until_posts_acked(asked_seq).await;
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+}

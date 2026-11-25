@@ -3,8 +3,8 @@
 //! `complete`, whose answer is kept on the thread's timeline instead.
 
 use ants_proto::{
-    Attachment, AttachmentHandle, AttachmentScope, ChannelPost, Envelope, Error as ProtoError, EscalationReason,
-    NoReplyWhy, NotesPost, Role, State, ThreadId, Timeline, TimelineEntry, UserId, Uuid, subject,
+    Attachment, AttachmentHandle, AttachmentScope, ChannelEntry, ChannelPost, Envelope, Error as ProtoError,
+    EscalationReason, NoReplyWhy, NotesPost, Role, State, ThreadId, Timeline, TimelineEntry, UserId, Uuid, subject,
 };
 use anyhow::Result;
 
@@ -227,9 +227,11 @@ impl Inbox<'_> {
                 Reply::Message(Box::new(Envelope { title, text, attachments, ..*message }))
             }
             Reply::Post(post) => {
+                let entry = incoming.post.as_ref().and_then(|posted| posted.triage.as_ref());
+                let post = Box::pin(self.through_teams(*post, entry)).await;
                 let (attachments, left_out) = self.reply_files(thread, files, |id| post.attachment_handle(id)).await;
                 let text = with_left_out(post.text, left_out);
-                Reply::Post(Box::new(ChannelPost { title, text, attachments, ..*post }))
+                Reply::Post(Box::new(ChannelPost { title, text, attachments, ..post }))
             }
             // Posted with the title and files already.
             Reply::Notes(post) => Reply::Notes(post),
@@ -266,6 +268,39 @@ impl Inbox<'_> {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// `post`, an answer posted to a channel, with each team it @mentions standing for the team's lead, as a post of
+    /// `post_channel` has it, checked against the channel's members: those of `entry`, else as stored now. An answer
+    /// cannot be refused as a tool's post is: a team that cannot stand for its lead stays mentioned, waking nobody,
+    /// and an `[ants]` line after the text says why ([`ChannelPost::through_teams_leniently`]). A directory that
+    /// cannot be read leaves the post as it is; a channel entry that cannot be read leaves the leads unchecked.
+    async fn through_teams(&self, post: ChannelPost, entry: Option<&ChannelEntry>) -> ChannelPost {
+        let Some(kv) = self.teams.as_ref().filter(|_| !post.mentions.is_empty()) else { return post };
+        let Some(directory) = crate::teams::read_quickly(kv).await else { return post };
+        if !post.mentions.iter().any(|mention| directory.is_team(mention)) {
+            return post;
+        }
+        let stored;
+        let entry = match entry {
+            Some(entry) => Some(entry),
+            None => {
+                stored = self.stored_entry(&post.channel).await;
+                stored.as_ref()
+            }
+        };
+        let (mut post, refused) = post.through_teams_leniently(&directory, entry);
+        if refused.is_empty() {
+            return post;
+        }
+        let notes: Vec<String> = refused
+            .iter()
+            .map(|refusal| format!("[ants] A team this answer mentions wakes nobody: {}.", refusal.why()))
+            .collect();
+        let (channel, thread) = (&post.channel, &post.thread_id);
+        tracing::info!(%channel, %thread, ?notes, "a team the answer mentions wakes nobody");
+        post.text = format!("{}\n\n{}", post.text, notes.join("\n"));
+        post
     }
 
     /// Escalate the thread of `incoming`, out of turns before its answer `text` was posted, with the answer, and be

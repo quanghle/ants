@@ -339,7 +339,7 @@ out
     assert_eq!((step.to.as_str(), step.text.as_str()), ("reviewer", "review it"));
     assert_eq!(step.team, Some(ant("reviewers")), "the step says it came through the team");
     assert!(lead.reply(&step, "fine").await);
-    let refused = json!(["no team nobody", "agent() takes team= alone, without ant= or capability=", "fine"]);
+    let refused = json!(["no team nobody", "agent() takes at most one of ant=, capability= and team=", "fine"]);
     assert_eq!(lead.ended(&run).await, RunState::Done { result: refused });
 }
 
@@ -805,6 +805,7 @@ async fn a_paused_conductor_starts_no_run_and_holds_its_runs_steps_until_resumed
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
         spends_from: None,
+        work_branch: None,
     };
     let refused = lead.trails.start(start).await.unwrap_err();
     assert!(refused.contains("is paused") && refused.contains("'ants resume lead'"), "{refused}");

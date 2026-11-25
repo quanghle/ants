@@ -370,3 +370,25 @@ fn a_team_mentioned_in_a_post_stands_for_its_lead_who_has_to_be_a_member() {
     let unchecked = post("@infra deploy").through_teams(&teams, None).unwrap();
     assert_eq!(unchecked.mentions, [p("boss")], "no channel to check against");
 }
+
+#[test]
+fn a_post_that_cannot_be_refused_mentions_the_leads_it_can_and_leaves_the_other_teams() {
+    let mut teams = TeamDirectory::default();
+    teams.create(crate::Team::new(p("eng"), p("boss"), crate::human()), None).unwrap();
+    teams.create(crate::Team::unled(p("web"), crate::human()), None).unwrap();
+    teams.create(crate::Team::new(p("infra"), p("ops-lead"), crate::human()), None).unwrap();
+    let mut ops = ChannelEntry::new("ops".parse().unwrap());
+    ops.add_member(p("boss"));
+    ops.add_member(p("dev-a"));
+    let post = ChannelPost::new(ops.channel.clone(), p("dev-a"), "@eng @web @infra @dev-a done");
+
+    let (through, refused) = post.through_teams_leniently(&teams, Some(&ops));
+    assert_eq!(through.mentions, [p("boss"), p("web"), p("infra"), p("dev-a")], "the refused teams left as they are");
+    let shown: Vec<_> = through.teams.iter().map(|t| (t.team.as_str(), t.lead.as_str())).collect();
+    assert_eq!(shown, [("eng", "boss")]);
+    assert_eq!(ops.woken(&through, &crate::humans()), [p("boss")], "only the lead that is a member");
+    let why: Vec<_> = refused.iter().map(TeamPostRefusal::why).collect();
+    assert!(why[0].starts_with("team web has no lead, nor has any team above it"), "{why:?}");
+    assert!(why[1].starts_with("the lead of team infra, ops-lead, is no member of #ops"), "{why:?}");
+    assert_eq!(why.len(), 2);
+}

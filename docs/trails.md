@@ -53,7 +53,7 @@ these names:
 
 | Name | What it does |
 |---|---|
-| `await agent(prompt, ant=None, capability=None, team=None, schema=None, label=None, tips=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), to the lead of the team `team` names (alone, without `ant` or `capability`; the step carries the team, as a message to a team does, and a team with no lead, nor any above it, no such team or a directory that cannot be read raises), or to the conductor itself. Returns the reply's text, or with `schema` (a JSON Schema, of which `type`, `properties`, `required`, `items`, `enum` and `additionalProperties: false` are checked, any other keyword passing unchecked) its JSON, asked for again at most twice on a mismatch. `tips` is the step's tip key ([Tips](#tips)). |
+| `await agent(prompt, ant=None, capability=None, team=None, schema=None, label=None, tips=None)` | One step: `prompt` to the ant `ant` names, to an ant other than the conductor advertising `capability` (picked as `route` picks one), to the lead of the team `team` names (the step carries the team, as a message to a team does, and a team with no lead, nor any above it, no such team or a directory that cannot be read raises), or to the conductor itself: at most one of `ant`, `capability` and `team`, the call raising given two. Returns the reply's text, or with `schema` (a JSON Schema, of which `type`, `properties`, `required`, `items`, `enum` and `additionalProperties: false` are checked, any other keyword passing unchecked) its JSON, asked for again at most twice on a mismatch. `tips` is the step's tip key ([Tips](#tips)). |
 | `await human(questions)` | One step: asks the run's owner, else the default human, 1 to 4 questions as `ask_human` does, its assistant first ([Trust](#trust)); returns the answer's text. |
 | `await trail(name, args=None)` | One step, answered by a child run of the saved trail `name` with `args` as its input; returns its result ([Child runs](#child-runs-trail)). |
 | `await goto(trail=None, at=None, state=None)` | Ends the leg where called and goes on in `trail` (this one without it) at waypoint `at` (its start without it) with `state` as `args`; returns only by raising ([Routes](#routes-goto)). |
@@ -75,9 +75,10 @@ With [worktrees](config.md#worktrees) on, each step's thread works in a checkout
 `HEAD`, so a step does not see the commits of the steps before it. A reply whose thread's branch holds commits ends with
 `[ants] Branch NAME holds N commits not in the repository's HEAD.`; the latest such reply to an `agent()` step sets the
 run's work branch, kept in its record (`ants trail show RUN --json`, `work_branch`) and by its child runs, and each
-`agent()` step sent after it ends with `[ants] The work of this run's steps so far is on branch NAME, in the repository
-of ANT: this step works in a checkout of its own, so merge NAME to build on it.` The reply text a script gets keeps the
-`Branch` line.
+`agent()` step sent after it ends with `[ants] The work so far is on branch NAME, in the repository of ANT: this step
+works in a checkout of its own, so merge NAME to build on it.` A run an ant starts with `run_trail` from a thread whose
+branch holds such commits starts with that branch as its work branch, the ant's own, so its first steps name it too.
+The reply text a script gets keeps the `Branch` line.
 
 Each JSON value a run takes or makes nests at most 100 lists and dicts (arrays and objects): a run's args deeper are
 refused at its start, a call's arguments deeper (a goto's `state` among them, one level down) raise `TypeError` where
