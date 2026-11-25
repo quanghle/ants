@@ -16,7 +16,7 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
     let config = std::path::absolute(serve::config_file(args, &default_path)?)?;
     let dropins = ants_daemon::config::dropin_dir(&config);
     let mut triggers = reload::Triggers::new(config.clone(), Some(dropins), reload::CHECK_EVERY)?;
-    let edited = ConfigFile::new(config, triggers.edits());
+    let edited = ConfigFile::new(config.clone(), triggers.edits());
     triggers.watch_shared(edited.shared.subscribe());
     triggers.watch_creds(ants_daemon::config::builtins::creds_files()?);
     let host_creds = triggers.host_creds();
@@ -29,6 +29,8 @@ pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Resul
     // The ants connect to the file's top-level nats, where it sets one: the address the managed server must answer.
     let local_url = listed.host.as_ref().and_then(|host| host.nats.clone()).unwrap_or_else(|| conn.nats.to_owned());
     let nats_server = listed.nats_server;
+    let managed = nats_server.as_ref().map(|_| serve::outage::Managed { url: local_url.clone(), config });
+    let _outages = serve::outage::watch(managed);
     let served = |listed: serve::Listed| {
         if listed.nats_server != nats_server {
             tracing::warn!("the [nats_server] table changed; it takes effect on a restart");

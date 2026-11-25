@@ -9,6 +9,7 @@ use async_nats::jetstream;
 use async_nats::jetstream::context::ConsumerInfoErrorKind;
 use async_nats::{ConnectErrorKind, Event};
 
+use super::outage::Reporter;
 use crate::secrets::keystore::{self, Store};
 
 /// Client PING period. The client drops a connection after two unanswered PINGs, so a link that went silent (laptop
@@ -88,7 +89,8 @@ pub(super) const RETRY_MAX: Duration = Duration::from_secs(30);
 /// ([`check_url`]), credentials the server rejects, a TLS error, a JetStream request the credentials do not permit.
 /// Before all that, credentials whose seed is in the OS credential store wait the same way for a store that is locked
 /// or not available yet ([`keystore::Unavailable`]), as before its user logs in; a store holding no seed for their key,
-/// or another key's, fails at once. None when `stop` completes first.
+/// or another key's, fails at once. None when `stop` completes first. The connection tells the process's outage watch
+/// when it cannot reach the server ([`super::outage`]).
 pub async fn connect_retrying(
     url: &str,
     creds: Option<&Path>,
@@ -113,8 +115,11 @@ pub async fn connect_retrying_with(
     check_url(url)?;
     // A denied request just times out; the server's error naming it arrives through the event callback.
     let (denied_tx, mut denied) = tokio::sync::mpsc::unbounded_channel();
+    let reporter = Reporter::new(url);
+    let reporting = reporter.clone();
     let options = options(None, store, user, name)?.event_callback(move |event| {
         let denied_tx = denied_tx.clone();
+        reporting.event(&event);
         async move {
             if let Event::ServerError(async_nats::ServerError::Other(e)) = &event
                 && e.to_lowercase().contains("permissions violation")
@@ -130,7 +135,7 @@ pub async fn connect_retrying_with(
             Some(path) => authenticate_retrying(options, path, store).await?,
             None => options,
         };
-        let client = connect_until_reachable(&options, url, &shown).await?;
+        let client = connect_until_reachable(&options, url, &shown, &reporter).await?;
         let js = jetstream(client.clone(), js_domain);
         reach_jetstream_retrying(&js, user, &mut denied, &shown).await?;
         Ok((client, js))
@@ -169,17 +174,22 @@ async fn authenticate_retrying(
 }
 
 /// A client connected to `url` (`shown` redacted) with `options`, retrying, with backoff, while the server is not
-/// reachable yet.
+/// reachable yet, which each failed attempt tells `reporter`.
 async fn connect_until_reachable(
     options: &async_nats::ConnectOptions,
     url: &str,
     shown: &str,
+    reporter: &Reporter,
 ) -> Result<async_nats::Client> {
     let mut delay = RETRY_FIRST;
     loop {
         match options.clone().connect(url).await {
-            Ok(client) => return Ok(client),
+            Ok(client) => {
+                reporter.up();
+                return Ok(client);
+            }
             Err(e) if worth_retrying(&e) => {
+                reporter.down();
                 tracing::warn!(url = %shown, error = %e, retry_in = ?delay, "NATS server not reachable yet");
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(RETRY_MAX);

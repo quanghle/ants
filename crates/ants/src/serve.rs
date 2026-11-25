@@ -26,6 +26,7 @@ use crate::scheduler;
 pub(crate) use self::running::creds_snapshot;
 pub use self::selection::{AntOptions, DaemonArgs, Listed, ants, ants_on_reload, config_file, configs};
 
+pub(crate) mod outage;
 mod running;
 mod selection;
 

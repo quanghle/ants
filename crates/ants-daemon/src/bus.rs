@@ -8,6 +8,7 @@ use async_nats::jetstream::{self, AckKind};
 mod buckets;
 mod connect;
 mod live;
+pub mod outage;
 mod publish;
 mod pull;
 pub mod relayed;

@@ -369,18 +369,23 @@ async fn keep_record(
     }
 }
 
-/// The JetStream context of a connection as `host`, retried while the server is not reachable; None when nothing
-/// waits for it any longer.
+/// The JetStream context of a connection as `host`, retried while the server is not reachable, which it tells the
+/// process's outage watch ([`bus::outage`]); None when nothing waits for it any longer.
 async fn connect(host: &Host, machine: &Machine) -> Result<Option<async_nats::jetstream::Context>> {
     bus::check_url(&host.nats)?;
+    let reporter = bus::outage::Reporter::new(&host.nats);
     let options = || -> Result<async_nats::ConnectOptions> {
+        let reporting = reporter.clone();
         let options = async_nats::ConnectOptions::new()
             .name(format!("ants host {machine}"))
             .custom_inbox_prefix(host_inbox_prefix(machine))
-            .event_callback(|event| async move {
-                match event {
-                    async_nats::Event::ServerError(e) => tracing::warn!("host connection: {e}"),
-                    event => tracing::debug!("host connection: {event}"),
+            .event_callback(move |event| {
+                reporting.event(&event);
+                async move {
+                    match event {
+                        async_nats::Event::ServerError(e) => tracing::warn!("host connection: {e}"),
+                        event => tracing::debug!("host connection: {event}"),
+                    }
                 }
             });
         match &host.creds {
@@ -394,8 +399,12 @@ async fn connect(host: &Host, machine: &Machine) -> Result<Option<async_nats::je
     let mut delay = RETRY_FIRST;
     loop {
         match options()?.connect(host.nats.as_str()).await {
-            Ok(client) => return Ok(Some(bus::jetstream(client, host.js_domain.as_ref()))),
+            Ok(client) => {
+                reporter.up();
+                return Ok(Some(bus::jetstream(client, host.js_domain.as_ref())));
+            }
             Err(e) if bus::worth_retrying(&e) => {
+                reporter.down();
                 tracing::warn!(%machine, error = %e, retry_in = ?delay, "host connection: NATS not reachable yet");
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(RETRY_MAX);
