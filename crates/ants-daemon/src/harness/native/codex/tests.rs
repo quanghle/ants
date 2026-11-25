@@ -837,3 +837,64 @@ fn codex_prompts_carry_texts_and_images() {
     assert_eq!(version("ants/0.171.0-alpha.7 (Mac OS 27.2.1; arm64)").as_deref(), Some("0.171.0-alpha.7"));
     assert!(!older("0.171.0-alpha.7", MIN_VERSION) && !older("1.0.0", MIN_VERSION) && older("0.168.9", MIN_VERSION));
 }
+
+/// A command item of `TURN` the model left running, as codex 0.169.0 was seen to send one: completed with `exit` and
+/// `output`, if given.
+fn background(id: &str, exit: Option<i64>, output: &str) -> Value {
+    let status = if exit.is_some() { "completed" } else { "inProgress" };
+    json!({
+        "type": "commandExecution", "id": id, "pluginId": null, "scriptPath": null,
+        "command": "/bin/zsh -lc 'sleep 8; echo done'", "cwd": "/w", "processId": "11714",
+        "source": "unifiedExecStartup", "status": status,
+        "commandActions": [{ "type": "unknown", "command": "sleep 8; echo done" }],
+        "aggregatedOutput": exit.map(|_| output), "exitCode": exit, "durationMs": exit.map(|_| 7877),
+    })
+}
+
+#[tokio::test]
+async fn a_command_codex_completes_after_its_turn_is_reported_as_a_turn_of_its_own_prompted_as_it_is() {
+    let codex = Fixture::new("codex-own-turn", "");
+    let done = codex.dir.join("done");
+    let mut first = turn_started(4, TURN);
+    first.extend([
+        item("item/started", background("call_1", None, "")),
+        item("item/started", background("c2", None, "")),
+        item("item/completed", background("c2", Some(0), "")),
+        item("item/completed", json!({ "type": "agentMessage", "id": "a1", "text": "Started" })),
+        turn_completed(TURN, "completed", Value::Null),
+    ]);
+    let ended = vec![
+        no_usage(5),
+        format!("!sh while [ ! -f '{}' ]; do sleep 0.05; done", done.display()),
+        turn_note("item/commandExecution/outputDelta", json!({ "itemId": "call_1", "delta": "done\n" })),
+        item("item/completed", background("call_1", Some(0), "done\n")),
+    ];
+    let mut second = turn_started(6, "turn-2");
+    second.extend([
+        on("turn-2", "item/completed", json!({ "item": { "type": "agentMessage", "id": "a2", "text": "Noted" } })),
+        turn_completed("turn-2", "completed", Value::Null),
+    ]);
+    let blocks = [vec![opened(3, THREAD)], first, ended, second, vec![no_usage(7)], vec![ok(8, json!({}))]];
+    codex.script(None, &[signed_in(), blocks.to_vec()].concat());
+    let (tx, mut reported) = mpsc::unbounded_channel();
+    let launch = codex.launch(ModelSettings::default()).with_own_turns(Arc::new(
+        move |thread: &ThreadId, turn: crate::harness::OwnTurn| tx.send((thread.clone(), turn)).is_ok(),
+    ));
+    let session = Session::start(&launch, None).await.unwrap();
+
+    assert_eq!(run(&session, Prompt::new("sleep in the background")).await.0.unwrap(), "Started");
+    assert!(reported.try_recv().is_err(), "the command runs on");
+    std::fs::write(&done, "").unwrap();
+    let (thread, turn) = tokio::time::timeout(Duration::from_secs(10), reported.recv()).await.unwrap().unwrap();
+    assert_eq!(thread.as_str(), "t1");
+    let why = "[ants] Background command \"sleep 8; echo done\" completed (exit code 0); its output:\ndone";
+    assert_eq!(turn.text, why);
+
+    let taking = Prompt { own_turn: Some(turn.id), ..Prompt::new(why) };
+    assert_eq!(run(&session, taking).await.0.unwrap(), "Noted", "codex runs no turn of its own: prompted as it is");
+    let received = codex.received(1);
+    assert_eq!(received[6]["method"], "turn/start");
+    assert_eq!(received[6]["params"]["input"], json!([{ "type": "text", "text": why, "text_elements": [] }]));
+    session.close().await;
+    assert!(reported.try_recv().is_err(), "the command completing in its turn is not reported");
+}

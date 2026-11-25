@@ -747,3 +747,62 @@ fn copilot_definitions_choose_tools_and_no_mode() {
     let missing = SessionArgs { mcp: vec![file_arg], ..SessionArgs::default() };
     assert!(missing.mcp_servers().unwrap_err().contains("servers.json"));
 }
+
+/// The events of a turn starting a shell command in the background, then of the turn the CLI runs as it completes,
+/// the shapes of Copilot CLI 1.0.115: the loop's `assistant.idle` between them, and the `session.idle` deferred until
+/// the command and that turn ended.
+fn backgrounding(id: &Value) -> Vec<Value> {
+    let ephemeral = json!({ "ephemeral": true });
+    let started = json!({ "toolCallId": "c1", "toolName": "bash", "arguments": { "command": "sleep 5; echo done", "mode": "async" } });
+    let notice = "<system_notification>\nShell command \"Sleep 5 seconds\" (shellId: 0) has completed successfully.\n</system_notification>";
+    let kind = json!({ "type": "shell_completed", "shellId": "0", "exitCode": 0, "description": "Sleep 5 seconds" });
+    let read = json!({ "toolCallId": "c2", "toolName": "read_bash", "arguments": { "shellId": "0", "delay": 0 } });
+    vec![
+        event(id, "assistant.turn_start", json!({ "turnId": "0" })),
+        event(id, "tool.execution_start", started),
+        event(id, "tool.execution_complete", json!({ "toolCallId": "c1", "success": true })),
+        event(id, "assistant.message", json!({ "messageId": "a1", "content": "Started" })),
+        event(id, "assistant.turn_end", json!({ "turnId": "0" })),
+        event_of(id, "assistant.idle", json!({}), &ephemeral),
+        event_of(
+            id,
+            "tool.shell_output",
+            json!({ "toolCallId": "c1", "stream": "stdout", "text": "done\n" }),
+            &ephemeral,
+        ),
+        event_of(id, "session.background_tasks_changed", json!({}), &ephemeral),
+        event(id, "system.notification", json!({ "content": notice, "kind": kind })),
+        event(
+            id,
+            "assistant.message",
+            json!({ "messageId": "a2", "content": "", "toolRequests": [{ "toolCallId": "c2", "name": "read_bash" }] }),
+        ),
+        event(id, "tool.execution_start", read),
+        event(id, "tool.execution_complete", json!({ "toolCallId": "c2", "success": true })),
+        event(id, "assistant.turn_start", json!({ "turnId": "0" })),
+        event(id, "assistant.message", json!({ "messageId": "a3", "content": "Finished" })),
+        event(id, "assistant.turn_end", json!({ "turnId": "0" })),
+        event_of(id, "assistant.idle", json!({}), &ephemeral),
+        event_of(id, "session.idle", json!({ "mode": "interactive" }), &ephemeral),
+    ]
+}
+
+#[tokio::test]
+async fn the_turn_copilot_runs_as_a_background_command_it_started_completes_is_the_prompts() {
+    let played = Played::new("copilot-background", "", |method, params| {
+        (method == "session.send")
+            .then(|| Answer::ok(json!({ "messageId": "u1" })).then(backgrounding(&params["sessionId"])))
+    });
+    let (tx, mut reported) = mpsc::unbounded_channel();
+    let launch = played
+        .launch(ModelSettings::default())
+        .with_own_turns(Arc::new(move |_: &ThreadId, turn: crate::harness::OwnTurn| tx.send(turn).is_ok()))
+        .for_thread(&"t1".parse().unwrap());
+    let session = Session::start(&launch, None).await.unwrap();
+
+    let (reply, updates, _) = run(&session, Prompt::new("sleep in the background")).await;
+    assert_eq!(reply.unwrap(), "Started\n\nFinished", "the prompt ends at the session's idle, after the CLI's turn");
+    assert!(updates.iter().any(|u| matches!(u, StatusUpdate::Tool { id, .. } if id == "c2")), "{updates:?}");
+    session.close().await;
+    assert!(reported.try_recv().is_err(), "no turn of the CLI's own");
+}

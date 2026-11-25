@@ -176,7 +176,7 @@ pub(crate) fn agent(
     reports: Reports,
 ) -> DynConnectTo<Client> {
     match registration(harness.protocol) {
-        Ok(None) => acp::connect(Cli::new(harness, env, settings)),
+        Ok(None) => acp::connect(Cli::new(harness, env, settings).reporting(reports)),
         Ok(Some(registration)) => (registration.connect)(Cli::new(harness, env, settings).reporting(reports)),
         Err(e) => refusing(format!("harness {harness}: {e}")),
     }

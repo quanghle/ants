@@ -13,10 +13,14 @@
 //! then its threads run with approval policy `on-request`, and the server's requests to run a command or change files
 //! go to ants ([`super::approve`]). A closed session unsubscribes from its thread (`thread/unsubscribe`), which the
 //! server then unloads.
+//!
+//! A command a turn started that runs on after the turn ends, as one the model left running in the background,
+//! completes in an `item/completed` the server sends after it: codex starts no turn of its own then, so it is reported
+//! as one of the thread's own turns ([`Background`]) whose prompt is the message as it is, telling the model.
 
 mod items;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -39,6 +43,7 @@ use super::{
     based_id, context_overflow, cost_base, deny_approval, failed, mcp_servers_json, quota_exhausted, rate_limited,
     signed_out,
 };
+use crate::harness::own_turn::{OwnTurn, OwnTurnReport};
 use crate::sync::MutexExt as _;
 
 /// The first version speaking the app server as the translator does, the one it was verified with.
@@ -90,6 +95,68 @@ impl Drop for Codex {
 /// A notification of a thread: its method and params.
 type Notification = (String, Value);
 
+/// The most of a background command's output its report quotes, its end.
+const OUTPUT_TAIL: usize = 2000;
+
+/// The commands a thread's turns started, followed to report each that completes after its turn ended.
+struct Background {
+    report: OwnTurnReport,
+    /// The commands running, by item id: the turn that started each.
+    running: HashMap<String, String>,
+    /// The commands running on after the turn that started them ended.
+    outlived: HashSet<String>,
+}
+
+impl Background {
+    /// Follow notification `method` of the thread: the command it completes after its turn ended, if any.
+    fn note(&mut self, method: &str, params: &Value) -> Option<OwnTurn> {
+        let item = &params["item"];
+        let command = (item["type"] == "commandExecution").then(|| item["id"].as_str()).flatten();
+        match (method, command) {
+            ("item/started", Some(id)) => {
+                let turn = params["turnId"].as_str().unwrap_or_default();
+                self.running.insert(id.to_owned(), turn.to_owned());
+            }
+            ("item/completed", Some(id)) => {
+                self.running.remove(id);
+                if self.outlived.remove(id) {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    return Some(OwnTurn { id, text: ended(item) });
+                }
+            }
+            ("turn/completed", _) => {
+                let turn = params["turn"]["id"].as_str().unwrap_or_default();
+                let Self { running, outlived, .. } = self;
+                running.retain(|id, started| {
+                    let ended = started == turn;
+                    if ended {
+                        outlived.insert(id.clone());
+                    }
+                    !ended
+                });
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+/// The message telling the model that command `item` completed after the turn that started it.
+fn ended(item: &Value) -> String {
+    let command = items::title(item);
+    let status = item["status"].as_str().unwrap_or("completed");
+    let code = item["exitCode"].as_i64().map_or_else(String::new, |code| format!(" (exit code {code})"));
+    let said = format!("[ants] Background command \"{command}\" {status}{code}");
+    match item["aggregatedOutput"].as_str().map(str::trim_end).filter(|output| !output.is_empty()) {
+        Some(output) if output.len() > OUTPUT_TAIL => {
+            let start = output.ceil_char_boundary(output.len() - OUTPUT_TAIL);
+            format!("{said}; its output ends:\n…{}", &output[start..])
+        }
+        Some(output) => format!("{said}; its output:\n{output}"),
+        None => format!("{said}."),
+    }
+}
+
 struct Shared {
     cli: Cli,
     rpc: Rpc<ChildStdin>,
@@ -100,6 +167,8 @@ struct Shared {
     asking: Mutex<HashMap<String, Updates>>,
     /// The latest rate-limit snapshot of each limit, merged from the sparse updates.
     limits: Mutex<HashMap<String, Map<String, Value>>>,
+    /// The commands of each thread reporting the turns of its own, by thread id.
+    background: Mutex<HashMap<String, Background>>,
 }
 
 impl Shared {
@@ -134,6 +203,15 @@ impl Shared {
             _ => {}
         }
         let Some(thread) = params["threadId"].as_str() else { return };
+        let own = self
+            .background
+            .locked()
+            .get_mut(thread)
+            .and_then(|background| background.note(method, &params).map(|turn| (background.report.clone(), turn)));
+        // codex runs no turn of its own: there are no events to drop when the report refuses one.
+        if let Some((report, turn)) = own {
+            report.send(turn);
+        }
         if let Some(tx) = self.threads.locked().get(thread) {
             super::io::forward(tx, (method.to_owned(), params));
         }
@@ -341,6 +419,7 @@ impl Native for Codex {
             threads: Mutex::default(),
             asking: Mutex::default(),
             limits: Mutex::default(),
+            background: Mutex::default(),
         });
         let router = tokio::spawn(route(incoming, shared.clone()));
         let info = Info {
@@ -376,14 +455,14 @@ impl Native for Codex {
     async fn new_session(&self, open: Open) -> Result<CodexSession, Error> {
         self.offer_skills(&open).await?;
         let started = self.shared.request("thread/start", self.thread(&open, None)).await?;
-        self.session(&started)
+        self.session(&started, &open)
     }
 
     async fn load_session(&self, id: &str, open: Open) -> Result<CodexSession, Error> {
         let (id, base) = cost_base(id);
         self.offer_skills(&open).await?;
         let resumed = self.shared.request("thread/resume", self.thread(&open, Some(id))).await?;
-        let session = self.session(&resumed)?;
+        let session = self.session(&resumed, &open)?;
         *session.spent.locked() = Spent::from(base);
         Ok(session)
     }
@@ -391,7 +470,7 @@ impl Native for Codex {
     async fn fork_session(&self, id: &str, open: Open) -> Result<CodexSession, Error> {
         self.offer_skills(&open).await?;
         let forked = self.shared.request("thread/fork", self.thread(&open, Some(cost_base(id).0))).await?;
-        let session = self.session(&forked)?;
+        let session = self.session(&forked, &open)?;
         // Should codex's estimate of the fork start at its parent's, the parent's thread already counted that.
         if let Some(base) = self.shared.thread_cost(&session.id).await {
             *session.spent.locked() = Spent::from(base);
@@ -488,10 +567,14 @@ impl Codex {
         params
     }
 
-    fn session(&self, opened: &Value) -> Result<CodexSession, Error> {
+    fn session(&self, opened: &Value, open: &Open) -> Result<CodexSession, Error> {
         let Some(id) = opened["thread"]["id"].as_str() else {
             return Err(failed(format!("codex opened a thread without an id: {opened}")));
         };
+        if let Some(report) = open.own_turns.clone() {
+            let background = Background { report, running: HashMap::new(), outlived: HashSet::new() };
+            self.shared.background.locked().insert(id.to_owned(), background);
+        }
         Ok(CodexSession {
             id: id.to_owned(),
             shared: self.shared.clone(),
@@ -673,6 +756,7 @@ impl NativeSession for CodexSession {
     }
 
     async fn close(&self) {
+        self.shared.background.locked().remove(&self.id);
         if let Err(e) = self.shared.request("thread/unsubscribe", json!({ "threadId": self.id })).await {
             tracing::warn!(harness = self.shared.cli.name(), error = %e, "unsubscribing from a codex thread");
         }
