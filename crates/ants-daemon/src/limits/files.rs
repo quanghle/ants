@@ -12,8 +12,9 @@ use crate::limits::ratelimit::Limited;
 
 /// Open files an ant takes while idle: its connection, sense store and logs.
 pub const PER_ANT: u64 = 4;
-/// Open files each live harness takes: its pipes.
-pub const PER_HARNESS: u64 = 3;
+/// Open files each live harness takes: its pipes and, on macOS, the kqueue its exit is waited for with
+/// (`crate::process::wait`).
+pub const PER_HARNESS: u64 = if cfg!(target_os = "macos") { 4 } else { 3 };
 /// Open files beyond those of the ants and harnesses: the daemon's own, a managed nats-server's, a burst of git.
 pub const MARGIN: u64 = 64;
 

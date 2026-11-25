@@ -195,7 +195,7 @@ impl Drop for Running {
 
 async fn status(program: &str, args: &[&str], context: &Context<'_>) -> Result<bool> {
     let mut child = Running(command(program, args, context, false).spawn().context("starting a condition check")?);
-    Ok(child.0.wait().await.context("waiting for a condition check")?.success())
+    Ok(crate::process::wait(&mut child.0).await.context("waiting for a condition check")?.success())
 }
 
 /// The exit status of `program` run with `args`, none when a signal ended it, and the observation of a command
@@ -212,7 +212,7 @@ async fn digested(program: &str, args: &[&str], context: &Context<'_>) -> Result
         }
         digest.update(&buffer[..read]);
     }
-    let status = child.0.wait().await.context("waiting for a condition check")?.code();
+    let status = crate::process::wait(&mut child.0).await.context("waiting for a condition check")?.code();
     Ok((status, digest.finish(status)))
 }
 
@@ -233,7 +233,7 @@ pub(super) async fn captured(program: &str, args: &[&str], context: &Context<'_>
         if bytes.len() as u64 > MAX_OUTPUT {
             bail!("the command wrote over 64 KiB");
         }
-        Ok((child.0.wait().await.context("waiting for the command")?.code(), bytes))
+        Ok((crate::process::wait(&mut child.0).await.context("waiting for the command")?.code(), bytes))
     })
     .await
     .context("the command took over 30 seconds")?
@@ -246,7 +246,7 @@ async fn output(program: &str, args: &[&str], context: &Context<'_>) -> Result<V
     if bytes.len() as u64 > MAX_OUTPUT {
         bail!("condition response exceeds 64 KiB");
     }
-    let status = child.0.wait().await?;
+    let status = crate::process::wait(&mut child.0).await?;
     if !status.success() {
         bail!("{program} answering the condition failed ({status})");
     }

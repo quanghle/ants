@@ -498,7 +498,7 @@ async fn run(cli: &Cli, launch: &[String], cwd: &Path, resume: Option<&str>) -> 
     if let Some(id) = resume {
         args.extend(["--conversation".to_owned(), id.to_owned()]);
     }
-    let (mut process, stdin, stdout) = cli.spawn(&args, Some(cwd))?;
+    let (mut process, stdin, stdout) = cli.spawn(&args, Some(cwd)).await?;
     let mut lines = JsonLines::new(stdout);
     loop {
         let event = match lines.next().await {

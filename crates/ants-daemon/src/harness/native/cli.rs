@@ -156,9 +156,10 @@ impl Cli {
         command
     }
 
-    /// Start the CLI ([`Self::command`]) with `protocol_args`, working in `cwd`, else in the daemon's directory: the
-    /// process, watched by its [`Self::runs`], and its stdin and stdout to speak to it through.
-    pub(crate) fn spawn<I, S>(
+    /// Start the CLI ([`Self::command`]) with `protocol_args`, working in `cwd`, else in the daemon's directory, in the
+    /// blocking pool ([`Process::start`]): the process, watched by its [`Self::runs`], and its stdin and stdout to speak
+    /// to it through.
+    pub(crate) async fn spawn<I, S>(
         &self,
         protocol_args: I,
         cwd: Option<&Path>,
@@ -171,7 +172,7 @@ impl Cli {
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        let started = Process::start(self.name(), &self.program, command)?;
+        let started = Process::start(self.name(), &self.program, command).await?;
         started.0.watched_by(&self.runs);
         Ok(started)
     }

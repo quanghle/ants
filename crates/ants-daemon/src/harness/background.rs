@@ -1,7 +1,7 @@
 //! What a harness left running in the background as its turn ended, such as a long check or a watcher Claude Code
 //! runs as a background command: ants' `ants/background` key of a prompt response's `_meta`, listing those processes,
-//! which a native protocol's translator sets ([`super::native`]) and the pool keeps the harness for while one of them
-//! runs (`crate::pool`).
+//! which a native protocol's translator sets ([`super::native`]), as does the transport of an ACP harness, and the
+//! pool keeps the harness for while one of them runs (`crate::pool`).
 
 use agent_client_protocol::v1::schema::PromptResponse;
 use serde::{Deserialize, Serialize};

@@ -332,7 +332,7 @@ impl Native for Codex {
     }
 
     async fn start(cli: Cli) -> Result<Self, Error> {
-        let (process, stdin, stdout) = cli.spawn(["app-server"], None)?;
+        let (process, stdin, stdout) = cli.spawn(["app-server"], None).await?;
         let (rpc, incoming) = Rpc::new(stdout, stdin, false);
         let shared = Arc::new(Shared {
             cli,

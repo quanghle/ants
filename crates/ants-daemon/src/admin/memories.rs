@@ -462,13 +462,9 @@ async fn bd_memories(
         content: String,
     }
     let mut memories = BdMemories { db: db.to_owned(), ..BdMemories::default() };
-    let run = tokio::process::Command::new(bd)
-        .args(["memories", "--json"])
-        .env("BD_DB", db)
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output();
+    let mut command = tokio::process::Command::new(bd);
+    command.args(["memories", "--json"]).env("BD_DB", db).current_dir(workdir).stdin(Stdio::null()).kill_on_drop(true);
+    let run = crate::process::output(command);
     let listed = match tokio::time::timeout(BD_TIMEOUT, run).await {
         Err(_) => Err(format!("bd memories took over {}s", BD_TIMEOUT.as_secs())),
         Ok(Err(e)) => Err(format!("running bd: {e}")),

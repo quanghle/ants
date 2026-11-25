@@ -6,9 +6,8 @@ use super::*;
 fn command_line(harness: &Harness, env: &[(&str, &str)], context: Option<&str>) -> (String, Vec<String>, Vec<String>) {
     let env: Vec<_> = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
     let settings = ModelSettings { context: context.map(str::to_owned), ..Default::default() };
-    let process = harness.process(&env, &settings);
-    let env = process.environment().iter().map(|(k, v)| format!("{k}={v}")).collect();
-    (process.command().display().to_string(), process.arguments().to_vec(), env)
+    let launched = harness.launch_env(&env).iter().map(|(k, v)| format!("{k}={v}")).collect();
+    (harness.executable(&env).display().to_string(), harness.launch_args(&settings), launched)
 }
 
 #[test]

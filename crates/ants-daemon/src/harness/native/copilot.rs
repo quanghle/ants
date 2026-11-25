@@ -213,7 +213,7 @@ impl Native for Copilot {
         let args = SessionArgs::take(&mut own).map_err(failed)?;
         let cli = cli.with_args(own);
         let mcp = args.mcp_servers().map_err(failed)?;
-        let (process, stdin, stdout) = cli.spawn(SERVER_ARGS, None)?;
+        let (process, stdin, stdout) = cli.spawn(SERVER_ARGS, None).await?;
         let (closing, closed) = watch::channel(false);
         let cwd = std::env::current_dir().unwrap_or_default();
         let entra = cli.entra_client_id().map(|id| sdk::EntraAuthConfig {
