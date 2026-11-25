@@ -341,19 +341,20 @@ A run reports on the thread it started with, as its conductor:
   assistant, answered goes to the conductor as the step's reply and answers the call. The run's wall time bounds the
   wait. The invitation to rate a run started on the thread of a step to the conductor itself, which names the run in
   `rating_of`, answers no call: it prompts the conductor to rate the run.
-- **Status events:** a `step` event (`run`, `call`, `label`, `to`, `step_thread`, `stage`: `started`, `answered`,
-  `failed` or `dropped`) on the conductor's status of the run thread tells each step, and a `leg` event (`run`, `leg`
+- **Status events:** a `step` event (`run`, `call`, `label`, `to`, `step_thread`, `stage`: `started`, `asked` once
+  its ant asked a human, `answered`, `failed` or `dropped`) on the conductor's status of the run thread tells each step, and a `leg` event (`run`, `leg`
   counted from 0, `trail` unless inline, `waypoint` when entered at one) each leg's start, the first at the run's start
   ([hooks.md](hooks.md#statusevent-on-antsstatusantthread)).
 - **In `ants chat`:** the thread view of the run thread lists each step where it started, with its label, the ant it
-  went to, its stage and its thread, which `Enter` on the step opens ([cli.md](cli.md#ants-chat)). Status events are
-  never stored, so the view also reads the steps from the records of the runs that the ants on the thread conduct
-  when the thread shows: the markers each conductor keeps under the thread (`<ant>.on.<thread>.*`, read by a filtered
-  direct get, so a thread's steps are read alone; each marker's time is its step's start, and it carries the step's
-  label; a `trail()` step's marker sits there too), then for each run found its
-  journal (`answered`, or `failed` for an error) and, while it goes on, the calls its session waits on (`started`); a
-  step otherwise is `dropped`, as is one sent anew on a new thread after a resume. A run's thread opened after its
-  steps ran lists them all the same, for as long as the run's records are kept.
+  went to, its stage (`waiting on a human` once its ant asked one) and its thread, which `Enter` on the step opens
+  ([cli.md](cli.md#ants-chat)). Status events are never stored, so the view also reads the steps from the records of
+  the runs that the ants on the thread conduct when the thread shows: the markers each conductor keeps under the
+  thread (`<ant>.on.<thread>.*`, read by a filtered direct get, so a thread's steps are read alone; each marker's time
+  is its step's start, and it carries the step's label; a `trail()` step's marker sits there too), then for each run
+  found its journal (`answered`, or `failed` for an error) and, while it goes on, the calls its session waits on
+  (`started`, or `asked` for one its ant asked a human); a step otherwise is `dropped`, as is one sent anew on a new
+  thread after a resume. A run's thread opened after its steps ran lists them all the same, for as long as the run's
+  records are kept.
 - **End message:** once the run is done, failed or stopped, the conductor messages the owner, else the default human, on
   the run thread: `Run <run> of trail <name> is done (N steps, M turns):`, naming the trail the run started (`Run <run>
   of an inline script` for an inline one), with the result (cut at 8000 characters, `ants trail show <run>` showing the

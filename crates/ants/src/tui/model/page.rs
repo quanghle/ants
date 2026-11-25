@@ -145,8 +145,9 @@ impl Page {
     pub fn armed(&self) -> bool {
         match self {
             Self::Ant(page) => page.armed().is_some(),
+            Self::Team(page) => page.armed(),
             Self::Home(_) | Self::Tree(_) | Self::Credentials(_) | Self::Held(_) => self.prompt().is_some(),
-            Self::Work(_) | Self::Channel(_) | Self::Team(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
+            Self::Work(_) | Self::Channel(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
         }
     }
 
@@ -158,7 +159,8 @@ impl Page {
             Self::Ant(page) => page.disarm(),
             Self::Credentials(page) => page.disarm(),
             Self::Held(page) => page.disarm(),
-            Self::Work(_) | Self::Channel(_) | Self::Team(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
+            Self::Team(page) => page.disarm(),
+            Self::Work(_) | Self::Channel(_) | Self::Thread(_) | Self::Dm(_) | Self::Search(_) => false,
         }
     }
 

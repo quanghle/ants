@@ -189,37 +189,18 @@ impl Editor {
         if word.is_empty() {
             return Vec::new();
         }
-        let free = |u: &&UserId| directory.holder(u).is_none();
         let names: Vec<(String, &str)> = match typing.field {
-            Field::Add => {
-                let ants: BTreeSet<&UserId> = data
-                    .live
-                    .colony
-                    .iter()
-                    .map(|e| &e.ant)
-                    .filter(|a| !data.is_human(a) && !directory.is_team(a))
-                    .filter(free)
-                    .collect();
-                let teams = directory.teams.iter().map(|t| &t.team).filter(free);
-                let teams = teams.filter(|t| !directory.is_beneath(&team.team, t));
-                ants.into_iter().map(|a| (a.to_string(), "ant")).chain(teams.map(|t| (t.to_string(), "team"))).collect()
-            }
+            Field::Add => free(directory, data, Some(&team.team)),
             Field::Lead => team
                 .members
                 .iter()
                 .filter(|m| !directory.is_team(m) && team.lead.as_ref() != Some(*m))
                 .map(|m| (m.to_string(), "ant"))
                 .collect(),
-            Field::Owner => {
-                let humans: BTreeSet<&UserId> = data.humans.iter().flat_map(Humans::iter).collect();
-                humans.into_iter().map(|h| (h.to_string(), "human")).collect()
-            }
+            Field::Owner => humans(data),
             Field::Description => Vec::new(),
         };
-        complete::narrow(word.trim_start_matches('@'), names)
-            .into_iter()
-            .map(|(name, what)| Candidate { word: format!("@{name}"), detail: what.to_owned() })
-            .collect()
+        candidates(&word, names)
     }
 
     /// Draw the editor of `team` in `area`, over what is there.
@@ -345,6 +326,45 @@ impl Typing {
     }
 }
 
+/// The ants of the colony and the teams on no team, by name, each with what it is: the members a team may take, but
+/// for the teams above `team`, a team being created having none.
+pub(super) fn free(directory: &TeamDirectory, data: &Data, team: Option<&UserId>) -> Vec<(String, &'static str)> {
+    let free = |u: &&UserId| directory.holder(u).is_none();
+    let ants: BTreeSet<&UserId> = data
+        .live
+        .colony
+        .iter()
+        .map(|e| &e.ant)
+        .filter(|a| !data.is_human(a) && !directory.is_team(a))
+        .filter(free)
+        .collect();
+    let teams = directory.teams.iter().map(|t| &t.team).filter(free);
+    let teams = teams.filter(|t| team.is_none_or(|team| !directory.is_beneath(team, t)));
+    ants.into_iter().map(|a| (a.to_string(), "ant")).chain(teams.map(|t| (t.to_string(), "team"))).collect()
+}
+
+/// The humans of the bus, by name.
+pub(super) fn humans(data: &Data) -> Vec<(String, &'static str)> {
+    let humans: BTreeSet<&UserId> = data.humans.iter().flat_map(Humans::iter).collect();
+    humans.into_iter().map(|h| (h.to_string(), "human")).collect()
+}
+
+/// The completions of `word`, an @name, among `names`.
+pub(super) fn candidates(word: &str, names: Vec<(String, &str)>) -> Vec<Candidate> {
+    complete::narrow(word.trim_start_matches('@'), names)
+        .into_iter()
+        .map(|(name, what)| Candidate { word: format!("@{name}"), detail: what.to_owned() })
+        .collect()
+}
+
+/// The humans of the bus, the CLI's own among them before they are read, as a change's checks take them.
+pub(super) fn known_humans(data: &Data) -> Humans {
+    let mut humans = data.humans.clone().unwrap_or_default();
+    let me = data.me();
+    let _ = humans.add(me.as_str(), ants_proto::HumanEntry::new(me.clone()));
+    humans
+}
+
 /// Write `change` to `team`.
 fn run(team: &UserId, change: Change) -> To {
     To::Do(Action::Run(Job::Team { team: team.clone(), change }, String::new()))
@@ -382,11 +402,7 @@ fn change(field: Field, text: &str, directory: &TeamDirectory, team: &Team, data
             Change { description: Some((!text.is_empty()).then(|| text.to_owned())), ..Change::default() }
         }
     };
-    // The CLI's human is one before the humans are read.
-    let mut humans = data.humans.clone().unwrap_or_default();
-    let me = data.me();
-    let _ = humans.add(me.as_str(), ants_proto::HumanEntry::new(me.clone()));
-    change.check(&team.team, &humans).map_err(|e| format!("{e:#}"))?;
+    change.check(&team.team, &known_humans(data)).map_err(|e| format!("{e:#}"))?;
     Ok(change)
 }
 

@@ -1,7 +1,8 @@
 //! A team's view: a header with the team, the teams above it, its description, lead and owner, over its members as a
 //! tree down through its member teams, as `ants team show` prints them: each ant with its state's mark, its face and
 //! its state in the colony, the leads marked, each member team with its lead. Enter opens the member selected, `a`
-//! writes to the team (its lead) in the command bar, and `M` opens the team's editor ([`editor`]).
+//! writes to the team (its lead) in the command bar, `M` opens the team's editor ([`editor`]), `n` the form creating
+//! a team ([`create`]), which the nav's `+ new team` shows alone, and `D` deletes the team once `y` confirms.
 
 use ants_proto::{ColonyEntry, Team, TeamDirectory, UserId};
 use chrono::{DateTime, Utc};
@@ -11,11 +12,14 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::model::{Data, Key, Model, To};
+use super::armed::Armed;
+use super::exec::Job;
+use super::model::{Action, Data, Key, Model, To};
 use super::select::{PAGE, Selection};
 use super::{nav, style};
 use crate::teams::{self, Member};
 
+mod create;
 mod editor;
 
 /// The mark of a team's lead among its members.
@@ -25,11 +29,16 @@ const DESCRIPTION_LINES: usize = 3;
 
 #[derive(Debug)]
 pub struct Page {
-    pub team: UserId,
+    /// The team shown; none for the nav's `+ new team`, which shows the form creating one alone.
+    pub team: Option<UserId>,
     /// The member selected in the tree, by name.
     selected: Selection<UserId>,
     /// The editor `M` opens.
     editor: Option<editor::Editor>,
+    /// The form creating a team, which `n` opens.
+    creating: Option<create::Form>,
+    /// The deletion of the team `D` asked for, which `y` confirms.
+    armed: Armed<UserId>,
 }
 
 /// A row of the members tree: how deep it is and the member.
@@ -48,13 +57,19 @@ impl Row {
 
 impl Page {
     pub fn new(team: UserId) -> Self {
-        Self { team, selected: Selection::default(), editor: None }
+        Self { team: Some(team), creating: None, ..Self::creating() }
+    }
+
+    /// The form creating a team, alone.
+    pub fn creating() -> Self {
+        let creating = Some(create::Form::default());
+        Self { team: None, selected: Selection::default(), editor: None, creating, armed: Armed::default() }
     }
 
     /// The team as read, if it is.
     fn entry<'d>(&self, data: &'d Data) -> Option<(&'d TeamDirectory, &'d Team)> {
         let directory = data.teams.as_ref()?;
-        Some((directory, directory.team(&self.team)?))
+        Some((directory, directory.team(self.team.as_ref()?)?))
     }
 
     /// The members tree, one row each, depth first.
@@ -80,15 +95,50 @@ impl Page {
         self.rows(data, now).iter().map(|r| r.name().clone()).collect()
     }
 
-    /// The keys of the editor, which takes every key, when it is open.
+    const DELETE_KEYS: &str = "y delete the team, its members then on no team · any other key keeps it";
+
+    /// The keys of the deletion `D` asked to confirm, or of the form or the editor, which take every key, when open.
     pub fn prompt(&self) -> Option<&'static str> {
-        self.editor.as_ref().map(editor::Editor::keys)
+        if self.armed.get().is_some() {
+            return Some(Self::DELETE_KEYS);
+        }
+        match (&self.creating, &self.editor) {
+            (Some(form), _) => Some(form.keys()),
+            (None, editor) => editor.as_ref().map(editor::Editor::keys),
+        }
     }
 
-    /// Take `key` for the editor when it is open: what to do, if anything.
+    /// Whether the view waits for the `y` confirming the deletion `D` asked for.
+    pub fn armed(&self) -> bool {
+        self.armed.get().is_some()
+    }
+
+    /// Drop the deletion asked for, if any: whether there was one.
+    pub fn disarm(&mut self) -> bool {
+        self.armed.disarm()
+    }
+
+    /// Take `key` for the form or the editor when one is open: what to do, if anything. Shown alone, the form leaves
+    /// the keys it has no use for, Esc among them, to the view.
     pub fn write(&mut self, key: Key, data: &Data) -> Option<Option<To>> {
+        if let Some(form) = self.creating.as_mut() {
+            if self.team.is_none() && !form.takes(key) {
+                return None;
+            }
+            return Some(match form.key(key, data) {
+                editor::Edited::Kept => None,
+                editor::Edited::Closed => {
+                    if self.team.is_some() {
+                        self.creating = None;
+                    }
+                    None
+                }
+                editor::Edited::To(to) => Some(*to),
+            });
+        }
+        let team = self.team.clone()?;
         let editor = self.editor.as_mut()?;
-        Some(match editor.key(key, &self.team, data) {
+        Some(match editor.key(key, &team, data) {
             editor::Edited::Kept => None,
             editor::Edited::Closed => {
                 self.editor = None;
@@ -98,12 +148,27 @@ impl Page {
         })
     }
 
-    /// Take `line` pasted for the editor when it is open, into the row typed in if any.
+    /// Take `line` pasted for the form or the editor when one is open, into the row typed in if any.
     pub fn paste(&mut self, line: &str) -> bool {
-        self.editor.as_mut().is_some_and(|editor| editor.paste(line))
+        match (self.creating.as_mut(), self.editor.as_mut()) {
+            (Some(form), _) => form.paste(line),
+            (None, editor) => editor.is_some_and(|editor| editor.paste(line)),
+        }
     }
 
     pub fn key(&mut self, key: Key, data: &Data, now: DateTime<Utc>) -> Option<To> {
+        let team = self.team.clone()?;
+        match (key, self.armed.take()) {
+            (Key::Char('y'), Some(team)) => return Some(To::Do(Action::Run(Job::TeamDelete { team }, String::new()))),
+            (Key::Char('D'), _) => {
+                if self.entry(data).is_none() {
+                    return Some(To::Refused(format!("team {team} is not read yet")));
+                }
+                self.armed.arm(Some(team));
+                return None;
+            }
+            _ => {}
+        }
         match key {
             Key::Enter => {
                 let rows = self.rows(data, now);
@@ -113,12 +178,18 @@ impl Page {
                     Member::Team { name, .. } => To::Team(name.clone()),
                 });
             }
-            Key::Char('a') => return Some(To::Bar(format!("@{} ", self.team))),
+            Key::Char('a') => return Some(To::Bar(format!("@{team} "))),
             Key::Char('M') => {
                 if self.entry(data).is_none() {
-                    return Some(To::Refused(format!("team {} is not read yet", self.team)));
+                    return Some(To::Refused(format!("team {team} is not read yet")));
                 }
                 self.editor = Some(editor::Editor::default());
+            }
+            Key::Char('n') => {
+                if data.teams.is_none() {
+                    return Some(To::Refused("the teams are not read yet".to_owned()));
+                }
+                self.creating = Some(create::Form::default());
             }
             _ => _ = self.selected.step(key, &self.ids(data, now), Some(PAGE)),
         }
@@ -127,19 +198,32 @@ impl Page {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, model: &Model, now: DateTime<Utc>, focused: bool) {
         let data = &model.data;
+        let form = self.creating.as_ref().filter(|_| data.teams.is_some());
+        let Some(id) = &self.team else {
+            if let Some(form) = form {
+                return form.draw(frame, area, data, focused);
+            }
+            let block = style::block(" new team ".to_owned(), focused);
+            let line = Line::styled("the teams are not read yet", style::dim());
+            return frame.render_widget(Paragraph::new(line).block(block), area);
+        };
         let Some((directory, team)) = self.entry(data) else {
-            let text = format!("no team {}", self.team);
-            let block = style::block(format!(" team {} ", self.team), focused);
+            let text = format!("no team {id}");
+            let block = style::block(format!(" team {id} "), focused);
             frame.render_widget(Paragraph::new(Line::styled(text, style::dim())).block(block), area);
+            if let Some(form) = form {
+                let inner = Rect { x: area.x, y: area.y + 1, width: area.width.min(72), height: form.height(data) };
+                form.draw(frame, inner.intersection(area), data, focused);
+            }
             return;
         };
         let width = usize::from(area.width.saturating_sub(2));
         let about = about(directory, team, width);
         let height = u16::try_from(about.len() + 2).unwrap_or(u16::MAX);
         let [head, list] = Layout::vertical([Constraint::Length(height), Constraint::Min(1)]).areas(area);
-        let within: String = directory.ancestors(&self.team).iter().map(|t| format!(" · within {}", t.team)).collect();
-        let keys = Line::styled(" M manage · a ask ", style::dim()).right_aligned();
-        let block = style::block(format!(" team {}{within} ", self.team), false).title_bottom(keys);
+        let within: String = directory.ancestors(id).iter().map(|t| format!(" · within {}", t.team)).collect();
+        let keys = Line::styled(" M manage · a ask · n new · D delete ", style::dim()).right_aligned();
+        let block = style::block(format!(" team {id}{within} "), false).title_bottom(keys);
         frame.render_widget(Paragraph::new(about).block(block), head);
 
         let rows = self.rows(data, now);
@@ -153,14 +237,18 @@ impl Page {
                 if at == selected { line.patch_style(style::highlight(focused)) } else { line }
             })
             .collect();
-        let ants = directory.ants_under(&self.team).len();
+        let ants = directory.ants_under(id).len();
         let title = format!(" members · {ants} {} ", if ants == 1 { "ant" } else { "ants" });
         let room = usize::from(list.height.saturating_sub(2)).max(1);
         let top = u16::try_from((selected + 1).saturating_sub(room)).unwrap_or(u16::MAX);
         frame.render_widget(Paragraph::new(lines).block(style::block(title, focused)).scroll((top, 0)), list);
-        if let Some(editor) = &self.editor {
+        let room = area.bottom().saturating_sub(list.y);
+        if let Some(form) = form {
+            let (width, height) = (list.width.min(72), form.height(data).min(room));
+            form.draw(frame, Rect { x: list.x, y: list.y, width, height }, data, focused);
+        } else if let Some(editor) = &self.editor {
             let width = list.width.min(64);
-            let height = editor.height(team, directory, data).min(area.bottom().saturating_sub(list.y));
+            let height = editor.height(team, directory, data).min(room);
             editor.draw(frame, Rect { x: list.x, y: list.y, width, height }, team, directory, data, now);
         }
     }

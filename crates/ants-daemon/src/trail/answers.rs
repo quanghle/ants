@@ -2,7 +2,7 @@
 //! messages on the thread of a step the run no longer waits on, or of a run no longer in memory.
 
 use ants_proto::{
-    AgentArgs, CallAnswer, Envelope, JournalEntry, PendingCall, Role, RunId, RunLimit, RunState, TipBoard,
+    AgentArgs, CallAnswer, Envelope, JournalEntry, PendingCall, Role, RunId, RunLimit, RunState, StepStage, TipBoard,
     TrailFunction, TrailRun, UserId,
 };
 use anyhow::Result;
@@ -126,22 +126,26 @@ impl Trails {
     /// Mark the call `call` of the run of `slot` waiting on a human its step's recipient asked ([`steps::asked`]),
     /// stored with the run's session: the run waits on humans once every call it waits on does and none is queued.
     async fn waits_on_a_human(&self, slot: &Slot, call: u32) -> Result<()> {
-        {
+        let (header, asked) = {
             let mut book = slot.book();
             let Some(pending) = book.pending.iter_mut().find(|pending| pending.call == call) else { return Ok(()) };
             if pending.asked {
                 return Ok(());
             }
             pending.asked = true;
+            let asked = pending.clone();
             if book.header.state == RunState::Running
                 && book.queued.is_empty()
                 && book.pending.iter().all(steps::on_a_human)
             {
                 book.header.state = RunState::Waiting;
             }
-        }
+            (book.header.clone(), asked)
+        };
         self.save_session(slot).await?;
-        self.save_header(slot).await
+        self.save_header(slot).await?;
+        self.report_step(&header, &asked, StepStage::Asked);
+        Ok(())
     }
 
     /// Take `message`, on the thread of a step to `to` the run `run` no longer waits on, when it is a notice, an
@@ -256,6 +260,9 @@ impl Trails {
             book.header.turns = book.header.turns.saturating_add(spent + 1);
         }
         self.charge(header, 0, spent + 1);
+        if pending.asked {
+            self.report_step(header, pending, StepStage::Started);
+        }
         // Gone already: one not stored now is stored by the run's next pass.
         let stored = async {
             self.save_ancestors(header).await?;

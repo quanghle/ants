@@ -1,6 +1,6 @@
 //! Tests of the teams in `ants chat`: the nav's teams as a forest, a team's view with its header and members tree,
 //! its keys, `@` completing teams and a message to a team going to its lead, a thread started through a team showing
-//! it, and a bus without teams.
+//! it, a team deleted once confirmed, and a bus without teams.
 
 use ants_proto::{Team, TeamDirectory, UserId};
 
@@ -66,7 +66,7 @@ fn the_nav_lists_the_teams_as_a_forest_each_with_its_ants() {
     assert!(items.iter().rposition(|i| matches!(i, nav::Item::Team(_))).unwrap() < first_ant, "before the ants");
     let rows = nav_rows(&m);
     let row = rows.iter().position(|r| r == "TEAMS").expect("a TEAMS section");
-    assert_eq!(rows[row + 1..row + 4], ["eng 3", "backend 2", "web 1"]);
+    assert_eq!(rows[row + 1..row + 5], ["eng 3", "backend 2", "web 1", "+ new team"]);
     let shown = rendered(30, 30, |f| nav::draw(f, f.area(), &m.data, &m.ui, &m.nav, at(1), false));
     assert!(shown.contains("│  backend 2"), "indented under eng: {shown}");
 }
@@ -75,7 +75,8 @@ fn the_nav_lists_the_teams_as_a_forest_each_with_its_ants() {
 fn a_bus_without_teams_shows_no_teams_section() {
     let mut m = backend();
     m.read(Read::Teams(Ok(None)), at(1));
-    assert!(!nav::items(&m.data, &nav::Item::Home, at(1)).iter().any(|i| matches!(i, nav::Item::Team(_))));
+    let items = nav::items(&m.data, &nav::Item::Home, at(1));
+    assert!(!items.iter().any(|i| matches!(i, nav::Item::Team(_) | nav::Item::NewTeam)));
     assert!(!nav_rows(&m).iter().any(|r| r == "TEAMS"));
     assert!(team_screen(&m, 100, 30).contains("no team backend"), "the view says so");
     m.ui.bar.focused = true;
@@ -137,12 +138,12 @@ fn enter_opens_the_member_selected_and_a_writes_to_the_team() {
     let mut m = showing("eng");
     keys(&mut m, [Key::Down, Key::Enter]);
     let View::Team(page) = m.page() else { panic!("not a team: {}", m.page().name()) };
-    assert_eq!(page.team, user("backend"), "the member team opens over the view");
+    assert_eq!(page.team, Some(user("backend")), "the member team opens over the view");
     keys(&mut m, [Key::Enter]);
     let View::Ant(page) = m.page() else { panic!("not an ant: {}", m.page().name()) };
     assert_eq!(page.ant, user("dev-a"));
     keys(&mut m, [Key::Esc, Key::Esc]);
-    assert!(matches!(m.page(), View::Team(page) if page.team == user("eng")), "back to eng");
+    assert!(matches!(m.page(), View::Team(page) if page.team == Some(user("eng"))), "back to eng");
 
     keys(&mut m, [Key::Char('a')]);
     assert!(m.ui.bar.focused);
@@ -189,4 +190,19 @@ fn every_name_of_the_forest_is_a_member_of_its_tree() {
     let View::Team(page) = m.page() else { panic!() };
     let names: Vec<UserId> = page.ids(&m.data, at(1));
     assert_eq!(names, ["boss", "backend", "dev-a", "dev-b"].map(user));
+}
+
+#[test]
+fn d_deletes_the_team_once_y_confirms() {
+    let mut m = backend();
+    assert_eq!(keys(&mut m, [Key::Char('D')]), None);
+    let View::Team(page) = m.page() else { panic!() };
+    assert_eq!(page.prompt(), Some(Page::DELETE_KEYS));
+    assert!(m.page().armed());
+    assert_eq!(keys(&mut m, [Key::Char('x')]), None, "any other key keeps it");
+    assert!(!m.page().armed());
+    keys(&mut m, [Key::Char('D'), Key::Esc]);
+    assert!(!m.page().armed() && matches!(m.page(), View::Team(_)), "Esc drops the confirmation first");
+    let delete = Job::TeamDelete { team: user("backend") };
+    assert_eq!(keys(&mut m, [Key::Char('D'), Key::Char('y')]), Some(Action::Run(delete, String::new())));
 }

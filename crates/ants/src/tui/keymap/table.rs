@@ -403,6 +403,23 @@ pub(super) const TEAM: &[Entry] = &[
         always,
     ),
     Entry::new(&[Key::Char('M')], "M", "manage", "manage the team's members, lead, owner and description", 13, always),
+    Entry::new(
+        &[Key::Char('n')],
+        "n",
+        "new team",
+        "create a team: its name, lead, members, owner and description (the nav's + new team too)",
+        14,
+        always,
+    ),
+    Entry::new(
+        &[Key::Char('D')],
+        "D",
+        "delete",
+        "delete the team once y confirms: it leaves the team holding it, its members then on no team",
+        15,
+        always,
+    ),
+    Entry::new(&[Key::Char('y')], "y", "confirm", "confirm the deletion D asked for", 1, armed),
     Entry::new(PAGES, "PgUp PgDn", "page", "move the selection further", 92, always),
     Entry::new(ENDS, "Home End", "first/last", "select the first or the last", 95, always),
 ];

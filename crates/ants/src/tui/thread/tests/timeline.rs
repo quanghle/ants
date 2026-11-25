@@ -237,3 +237,19 @@ fn a_runs_steps_show_where_they_started_and_enter_opens_the_thread_of_the_one_se
     let (open, ants) = m.steps_wanted().unwrap();
     assert_eq!((open, ants), (thread, vec![crate::test_support::live::user("lead")]));
 }
+
+#[test]
+fn a_step_whose_ant_asked_a_human_shows_waiting_on_the_human() {
+    use ants_proto::StepStage;
+    let (thread, asked) = (ThreadId::generate(), ThreadId::generate());
+    let mut m = model();
+    let entries = vec![message(1, &thread, "lead", "alice", "Run 0198c4ab started")];
+    m.stored(entries.clone(), at(1));
+    for stage in [StepStage::Started, StepStage::Asked] {
+        m.take(crate::live::Event::Status(step(&thread, &asked, 1, "dev-b", stage, 3)), at(4));
+    }
+    let mut page = Page::new(thread.clone());
+    page.history.loaded(&thread, Ok(entries)).unwrap();
+    let shown = screen(&page, &m, 110, at(5));
+    assert!(shown.contains("◆ step 1 review part 1 → dev-b · waiting on a human · thread "), "{shown}");
+}

@@ -78,6 +78,9 @@ impl DecidedBy {
 pub enum StepStage {
     /// The step's message is stored: the step started.
     Started,
+    /// The step's recipient asked a human with ask_human: the step waits on the human, its recipient's answer after
+    /// the human's being its reply.
+    Asked,
     /// A reply answered the step's call.
     Answered,
     /// The step's call raised in the script: its replies never matched its schema, or its message was withdrawn.
@@ -91,6 +94,7 @@ impl StepStage {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Started => "started",
+            Self::Asked => "asked",
             Self::Answered => "answered",
             Self::Failed => "failed",
             Self::Dropped => "dropped",

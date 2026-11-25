@@ -36,7 +36,7 @@ fn every_wire_enum_s_as_str_is_the_name_serde_writes() {
     named_as_on_the_wire!(PromptEnd: Replied, NoReply, Cancelled, Capped, Failed, Unknown);
     named_as_on_the_wire!(RatingOutcome: Worked, Partly, Failed);
     named_as_on_the_wire!(State: Working, WaitingApproval, Idle, Failed, SignedOut);
-    named_as_on_the_wire!(StepStage: Started, Answered, Failed, Dropped);
+    named_as_on_the_wire!(StepStage: Started, Asked, Answered, Failed, Dropped);
     named_as_on_the_wire!(TipVerdict: Helpful, Stale, Wrong);
     named_as_on_the_wire!(Verdict: AllowOnce, AllowAlways, Reject);
 }

@@ -108,6 +108,7 @@ async fn a_step_whose_ant_asked_a_human_waits_on_the_human_and_takes_the_ant_s_a
     init(&server).await;
     let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
     let thread = ThreadId::generate();
+    let mut status = lead.client.subscribe(subject::status(&ant("lead"), &thread)).await.unwrap();
     let run = lead.start_on(CAUGHT, TrailLimits::default(), thread.clone()).await;
     let step = lead.step().await;
     let text = "[ants] dev asked human and answers the step once answered.";
@@ -115,9 +116,12 @@ async fn a_step_whose_ant_asked_a_human_waits_on_the_human_and_takes_the_ant_s_a
     assert!(lead.trails.take(&notice).await.unwrap(), "a notice prompts no conductor");
     eventually("the run to wait on a human", async || lead.header(&run).await.state == RunState::Waiting).await;
     assert_eq!(lead.notes(&thread, 2).await[1], noted(&run, &step, NoticeKind::Asked, text));
+    assert_eq!(step_status(&mut status).await.1, StepStage::Started);
+    assert_eq!(step_status(&mut status).await.1, StepStage::Asked, "the step's status tells it waiting on the human");
 
     // The ant's answer after the human's replies to the step.
     assert!(lead.reply(&step, "deployed").await, "the reply prompts no conductor");
     let RunState::Done { result } = lead.ended(&run).await else { panic!("not done") };
     assert_eq!(result, json!("deployed"));
+    assert_eq!(step_status(&mut status).await.1, StepStage::Answered);
 }
