@@ -9,6 +9,7 @@ publish.workspace = true
 description = "trails, Python scripts that orchestrate ants, run by Monty in one-shot ants workers"
 
 [dependencies]
+ants-process.workspace = true
 ants-proto.workspace = true
 monty = "1.5.0"
 # The worker's memory limit: the `ants` binary's global allocator counts live bytes for Monty and caps a worker.

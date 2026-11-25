@@ -214,6 +214,7 @@ version = "0.5.0"
 dependencies = [
  "agent-client-protocol",
  "ants-client",
+ "ants-process",
  "ants-proto",
  "ants-sense",
  "ants-test-support",
@@ -244,6 +245,15 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ants-process"
+version = "0.5.0"
+dependencies = [
+ "rustix 1.1.6",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -301,6 +311,7 @@ dependencies = [
 name = "ants-trail"
 version = "0.5.0"
 dependencies = [
+ "ants-process",
  "ants-proto",
  "ants-test-support",
  "monty",
