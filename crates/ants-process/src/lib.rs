@@ -1,6 +1,7 @@
-//! The wait for a child process that the daemon and the trail runner share: on macOS, where tokio learns of a
-//! child's exit by SIGCHLD alone and so wakes the wait of every child at each child's exit, a kqueue of its own tells
-//! of each child's, so each wait wakes once, as with Linux's pidfds.
+//! The start of a child process and the wait for it that the daemon and the trail runner share: each starts in the
+//! blocking pool ([`spawn`]), and on macOS, where tokio learns of a child's exit by SIGCHLD alone and so wakes the
+//! wait of every child at each child's exit, a kqueue of its own tells of each child's, so each wait wakes once, as
+//! with Linux's pidfds ([`wait`]).
 
 #[cfg(target_os = "macos")]
 mod exit;
@@ -8,7 +9,14 @@ mod exit;
 use std::io;
 use std::process::ExitStatus;
 
-use tokio::process::Child;
+use tokio::process::{Child, Command};
+
+/// Start `command` in the blocking pool rather than on the calling thread, which the fork and exec of the program
+/// would hold for the time of the system call: a burst of sessions, each starting git, would otherwise hold the
+/// runtime's one thread. The child is the runtime's, waited for and killed on drop as any other.
+pub async fn spawn(mut command: Command) -> io::Result<Child> {
+    tokio::task::spawn_blocking(move || command.spawn()).await.map_err(io::Error::other)?
+}
 
 /// Wait for `child` to exit, its stdin closed first, as tokio's `Child::wait` does, woken on macOS by this child's
 /// exit alone.
@@ -27,9 +35,43 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use tokio::process::Command;
-
     use super::*;
+
+    #[tokio::test]
+    async fn a_child_starts_off_the_runtime_thread() {
+        use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd};
+
+        use rustix::event::{PollFd, PollFlags, Timespec};
+
+        // The child, before its exec, tells it began and waits for the runtime's thread to answer: a start holding
+        // that thread would wait out the child's 10 seconds and fail.
+        let (began, tell) = rustix::pipe::pipe().unwrap();
+        let (hear, answer) = rustix::pipe::pipe().unwrap();
+        let (tell_fd, hear_fd) = (tell.as_raw_fd(), hear.as_raw_fd());
+        let mut command = Command::new("true");
+        // SAFETY: the hook makes system calls alone, allocating nothing, on descriptors the parent keeps open until
+        // the child started.
+        unsafe {
+            command.pre_exec(move || {
+                let (tell, hear) = (BorrowedFd::borrow_raw(tell_fd), BorrowedFd::borrow_raw(hear_fd));
+                rustix::io::write(tell, b"b")?;
+                let mut fds = [PollFd::new(&hear, PollFlags::IN)];
+                if rustix::event::poll(&mut fds, Some(&Timespec { tv_sec: 10, tv_nsec: 0 }))? == 0 {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                Ok(())
+            });
+        }
+        let answering = tokio::spawn(async move {
+            // Blocking the runtime's thread: the start goes on elsewhere or not at all.
+            rustix::io::read(began.as_fd(), &mut [0; 1]).unwrap();
+            rustix::io::write(answer.as_fd(), b"a").unwrap();
+        });
+        let mut child = spawn(command).await.expect("the child started off the runtime's thread");
+        assert!(wait(&mut child).await.unwrap().success());
+        answering.await.unwrap();
+        drop((tell, hear));
+    }
 
     #[tokio::test]
     async fn a_wait_wakes_at_the_exit_of_its_own_child_alone() {

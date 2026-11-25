@@ -6,10 +6,10 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "The wait for a child process the daemon and the trail runner share, on macOS by a kqueue of its own"
+description = "The start of a child process in the blocking pool and the wait for it, on macOS by a kqueue of its own, that the daemon and the trail runner share"
 
 [dependencies]
-tokio = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["process", "rt"] }
 
 # kqueue for the exit of a child (crate::exit).
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -18,7 +18,11 @@ tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "time"] }
+
+# The pipes of the test of a child's start (crate::tests).
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1.1.6", default-features = false, features = ["std", "event", "pipe"] }
 
 [lints]
 workspace = true

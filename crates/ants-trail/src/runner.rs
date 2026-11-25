@@ -60,14 +60,16 @@ impl Worker {
             Request::Start { .. } => 1,
             Request::Resume { answers, .. } => answers.len(),
         });
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .arg("subprocess")
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
+            .kill_on_drop(true);
+        let mut child = ants_process::spawn(command)
+            .await
             .map_err(|e| WorkerError::Spawn(format!("{}: {e}", self.program.display())))?;
         let (Some(mut stdin), Some(stdout), Some(mut stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
