@@ -16,8 +16,12 @@
 //! The end of a turn also tells what the turn left running in the background ([`Background`]): the processes descended
 //! from the CLI, or tagged with its run, outside the CLI's process group, which its MCP servers stay in.
 //!
-//! On Windows each CLI runs in a job object that kills what is left in it once closed, at the release.
+//! On Windows each CLI runs in a job object that kills what is left in it once closed, at the release. The end of a
+//! turn lists the processes in it, but the CLI and console hosts, not running as the turn began or that the turn before
+//! left running (`job::Turns`): what the turn left running in the background.
 
+#[cfg(any(windows, test))]
+mod job;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -29,14 +33,18 @@ pub(super) mod tests;
 #[cfg(windows)]
 mod windows;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::{Arc, Mutex, Weak};
 
 use tokio::process::{Child, Command};
 
 use crate::harness::background::Background;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::sync::MutexExt as _;
+
+/// The most of a process's command line logged as it is ended or told as left running in the background.
+#[cfg(any(unix, windows))]
+const COMMAND_HEAD: usize = 120;
 
 #[cfg(all(test, unix))]
 pub(crate) use unix::GRACE;
@@ -57,8 +65,9 @@ pub(crate) struct Leftovers {
     /// The CLI's process and the descendants walked, shared with the [`Runs`] it is watched by.
     #[cfg(unix)]
     watch: Arc<Mutex<unix::Watch>>,
+    /// Shared with the [`Runs`] it is watched by.
     #[cfg(windows)]
-    job: Option<windows::Job>,
+    job: Option<Arc<windows::Job>>,
 }
 
 impl Leftovers {
@@ -95,7 +104,7 @@ impl Leftovers {
         }
         #[cfg(windows)]
         {
-            self.job = windows::Job::of(&self.name, child);
+            self.job = windows::Job::of(&self.name, child).map(Arc::new);
         }
     }
 
@@ -103,7 +112,11 @@ impl Leftovers {
     pub(crate) fn watched_by(&self, runs: &Runs) {
         #[cfg(unix)]
         runs.watches.locked().push(Arc::downgrade(&self.watch));
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            runs.jobs.locked().push(Arc::downgrade(job));
+        }
+        #[cfg(not(any(unix, windows)))]
         let _ = runs;
     }
 
@@ -157,12 +170,29 @@ impl Drop for Leftovers {
 pub(crate) struct Runs {
     #[cfg(unix)]
     watches: Arc<Mutex<Vec<Weak<Mutex<unix::Watch>>>>>,
+    #[cfg(windows)]
+    jobs: Arc<Mutex<Vec<Weak<windows::Job>>>>,
+    #[cfg(windows)]
+    turns: Arc<Mutex<job::Turns>>,
 }
 
 impl Runs {
+    /// As a turn began: on Windows, what a CLI's job object holds is noted, what starts in it from now on being the
+    /// turn's (`job::Turns`).
+    pub(crate) fn turn_started(&self) {
+        #[cfg(windows)]
+        {
+            let jobs: Vec<_> = self.jobs.locked().iter().filter_map(Weak::upgrade).collect();
+            for job in jobs {
+                job.turn_started();
+            }
+        }
+    }
+
     /// As a turn ended: walk the descendants of each CLI still running, so that its release ends those it left running
     /// even once it died first, and record them for a daemon started after this one died ([`record`]). Returns what
-    /// the turn left running in the background, outside the CLI's process group.
+    /// the turn left running in the background, outside the CLI's process group; on Windows, what its CLIs' job
+    /// objects hold that the turn started or the turn before left running (`job::Turns`).
     pub(crate) async fn turn_ended(&self) -> Vec<Background> {
         #[cfg(unix)]
         {
@@ -182,23 +212,51 @@ impl Runs {
             };
             tokio::task::spawn_blocking(walking).await.unwrap_or_default()
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let jobs: Vec<_> = {
+                let mut jobs = self.jobs.locked();
+                jobs.retain(|job| job.strong_count() > 0);
+                jobs.iter().filter_map(Weak::upgrade).collect()
+            };
+            let turns = self.turns.clone();
+            let listing = move || {
+                let listed = jobs.iter().map(|job| job.listed()).collect();
+                drop(jobs);
+                turns.locked().ended(listed)
+            };
+            tokio::task::spawn_blocking(listing).await.unwrap_or_default()
+        }
+        #[cfg(not(any(unix, windows)))]
         Vec::new()
     }
 }
 
 /// Whether process `pid`, started at `start` in the platform's unit, still runs; false where the process table is not
-/// read, as on Windows.
+/// read.
 pub(crate) fn runs(pid: i32, start: u64) -> bool {
     #[cfg(unix)]
     {
         unix::os::process(pid).is_some_and(|process| process.start == start)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::process(pid).is_some_and(|process| process.start == start)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (pid, start);
         false
     }
+}
+
+/// `command` cut to its first [`COMMAND_HEAD`] characters.
+#[cfg(any(unix, windows))]
+fn head(mut command: String) -> String {
+    if let Some((end, _)) = command.char_indices().nth(COMMAND_HEAD) {
+        command.truncate(end);
+    }
+    command
 }
 
 /// End, in the background, what runs of native CLIs left running whose daemon is gone, as the daemon starts: what is
@@ -245,9 +303,6 @@ mod unix {
 
     /// How often the processes sent SIGTERM are looked for while they have their grace.
     const POLL: Duration = Duration::from_millis(50);
-
-    /// The most of a process's command line logged as it is ended or told as left running in the background.
-    const COMMAND_HEAD: usize = 120;
 
     /// A process as the process table lists it.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,13 +497,9 @@ mod unix {
         background
     }
 
-    /// The command line of process `pid`, at most [`COMMAND_HEAD`] characters of it.
+    /// The command line of process `pid`, at most [`super::COMMAND_HEAD`] characters of it.
     fn command(pid: i32, buffer: &mut Vec<u8>) -> String {
-        let mut command = os::command(pid, buffer);
-        if let Some((end, _)) = command.char_indices().nth(COMMAND_HEAD) {
-            command.truncate(end);
-        }
-        command
+        super::head(os::command(pid, buffer))
     }
 
     /// The processes to end: those of `tree` still running and those of the daemon's user tagged with a run that is
