@@ -700,7 +700,7 @@ mod tests {
         let mut dev = entry("dev-a", 60, 2, at(2));
         dev.whoami = Some((1..=40).map(|n| format!("word{n:02}")).collect::<Vec<_>>().join(" "));
         m.data.live.colony(vec![dev], at(2));
-        for n in 0..14 {
+        for n in 0..15 {
             let tool = StatusUpdate::Tool {
                 id: format!("t{n}"),
                 title: Some(format!("step {n:02}")),
@@ -715,7 +715,7 @@ mod tests {
         m.focus = crate::tui::model::Focus::View;
         let tabs = |shown: &str| shown.lines().position(|l| l.contains("threads (0)")).unwrap();
         let shown = screen(&m, 160, 36, at(3));
-        assert_eq!(tabs(&shown), 15, "the box keeps the 12 rows of the about column: {shown}");
+        assert_eq!(tabs(&shown), 16, "the box keeps the 13 rows of the about column: {shown}");
         assert!(shown.contains("whoami       word01") && !shown.contains("word40"), "{shown}");
         assert!(shown.contains("[ ] 5 more lines") && shown.contains("[ ] 4 more lines"), "{shown}");
 
@@ -737,7 +737,7 @@ mod tests {
         let shown = screen(&m, 160, 36, at(3));
         assert!(!shown.contains("nothing holds dev-a back") && shown.contains("[ ] 3 more lines"), "{shown}");
         assert!(shown.contains("[ ] 1 more line "), "the about column stays: {shown}");
-        assert_eq!(tabs(&shown), 15);
+        assert_eq!(tabs(&shown), 16);
 
         m.select(nav::Item::Ant(user("dev-b")));
         m.select(nav::Item::Ant(user("dev-a")));

@@ -19,7 +19,8 @@ use serde::Serialize;
 
 use self::ants::{
     check_ants, check_bypassed, check_caps, check_host, check_machine_name, check_mcp_sockets, check_open_files,
-    check_reactions, check_sense_kept, check_sense_logs, check_shared_workdirs, check_trail_saves, check_watchers,
+    check_reactions, check_sense_kept, check_sense_logs, check_shared_workdirs, check_trail_saves, check_turn_budgets,
+    check_watchers,
 };
 use self::channels::check_channels;
 use self::credentials::{check_backup, check_cli_creds};
@@ -208,6 +209,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(check_open_files(ants, ants_daemon::limits::files::reachable()));
     checks.extend(check_sense_logs(ants));
     checks.extend(check_watchers(ants));
+    checks.extend(check_turn_budgets(ants));
     checks.extend(reactions);
     checks.extend(trail_saves);
     checks.extend(team_changes);

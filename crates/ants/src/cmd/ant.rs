@@ -20,12 +20,12 @@ use crate::{
 #[derive(Subcommand, Debug)]
 pub(crate) enum AntCommand {
     /// Show ANT as the ant view of `ants chat` does: where and how it runs (machine, harness, agent, model, workdir,
-    /// capabilities, escalation chain, sage, whoami, the profile the ant wrote of itself) and what holds it back, as
-    /// its colony entry tells; the messages waiting for it (`ants queue`), what it spent that UTC day (`ants spend`),
-    /// its most recently active threads (`ants thread list --ant`), its settings as the config file of its machine
-    /// has them, secrets hidden, and the latest admin orders to it (`ants ant orders`). Needs a human's credentials,
-    /// and for the queue a daemon of the ant to answer. With an admin's credentials, reads the settings afresh with
-    /// an admin order, else shows them as last read.
+    /// capabilities, escalation chain, turn budget, sage, whoami, the profile the ant wrote of itself) and what holds
+    /// it back, as its colony entry tells; the messages waiting for it (`ants queue`), what it spent that UTC day
+    /// (`ants spend`), its most recently active threads (`ants thread list --ant`), its settings as the config file of
+    /// its machine has them, secrets hidden, and the latest admin orders to it (`ants ant orders`). Needs a human's
+    /// credentials, and for the queue a daemon of the ant to answer. With an admin's credentials, reads the settings
+    /// afresh with an admin order, else shows them as last read.
     Show {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,

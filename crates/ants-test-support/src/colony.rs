@@ -35,6 +35,7 @@ pub fn colony_entry(ant: &str, machine: &str) -> ColonyEntry {
         handling: 0,
         harnesses: 0,
         escalate_to: Vec::new(),
+        turn_budget: ants_proto::DEFAULT_TURN_BUDGET,
         sage: None,
         version: ANTS_VERSION.to_owned(),
         perms: PERMISSIONS_VERSION,

@@ -28,6 +28,7 @@ expression: value
     "lead",
     "cto"
   ],
+  "turn_budget": 20,
   "sage": "sage",
   "version": "0.1.0",
   "perms": 1,

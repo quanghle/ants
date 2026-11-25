@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
 use crate::{ANTS_VERSION, COLONY_BUCKET, COLONY_HEARTBEAT, COLONY_TTL, PERMISSIONS_VERSION};
-use crate::{Error, PermissionsVersion, UserId};
+use crate::{DEFAULT_TURN_BUDGET, Error, PermissionsVersion, UserId};
 
 /// An ant's entry in the [`COLONY_BUCKET`], under the key of its id.
 ///
@@ -61,6 +61,10 @@ pub struct ColonyEntry {
     /// leads. Published so any daemon can follow the chain while the ant is offline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escalate_to: Vec<UserId>,
+    /// The turns a thread gets from a human's message to the ant: its config's `turn_budget` as the serving daemon
+    /// resolves it. Missing when it is [`DEFAULT_TURN_BUDGET`].
+    #[serde(default = "default_turn_budget", skip_serializing_if = "is_default_turn_budget")]
+    pub turn_budget: u32,
     /// The ant reviewing this one, its sage, as the ant's config and shared settings resolve it. Missing for a sage,
     /// which has none of its own, and where reviews are off. Published so a daemon tells its ant is some live ant's
     /// sage, sending none of its review packets then, as a sage is reviewed by no one.
@@ -111,6 +115,14 @@ pub struct ColonyEntry {
     /// codex and copilot-sdk do. Missing when it does not.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mcp: bool,
+}
+
+fn default_turn_budget() -> u32 {
+    DEFAULT_TURN_BUDGET
+}
+
+fn is_default_turn_budget(turns: &u32) -> bool {
+    *turns == DEFAULT_TURN_BUDGET
 }
 
 /// An ant's pause, as its colony entry reports it ([`ColonyEntry::paused`]).
@@ -326,6 +338,7 @@ mod tests {
             handling: 0,
             harnesses: 0,
             escalate_to: Vec::new(),
+            turn_budget: DEFAULT_TURN_BUDGET,
             sage: None,
             version: "0.3.1".to_owned(),
             perms: PermissionsVersion(2),
@@ -371,6 +384,8 @@ mod tests {
         let chained = ColonyEntry { escalate_to: vec![p("lead"), p("dev-b")], ..entry.clone() };
         round_trips(&chained, r#""escalate_to":["lead","dev-b"]"#);
         assert_eq!(chained.leader(), Some(&p("lead")));
+        assert!(!json.contains("turn_budget"), "the default budget is left out: {json}");
+        round_trips(&ColonyEntry { turn_budget: 20, ..entry.clone() }, r#""turn_budget":20"#);
         round_trips(&ColonyEntry { sage: Some(p("lead")), ..entry.clone() }, r#""sage":"lead""#);
         let profiled = ColonyEntry { profile: Some("Good for Rust daemons.".to_owned()), ..entry.clone() };
         round_trips(&profiled, r#"Review NATS changes.","profile":"Good for Rust daemons.","started_at""#);

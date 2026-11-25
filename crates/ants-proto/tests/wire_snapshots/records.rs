@@ -66,6 +66,7 @@ fn colony() {
             handling: 1,
             harnesses: 2,
             escalate_to: vec![user("lead"), user("cto")],
+            turn_budget: 20,
             sage: Some(user("sage")),
             version: "0.1.0".to_owned(),
             perms: PermissionsVersion(1),
