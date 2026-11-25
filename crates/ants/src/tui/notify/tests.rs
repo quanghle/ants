@@ -76,6 +76,7 @@ async fn the_notify_jobs_snooze_show_and_resume_as_ants_notify_does() {
         account: None,
         keyring: None,
         admin: Err("unused".into()),
+        reach: nats.reach(),
     };
     let mut exec = Exec::new(ctx);
     let mut done = async |job| {

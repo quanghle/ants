@@ -28,12 +28,13 @@ use crate::credentials::{issued, keys, revoke};
 use crate::people::humans;
 use crate::service::{Action, Outcome, Service, Services, failure, manual};
 use crate::signing::retire;
+use crate::text::Say;
 
 /// Tool rules a dedicated assistant runs without asking: reading and searching within its own home, and thinking.
 const ALLOW: [&str; 3] = [tool_kind::READ, tool_kind::SEARCH, tool_kind::THINK];
 
 /// `ants assistant enable`.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 pub struct EnableArgs {
     /// The assistant ant (default: <human>-assistant).
     #[arg(long, value_name = "NAME")]
@@ -98,7 +99,7 @@ impl EnableArgs {
 }
 
 /// `ants assistant disable`.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 pub struct DisableArgs {
     /// Also retire the dedicated assistant `ants assistant enable` created: unlist it from the config file, revoke
     /// its credentials and remove their file and any encryption key seed beside it, keeping its home. Asked on a
@@ -141,7 +142,7 @@ fn default_name(human: &UserId) -> Result<UserId> {
 }
 
 /// `ants assistant enable`.
-pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
+pub async fn enable(nats: &Nats<'_>, args: EnableArgs, say: &mut Say) -> Result<()> {
     let creds = signing_creds(nats)?;
     let human = &nats.me.id;
     let name = match &args.name {
@@ -153,7 +154,7 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
     }
     auth::check_not_reserved(&name)?;
     if let Some(machine) = args.on.clone() {
-        return enable_on(nats, &args, &name, machine).await;
+        return enable_on(nats, &args, &name, machine, say).await;
     }
     let dir = crate::auth::team_dir(args.dir.clone())?;
     if auth::account_key(&dir).is_err() {
@@ -172,7 +173,7 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
     let local = Local::read(&name, &path, Some(&dir));
     if local.entry.is_some() || local.in_registry {
         for warning in check(&name, &local, &[])? {
-            println!("warning: {warning}");
+            say.line(format!("warning: {warning}"));
         }
     }
     auth::check_assistant(&dir, &name, human)?;
@@ -187,14 +188,19 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
     let entry = match listed {
         Some(_) => {
             if args.sets_any() {
-                println!("{name} is already listed in {}: its settings stay as they are there", path.display());
+                say.line(format!(
+                    "{name} is already listed in {}: its settings stay as they are there",
+                    path.display()
+                ));
             }
             None
         }
         None => Some(entry(nats, &args, &name, &summary, &out)?),
     };
     for rule in args.allow.iter().filter(|r| risky(r)) {
-        println!("warning: {name} runs {rule} requests without asking: fetched pages and command output can steer it");
+        say.line(format!(
+            "warning: {name} runs {rule} requests without asking: fetched pages and command output can steer it"
+        ));
     }
     let (_, js) = nats.connect("ants-assistant").await?;
     if humans::load(&js, &nats.me).await.contains(&name) {
@@ -202,19 +208,19 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
     }
 
     match held {
-        Held::Live => println!("credentials of {name} in {} kept: they name {human}", out.display()),
+        Held::Live => say.line(format!("credentials of {name} in {} kept: they name {human}", out.display())),
         Held::Missing | Held::Stale(_) => {
             if let Held::Stale(why) = held {
-                println!("replacing the {why} credentials of {name} in {}", out.display());
+                say.line(format!("replacing the {why} credentials of {name} in {}", out.display()));
                 retire::forget(&out)?;
             }
             issue(nats, &dir, &name, &out, args.store_key).await?;
-            println!("credentials of {name}, assistant of {human}, in {}", out.display());
+            say.line(format!("credentials of {name}, assistant of {human}, in {}", out.display()));
         }
     }
     if let Some(entry) = &entry {
         config::append(&path, entry)?;
-        println!("{name} listed in {}", path.display());
+        say.line(format!("{name} listed in {}", path.display()));
     }
     let again = match &args.name {
         Some(name) => format!("ants assistant enable --name {name}"),
@@ -223,35 +229,43 @@ pub async fn enable(nats: &Nats<'_>, args: EnableArgs) -> Result<()> {
     let (before, _) = put(&js, creds, human, Some(name.clone()), Sealing::Keep).await.with_context(|| {
         format!("the credentials and [[ant]] of {name} are in place, but the grant is not signed: run `{again}` again")
     })?;
-    replaced(&name, human, before, Some(&path));
+    replaced(&name, human, before, Some(&path), say);
+    serve(&name, &path, say);
+    Ok(())
+}
+
+/// Have the daemon of this machine serve `name`, listed in the config file at `path`, reloading it, and say with `say`
+/// how that went, and when the ant reaches the hub through a leaf node of this machine, that it should not.
+fn serve(name: &UserId, path: &Path, say: &mut Say) {
     if let Ok(Some((_, leaf))) = crate::node::leaf::uplink::leaf_node(None) {
-        println!(
+        say.line(format!(
             "this machine runs the leaf node of {}: a leaf node's uplink carries only an ant's rights, so the `nats` \
              of the [[ant]] of {name} should reach the hub directly",
             leaf.machine
-        );
+        ));
     }
-    match Services::local().apply(Service::Daemon, Action::Reload, &path) {
-        Outcome::Done(command) => println!("daemon reloaded to serve {name} ({command})"),
-        Outcome::NotRunning => println!("the daemon service is not running; it serves {name} once started"),
-        outcome => println!(
+    match Services::local().apply(Service::Daemon, Action::Reload, path) {
+        Outcome::Done(command) => say.line(format!("daemon reloaded to serve {name} ({command})")),
+        Outcome::NotRunning => say.line(format!("the daemon service is not running; it serves {name} once started")),
+        outcome => say.line(format!(
             "{}serve {name}: reload `ants daemon` with SIGHUP, or its service ({}); the ants it serves carry on",
             failure(outcome),
             manual(Service::Daemon, Action::Reload)
-        ),
+        )),
     }
-    Ok(())
 }
 
 /// `ants assistant enable --on MACHINE`: send the add order of the assistant `ant` to the daemon of `machine`, then
 /// sign the grant once the daemon applied it.
-async fn enable_on(nats: &Nats<'_>, args: &EnableArgs, ant: &UserId, machine: Machine) -> Result<()> {
+async fn enable_on(nats: &Nats<'_>, args: &EnableArgs, ant: &UserId, machine: Machine, say: &mut Say) -> Result<()> {
     let creds = signing_creds(nats)?;
     let admin = orders::Admin::of(nats)?;
     let human = &nats.me.id;
     let settings = order_settings(args, ant, human);
     for rule in args.allow.iter().filter(|r| risky(r)) {
-        println!("warning: {ant} runs {rule} requests without asking: fetched pages and command output can steer it");
+        say.line(format!(
+            "warning: {ant} runs {rule} requests without asking: fetched pages and command output can steer it"
+        ));
     }
     let (_, js) = nats.connect("ants-assistant").await?;
     if humans::load(&js, &nats.me).await.contains(ant) {
@@ -261,8 +275,8 @@ async fn enable_on(nats: &Nats<'_>, args: &EnableArgs, ant: &UserId, machine: Ma
     let set = format!("ants assistant set {ant}");
     match admin.send(&js, Some(machine.clone()), ant, op, args.wait).await? {
         Sent::Pending(order) => {
-            println!("{}", orders::pending_note(&order));
-            println!("once {ant} is added, `{set}` makes it the assistant of {human}");
+            say.line(orders::pending_note(&order));
+            say.line(format!("once {ant} is added, `{set}` makes it the assistant of {human}"));
             return Ok(());
         }
         Sent::Refused(_, outcome) => bail!(
@@ -272,11 +286,11 @@ async fn enable_on(nats: &Nats<'_>, args: &EnableArgs, ant: &UserId, machine: Ma
         ),
         Sent::Applied(..) => {}
     }
-    println!("{ant} added on {machine} as the assistant of {human}; its daemon starts it");
+    say.line(format!("{ant} added on {machine} as the assistant of {human}; its daemon starts it"));
     let (before, _) = put(&js, creds, human, Some(ant.clone()), Sealing::Keep)
         .await
         .with_context(|| format!("{ant} is added on {machine}, but the grant is not signed: run `{set}`"))?;
-    replaced(ant, human, before, None);
+    replaced(ant, human, before, None, say);
     Ok(())
 }
 
@@ -401,24 +415,14 @@ async fn issue(nats: &Nats<'_>, dir: &Path, ant: &UserId, out: &Path, store_key:
     auth::Issue::new(dir, ant, kind, permissions).with(&new).into_file(out).map(drop)
 }
 
-/// `ants assistant disable`.
-pub async fn disable(nats: &Nats<'_>, args: DisableArgs) -> Result<()> {
-    disable_with(
-        nats,
-        args,
-        retire::STOP_WAIT,
-        |question| Ok(crate::tty::confirm_on_stdout(question)?.unwrap_or(false)),
-    )
-    .await
-}
-
-/// [`disable`], waiting up to `wait` for a retired assistant to stop, and asking with `ask` whether to retire it
-/// without --retire.
-async fn disable_with(
+/// `ants assistant disable`, waiting up to `wait` for a retired assistant to stop, asking with `ask` whether to retire
+/// it without --retire, and saying what it does with `say`.
+pub(crate) async fn disable_with(
     nats: &Nats<'_>,
     args: DisableArgs,
     wait: Duration,
     ask: impl FnOnce(&str) -> Result<bool>,
+    say: &mut Say,
 ) -> Result<()> {
     let creds = signing_creds(nats)?;
     let human = &nats.me.id;
@@ -436,7 +440,7 @@ async fn disable_with(
     let dedicated = match Dedicated::find(&path, &candidate, human) {
         Ok(found) => found,
         Err(e) if !args.retire => {
-            println!("warning: whether {candidate} is a dedicated assistant is not known: {e:#}");
+            say.line(format!("warning: whether {candidate} is a dedicated assistant is not known: {e:#}"));
             None
         }
         Err(e) => return Err(e),
@@ -455,17 +459,17 @@ async fn disable_with(
     };
     let withdrawn = before.as_ref().and_then(|g| g.assistant.clone());
     match &withdrawn {
-        Some(before) => println!("{before} is no longer the assistant of {human}"),
-        None => println!("{human} has no assistant"),
+        Some(before) => say.line(format!("{before} is no longer the assistant of {human}")),
+        None => say.line(format!("{human} has no assistant")),
     }
     if let Some(before) = &before {
-        ended_sealing(before, Some(&path));
+        ended_sealing(before, Some(&path), say);
     }
     let Some(dedicated) = dedicated else {
         if let Some(before) = &withdrawn {
-            println!(
+            say.line(format!(
                 "Its credentials still name {human}: `ants auth revoke {before}` where the account key is revokes them."
-            );
+            ));
         }
         return Ok(());
     };
@@ -473,13 +477,13 @@ async fn disable_with(
     let question =
         format!("Retire {name} too (unlist it from {}, revoke its credentials; its home stays)?", path.display());
     if !args.retire && !ask(&question)? {
-        println!(
+        say.line(format!(
             "{name} stays listed, its credentials naming {human}: `ants assistant disable --name {name} --retire` \
              retires it, `ants assistant set {name}` makes it the assistant again"
-        );
+        ));
         return Ok(());
     }
-    dedicated.retire(&path, &js, wait, args.dir, args.no_push, nats).await
+    dedicated.retire(&path, &js, wait, args, nats, say).await
 }
 
 /// An assistant `ants assistant enable` created, as the config file lists it: no template, working in its own home,
@@ -521,71 +525,71 @@ impl Dedicated {
     }
 
     /// Unlist the ant from the config file at `path`, wait up to `wait` for its daemon to stop it as the colony `js`
-    /// shows, revoke its credentials with the account key in `dir` and push the account (unless `no_push`) to the
+    /// shows, revoke its credentials with the account key in `--dir` and push the account (unless `--no-push`) to the
     /// server of `nats`, remove their file and take the ant off its team, clearing the team's lead when it led it
-    /// ([`crate::teams::drop_ant`]). Its home stays.
+    /// ([`crate::teams::drop_ant`]), saying so with `say`. Its home stays.
     async fn retire(
         &self,
         path: &Path,
         js: &jetstream::Context,
         wait: Duration,
-        dir: Option<PathBuf>,
-        no_push: bool,
+        DisableArgs { dir, no_push, .. }: DisableArgs,
         nats: &Nats<'_>,
+        say: &mut Say,
     ) -> Result<()> {
         let name = &self.name;
         config::write(path, &config::without_ant(path, name)?)?;
-        println!(
+        say.line(format!(
             "unlisted {name} from {}: the daemon serving it stops it, its prompts in flight ending first",
             path.display()
-        );
-        println!("waiting up to {}m for {name} to stop", wait.as_secs().div_ceil(60));
-        println!("{}", retire::stop_note(name, retire::stopped(js, name, wait).await));
+        ));
+        say.line(format!("waiting up to {}m for {name} to stop", wait.as_secs().div_ceil(60)));
+        say.line(retire::stop_note(name, retire::stopped(js, name, wait).await));
         let dir = crate::auth::team_dir(dir)?;
         let revoked = match auth::account_key(&dir) {
             Ok(_) => {
                 let known = issued::issued(&dir)?.iter().any(|i| i.name == name.as_str());
                 let revoked = revoke::revoke(&dir, known.then_some(name.as_str()), std::slice::from_ref(&self.key))?;
                 for r in &revoked {
-                    println!("revoked {} ({name})", r.key);
+                    say.line(format!("revoked {} ({name})", r.key));
                 }
                 true
             }
             Err(_) => {
-                println!(
+                say.line(format!(
                     "no account key in {}: revoke the credentials of {name} where it is, with `ants auth revoke --key \
                      {} --earlier`",
                     dir.display(),
                     self.key
-                );
+                ));
                 false
             }
         };
         retire::forget(&self.creds)?;
-        println!("{} removed", self.creds.display());
+        say.line(format!("{} removed", self.creds.display()));
         if let Some(line) = crate::teams::drop_ant_or_say(js, nats.domain, name).await {
-            println!("{line}");
+            say.line(line);
         }
         let seed = sealing::key_path(&self.creds);
         if seed.exists() {
             std::fs::remove_file(&seed).with_context(|| format!("removing {}", seed.display()))?;
-            println!("{} removed, the seed of its encryption key for sealed messages", seed.display());
+            say.line(format!("{} removed, the seed of its encryption key for sealed messages", seed.display()));
         }
-        println!(
+        say.line(format!(
             "Its home {} stays: `ants assistant enable --name {name}` brings it back with its memory and task \
              database.",
             self.home.display()
-        );
+        ));
         match (revoked, no_push) {
             (true, false) => {
-                crate::credentials::push::push_and_report(nats.url, nats.domain, &dir).await?;
+                crate::credentials::push::push_and_report(nats.url, nats.domain, &dir, say).await?;
                 for line in retire::clean_consumers(nats.url, nats.domain, &dir, name).await {
-                    println!("{line}");
+                    say.line(line);
                 }
                 Ok(())
             }
             (true, true) => {
-                println!("push the revocation to the hub with `ants auth push --nats URL`");
+                say.line("push the revocation to the hub with `ants auth push --nats URL`");
                 Ok(())
             }
             (false, _) => Ok(()),
@@ -641,7 +645,7 @@ mod tests {
         std::fs::write(&config, "harness = \"copilot\"\nhuman = \"human\"\n").unwrap();
         let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
 
-        enable(&nats, enable_args(&config, &team, &home)).await.unwrap();
+        enable(&nats, enable_args(&config, &team, &home), &mut Say::Print).await.unwrap();
         let out = team.join("alice-assistant.creds");
         let finding = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!((finding.name.as_str(), &finding.kind), ("alice-assistant", &Kind::Assistant { of: alice.clone() }));
@@ -653,7 +657,7 @@ mod tests {
         assert_eq!(read(&js, &alice).await.unwrap().unwrap().assistant, Some(p("alice-assistant")));
 
         let held = std::fs::read_to_string(&out).unwrap();
-        enable(&nats, enable_args(&config, &team, &home)).await.unwrap();
+        enable(&nats, enable_args(&config, &team, &home), &mut Say::Print).await.unwrap();
         assert_eq!(std::fs::read_to_string(&out).unwrap(), held, "live credentials are kept");
         assert_eq!(std::fs::read_to_string(&config).unwrap(), listed, "the entry is not appended twice");
 
@@ -663,7 +667,9 @@ mod tests {
         let seed = sealing::key_path(&out);
         assert!(seed.exists());
 
-        disable_with(&nats, disable_args(&config, &team, true), WAIT, |_| unreachable!()).await.unwrap();
+        disable_with(&nats, disable_args(&config, &team, true), WAIT, |_| unreachable!(), &mut Say::Print)
+            .await
+            .unwrap();
         assert!(!seed.exists(), "ending the enrollment deletes the seed");
         assert_eq!(read(&js, &alice).await.unwrap().unwrap().assistant, None);
         assert!(!std::fs::read_to_string(&config).unwrap().contains("alice-assistant"));
@@ -671,7 +677,7 @@ mod tests {
         assert!(revoke::revoked(&team).unwrap().iter().any(|r| r.key == finding.key));
         assert!(home.is_dir(), "its home stays");
 
-        enable(&nats, enable_args(&config, &team, &home)).await.unwrap();
+        enable(&nats, enable_args(&config, &team, &home), &mut Say::Print).await.unwrap();
         let again = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert_ne!(again.key, finding.key, "enable brings a retired assistant back with new credentials");
         assert_eq!(read(&js, &alice).await.unwrap().unwrap().assistant, Some(p("alice-assistant")));
@@ -695,19 +701,21 @@ mod tests {
         };
 
         let keyless = scratch.join("keyless");
-        let err = enable(&nats, enable_args(&config, &keyless, &home)).await.unwrap_err().to_string();
+        let err = enable(&nats, enable_args(&config, &keyless, &home), &mut Say::Print).await.unwrap_err().to_string();
         assert!(err.contains("needs the bus's account key"), "{err}");
         untouched();
 
         let foreign = EnableArgs { out: Some(creds.clone()), ..enable_args(&config, &team, &home) };
-        let err = enable(&nats, foreign).await.unwrap_err().to_string();
+        let err = enable(&nats, foreign, &mut Say::Print).await.unwrap_err().to_string();
         assert!(err.contains("do not make alice-assistant the assistant of alice"), "{err}");
         untouched();
 
         let other_home = scratch.join("pa");
-        enable(&nats, EnableArgs { name: Some(p("pa")), ..enable_args(&config, &team, &other_home) }).await.unwrap();
+        enable(&nats, EnableArgs { name: Some(p("pa")), ..enable_args(&config, &team, &other_home) }, &mut Say::Print)
+            .await
+            .unwrap();
         let with_pa = std::fs::read_to_string(&config).unwrap();
-        let err = enable(&nats, enable_args(&config, &team, &home)).await.unwrap_err().to_string();
+        let err = enable(&nats, enable_args(&config, &team, &home), &mut Say::Print).await.unwrap_err().to_string();
         assert!(err.contains("pa is already the assistant of alice"), "{err}");
         assert_eq!(std::fs::read_to_string(&config).unwrap(), with_pa);
         assert!(!team.join("alice-assistant.creds").exists());
@@ -717,7 +725,7 @@ mod tests {
             asked = Some(q.to_owned());
             Ok(false)
         };
-        disable_with(&nats, disable_args(&config, &team, false), WAIT, ask).await.unwrap();
+        disable_with(&nats, disable_args(&config, &team, false), WAIT, ask, &mut Say::Print).await.unwrap();
         assert!(asked.unwrap().starts_with("Retire pa too"));
         let (_, js) = bus::connect(&server.url, Some(&creds), None, &alice, "test").await.unwrap();
         assert_eq!(read(&js, &alice).await.unwrap().unwrap().assistant, None);
@@ -765,7 +773,7 @@ mod tests {
         let mut args = enable_args(&path, &team, &home);
         (args.config, args.dir, args.on, args.wait) = (None, None, Some(m1.clone()), SIGNED);
         args.model = Some("gpt-5".to_owned());
-        with_signer(&server, Box::pin(enable(&nats, args))).await.unwrap();
+        with_signer(&server, Box::pin(enable(&nats, args, &mut Say::Print))).await.unwrap();
         let out = server.dir().join("alice-assistant.creds");
         let finding = Finding::from_creds(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!((finding.name.as_str(), &finding.kind), ("alice-assistant", &Kind::Assistant { of: alice.clone() }));

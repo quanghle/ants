@@ -7,10 +7,12 @@ use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
 use crate::completions;
-use crate::connection::Connection;
-use crate::people::assistant;
+use crate::connection::{Connection, Nats};
+use crate::people::assistant::{self, dedicated};
+use crate::signing::retire;
+use crate::text::Say;
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AssistantCommand {
     /// Create the human's dedicated assistant ant and designate it, in one step: its credentials naming the human
     /// (`ants auth user ANT --assistant-of HUMAN`), an [[ant]] working in its own home with an assistant's whoami and
@@ -85,7 +87,7 @@ pub(crate) enum AssistantCommand {
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SealCommand {
     /// Enroll the assistant, with the key of the assistant on this machine, made if it has none, unless `--key`.
     On {
@@ -101,19 +103,39 @@ pub(crate) enum SealCommand {
 pub(crate) async fn run(conn: &Connection<'_>, command: AssistantCommand) -> Result<()> {
     let nats = || conn.nats();
     match command {
-        AssistantCommand::Enable(args) => assistant::dedicated::enable(&nats()?, *args).await,
-        AssistantCommand::Disable(args) => assistant::dedicated::disable(&nats()?, args).await,
-        AssistantCommand::Set { ant } => assistant::set(&nats()?, &ant).await,
-        AssistantCommand::Clear => assistant::clear(&nats()?).await,
-        AssistantCommand::Show { human, json } => assistant::show(&nats()?, human, json).await,
         AssistantCommand::Seal(SealCommand::On { key }) => assistant::seal_on(&nats()?, key).await,
         AssistantCommand::Seal(SealCommand::Off) => assistant::seal_off(&nats()?).await,
         AssistantCommand::Key { ant } => assistant::key(&ant),
         AssistantCommand::Confirm { act, deny, json } => {
             Box::pin(assistant::consent::confirm(&nats()?, act.as_deref(), deny, json)).await
         }
+        command => {
+            let ask = |question: &str| Ok(crate::tty::confirm_on_stdout(question)?.unwrap_or(false));
+            act(&nats()?, command, ask, &mut Say::Print).await
+        }
+    }
+}
+
+/// `ants assistant enable|disable|set|clear|show|allow` as the human of `nats`, which `/assistant` in `ants chat`
+/// runs too: `ask` asks whether `disable` without --retire retires the dedicated assistant too, `say` tells what is
+/// done.
+pub(crate) async fn act(
+    nats: &Nats<'_>,
+    command: AssistantCommand,
+    ask: impl FnOnce(&str) -> Result<bool>,
+    say: &mut Say,
+) -> Result<()> {
+    match command {
+        AssistantCommand::Enable(args) => dedicated::enable(nats, *args, say).await,
+        AssistantCommand::Disable(args) => dedicated::disable_with(nats, args, retire::STOP_WAIT, ask, say).await,
+        AssistantCommand::Set { ant } => assistant::set(nats, &ant, say).await,
+        AssistantCommand::Clear => assistant::clear(nats, say).await,
+        AssistantCommand::Show { human, json } => assistant::show(nats, human, json, say).await,
         AssistantCommand::Allow { rules, remove, clear, json } => {
-            assistant::consent::allow(&nats()?, rules, remove, clear, json).await
+            assistant::consent::allow(nats, rules, remove, clear, json, say).await
+        }
+        AssistantCommand::Seal(_) | AssistantCommand::Key { .. } | AssistantCommand::Confirm { .. } => {
+            unreachable!("run takes them")
         }
     }
 }

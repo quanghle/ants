@@ -1,12 +1,65 @@
 //! A change to a channel's entry as a human makes it: `ants channel create`, `set`, `add` and `remove`, and in `ants
-//! chat` the channel view's members editor. The same checks refuse it, and the same compare-and-set update
-//! ([`super::update`]) writes it.
+//! chat` the channel view's members editor and `/channel`. The same checks refuse it, and the same compare-and-set
+//! update ([`super::update`]) writes it.
 
-use ants_proto::{ChannelEntry, ChannelId, Humans, TeamDirectory, UserId};
+use ants_proto::{ChannelEntry, ChannelId, Humans, JsDomain, TeamDirectory, UserId};
 use anyhow::{Result, bail};
 use async_nats::jetstream::{self, kv};
 
 use crate::ants::colony;
+use crate::people::humans::{self, Me};
+
+/// What `ants channel create`, `set`, `add`, `remove` and `delete` do to a channel, and ants chat's `/channel` with
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Manage {
+    /// Create the channel as the change gives it; fails when the channel exists.
+    Create(Change),
+    Change(Change),
+    /// Delete the channel, its posts staying in the stream.
+    Delete,
+}
+
+/// What a [`Manage`] did: the line `ants channel` prints, and what it warns of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Managed {
+    pub line: String,
+    pub warnings: Vec<String>,
+}
+
+impl Manage {
+    /// Do it to `channel` as `me`, the teams read in JetStream domain `domain`.
+    pub async fn run(
+        &self,
+        js: &jetstream::Context,
+        me: &Me,
+        domain: Option<&JsDomain>,
+        channel: &ChannelId,
+    ) -> Result<Managed> {
+        let kv = super::open(js).await?;
+        let (Self::Create(change) | Self::Change(change)) = self else {
+            super::delete(&kv, channel).await?;
+            let line = format!("deleted #{channel}; the posts to #{channel} stay in the stream");
+            return Ok(Managed { line, warnings: Vec::new() });
+        };
+        let humans = humans::load(js, me).await;
+        // A change removing members alone names no one a team could be.
+        let removing = *change == Change { remove: change.remove.clone(), ..Change::default() };
+        let teams = if removing { None } else { teams(js, domain).await };
+        if let Self::Change(change) = self {
+            let changed = change.write(js, &kv, channel, &humans, teams.as_ref()).await?;
+            return Ok(Managed { line: super::describe(&changed.entry), warnings: changed.warnings });
+        }
+        change.check(channel, &humans, teams.as_ref())?;
+        let mut entry = ChannelEntry::new(channel.clone());
+        change.apply(&mut entry);
+        super::create(&kv, &entry).await?;
+        let named = entry.members.iter().chain(&entry.messenger).chain(&entry.owner);
+        let ants: Vec<&UserId> = named.filter(|u| !humans.contains(u)).collect();
+        let warnings = colony::unserved_warnings(js, &ants).await;
+        Ok(Managed { line: format!("created {}", super::describe(&entry)), warnings })
+    }
+}
 
 /// What to change of a channel's entry; what is not given stays.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

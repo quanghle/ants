@@ -18,6 +18,7 @@ use crate::node::members;
 use crate::node::members::EnrollApprover;
 use crate::people::devices;
 use crate::signing::binding;
+use crate::text::Say;
 use crate::{auth, channel};
 
 #[derive(Subcommand, Debug)]
@@ -426,7 +427,7 @@ pub(crate) async fn run(conn: &Connection<'_>, command: AuthCommand) -> Result<(
             println!("{} of {human} is now labelled {label:?}", renamed.device);
             Ok(())
         }
-        AuthCommand::Push { dir } => push_and_report(conn.nats, domain, &team_dir(dir)?).await,
+        AuthCommand::Push { dir } => push_and_report(conn.nats, domain, &team_dir(dir)?, &mut Say::Print).await,
         AuthCommand::MoveStores { store_dir, server_conf, replace, dir } => {
             let server_conf = match server_conf {
                 Some(conf) => conf,
@@ -861,7 +862,7 @@ pub(crate) async fn revoke_credentials(
         }
         return Ok(());
     }
-    push_and_report(url, domain, &dir).await?;
+    push_and_report(url, domain, &dir, &mut Say::Print).await?;
     for ant in &retired {
         for line in crate::signing::retire::clean_consumers(url, domain, &dir, ant).await {
             println!("{line}");

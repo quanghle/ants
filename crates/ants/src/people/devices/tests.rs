@@ -180,7 +180,7 @@ async fn humans_publish_their_devices_and_readers_take_only_verified_unrevoked_k
 
     // Revoking bob's credentials and pushing records the revocation, once; readers then skip his device.
     revoke::revoke(&team, Some("bob"), &[]).unwrap();
-    crate::credentials::push::push_and_report(&server.url, None, &team).await.unwrap();
+    crate::credentials::push::push_and_report(&server.url, None, &team, &mut crate::text::Say::Print).await.unwrap();
     assert_eq!(record_revocations(&server.url, None, &team).await.unwrap(), Vec::<String>::new(), "recorded already");
     let record: DeviceRevocation =
         serde_json::from_slice(&kv.get(revoked_device_key(&bob_key)).await.unwrap().unwrap()).unwrap();

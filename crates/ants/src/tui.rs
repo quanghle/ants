@@ -10,6 +10,7 @@ mod acts;
 mod ant;
 mod approvals;
 mod armed;
+mod assistant;
 pub(crate) mod attach;
 mod cards;
 mod catchup;
@@ -194,6 +195,7 @@ pub async fn run(nats: &crate::connection::Nats<'_>, since: Duration, compact: b
         account: nats.account.clone(),
         keyring: feed.keyring(),
         admin: crate::admin::orders::Admin::of(nats).map_err(|e| format!("{e:#}")),
+        reach: nats.reach(),
     };
     let feed = feed.with_timelines();
     let reads = Reads::new(js.clone(), nats.domain.cloned(), me.clone(), crate::channel::reads::allowed(nats));

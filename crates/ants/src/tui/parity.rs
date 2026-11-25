@@ -35,7 +35,6 @@ const SERVICE: &str = "a service, run on its own";
 const CREDENTIALS: &str = "the credentials files and keys of the machine running it";
 const MACHINE: &str = "sets up or checks the machine running it";
 const MOVING: &str = "moves an ant between machines: files, config file and provider data of the machine running it";
-const ASSISTANT: &str = "ants-waemb";
 const SEND: &str = "the command bar: `@user TEXT` starts a thread, a text alone replies on the open one";
 const POST: &str = "the command bar: `#channel TEXT` posts to a channel";
 
@@ -69,14 +68,14 @@ const CLI: &[(&str, Chat)] = &[
     ("machines", Exempt("an inventory of the machines' daemons for operators; the ant view names an ant's machine")),
     ("spend", Shown("home's summary line and the ant view that UTC day; work's SPEND and the thread's side panel")),
     ("post", Shown("the command bar: `#channel TEXT`, or a text alone in a channel's view")),
-    ("channel create", Missing("ants-njfyx")),
+    ("channel create", Slash("channel")),
     ("channel set", Press(View::Channel, Key::Char('M'), "members")),
     ("channel add", Press(View::Channel, Key::Char('M'), "members")),
     ("channel remove", Press(View::Channel, Key::Char('M'), "members")),
     ("channel list", Shown("the nav's channels, with their unread posts and @mentions")),
     ("channel notify", Slash("notify")),
     ("channel read", Shown("a channel's view, which a channel of the nav opens, marking its posts read")),
-    ("channel delete", Missing("ants-njfyx")),
+    ("channel delete", Slash("channel")),
     ("channel serve", Exempt(SERVICE)),
     ("team create", Press(View::Team, Key::Char('n'), "new team")),
     ("team set", Press(View::Team, Key::Char('M'), "manage")),
@@ -117,12 +116,12 @@ const CLI: &[(&str, Chat)] = &[
     ("remind list", Slash("reminders")),
     ("remind clear", Slash("unremind")),
     ("schedule list", Slash("schedules")),
-    ("assistant enable", Missing("ants-waemb")),
-    ("assistant disable", Missing("ants-waemb")),
-    ("assistant show", Missing("ants-waemb")),
-    ("assistant set", Missing(ASSISTANT)),
-    ("assistant clear", Missing(ASSISTANT)),
-    ("assistant allow", Missing(ASSISTANT)),
+    ("assistant enable", Slash("assistant")),
+    ("assistant disable", Slash("assistant")),
+    ("assistant show", Slash("assistant")),
+    ("assistant set", Slash("assistant")),
+    ("assistant clear", Slash("assistant")),
+    ("assistant allow", Slash("assistant")),
     ("assistant confirm", Press(View::Held, Key::Char('a'), "confirm")),
     ("assistant seal", Exempt("the assistant's enrollment as a device of the human, with a key of this machine")),
     ("assistant key", Exempt("prints or makes the encryption key of an ant of this machine's config file")),

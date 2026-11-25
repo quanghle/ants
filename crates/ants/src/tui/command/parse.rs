@@ -7,6 +7,9 @@ use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, UserId};
 use chrono::TimeDelta;
 
 use crate::admin::orders::{add, clone};
+use crate::channel::Manage;
+use crate::cmd::assistant::AssistantCommand;
+use crate::cmd::channel::ChannelCommand;
 use crate::threads::thread_meta::Marking;
 use crate::tui::exec::{AddAnt, CloneAnt};
 use crate::tui::{notify, snooze};
@@ -117,6 +120,21 @@ pub const COMMANDS: &[Row] = &[
     ),
     row("retire", "ANT", "retire the ant by admin order, its home kept", Needs::Nothing),
     row(
+        "channel",
+        "create NAME [--member USER,...] [--messenger ANT] [--owner ANT] | set NAME CHANGES | add NAME USER... | \
+         remove NAME USER... | delete NAME",
+        "create, change or delete a channel as ants channel does, with its flags",
+        Needs::Nothing,
+    ),
+    row(
+        "assistant",
+        "enable [--name NAME] [--harness HARNESS] [--model MODEL] [--on MACHINE] | show [HUMAN] | disable [--retire] \
+         [--name NAME] | set ANT | clear | allow [RULE...] | allow --remove RULE... | allow --clear",
+        "enable, show or disable the human's assistant, designate or withdraw it, or sign its pre-allow rules, as ants \
+         assistant does, with its flags; disable asks y before retiring the dedicated one",
+        Needs::Nothing,
+    ),
+    row(
         "dead",
         "replay [SEQ] | drop [SEQ]",
         "send a dead letter (the one selected, else the thread's latest) to its ant again, or drop it once y confirms",
@@ -206,6 +224,14 @@ pub enum Slash {
     Clone(CloneAnt),
     /// Retire the ant by admin order.
     Retire(UserId),
+    /// Create, change or delete the channel, as `ants channel` does.
+    Channel {
+        channel: ChannelId,
+        manage: Manage,
+    },
+    /// Enable, show, disable, designate or withdraw the human's assistant, or sign its pre-allow rules, as `ants
+    /// assistant` does.
+    Assistant(AssistantCommand),
     Dead(Dead),
     Trail(Trail),
     Quit,
@@ -379,6 +405,8 @@ fn slash(text: &str) -> Result<Slash, String> {
             let ant = text()?;
             ant.strip_prefix('@').unwrap_or(&ant).parse().map(Slash::Retire).map_err(|e| format!("{e}"))
         }
+        "channel" => channel(args).map_err(|why| why.unwrap_or_else(usage)),
+        "assistant" => assistant(args).map(Slash::Assistant).map_err(|why| why.unwrap_or_else(usage)),
         "dead" => dead(args).map(Slash::Dead).map_err(|why| why.unwrap_or_else(usage)),
         "trail" => trail::read(args).map(Slash::Trail).map_err(|why| why.unwrap_or_else(usage)),
         "quit" => bare(Slash::Quit),
@@ -418,6 +446,25 @@ fn dead(args: &str) -> Result<Dead, Option<String>> {
 /// `args` read as the command line reads the arguments `T` of its command: words as [`quoted_words`] splits them,
 /// those before the first flag without a leading `@`. Or why not: clap's error in a line, None when none was given.
 fn flags<T: clap::Args>(command: &'static str, args: &str) -> Result<T, Option<String>> {
+    let command = clap::Command::new(command).no_binary_name(true).disable_help_flag(true);
+    read_words(T::augment_args(command), args, T::from_arg_matches)
+}
+
+/// `args` read as the command line reads the subcommands `T` of its command, the first word naming one, as [`flags`]
+/// reads them.
+fn subcommand<T: clap::Subcommand>(command: &'static str, args: &str) -> Result<T, Option<String>> {
+    let command = clap::Command::new(command).no_binary_name(true).disable_help_flag(true);
+    let command = command.disable_help_subcommand(true).subcommand_required(true);
+    let command = T::augment_subcommands(command).mut_subcommands(|sub| sub.disable_help_flag(true));
+    read_words(command, args, T::from_arg_matches)
+}
+
+/// `args` read by `command` into what `from` makes of its matches, as [`flags`] reads them.
+fn read_words<T>(
+    command: clap::Command,
+    args: &str,
+    from: fn(&clap::ArgMatches) -> Result<T, clap::Error>,
+) -> Result<T, Option<String>> {
     let mut words = quoted_words(args);
     if words.is_empty() {
         return Err(None);
@@ -427,14 +474,33 @@ fn flags<T: clap::Args>(command: &'static str, args: &str) -> Result<T, Option<S
             *word = ant.to_owned();
         }
     }
-    let command = clap::Command::new(command).no_binary_name(true).disable_help_flag(true);
     let told = |e: clap::Error| {
         let text = e.to_string();
         let first = text.split("\n\n").next().unwrap_or_default();
         Some(first.trim_start_matches("error: ").split_whitespace().collect::<Vec<_>>().join(" "))
     };
-    let matches = T::augment_args(command).try_get_matches_from(words).map_err(told)?;
-    T::from_arg_matches(&matches).map_err(told)
+    let matches = command.try_get_matches_from(words).map_err(told)?;
+    from(&matches).map_err(told)
+}
+
+/// What `/channel`'s `args` ask, read as `ants channel create|set|add|remove|delete` reads its words, or why not:
+/// None for its usage.
+fn channel(args: &str) -> Result<Slash, Option<String>> {
+    if !matches!(first_word(args).0, "create" | "set" | "add" | "remove" | "delete") {
+        return Err(None);
+    }
+    let command: ChannelCommand = subcommand("/channel", args)?;
+    let (channel, manage) = command.managed().ok_or(None)?.map_err(|e| Some(format!("{e:#}")))?;
+    Ok(Slash::Channel { channel, manage })
+}
+
+/// What `/assistant`'s `args` ask, read as `ants assistant enable|show|disable|set|clear|allow` reads its words, or
+/// why not: None for its usage.
+fn assistant(args: &str) -> Result<AssistantCommand, Option<String>> {
+    if !matches!(first_word(args).0, "enable" | "show" | "disable" | "set" | "clear" | "allow") {
+        return Err(None);
+    }
+    subcommand("/assistant", args)
 }
 
 fn goto(to: &str) -> Result<Goto, String> {
@@ -456,6 +522,7 @@ pub(super) mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::channel::Change;
     use crate::test_support::live::user;
 
     #[test]
@@ -589,6 +656,46 @@ pub(super) mod tests {
         assert!(parse("/clone dev-a 'dev c'").unwrap_err().starts_with("invalid value 'dev c' for '<NEW>'"));
     }
 
+    #[test]
+    fn channel_takes_the_words_of_ants_channel() {
+        let channel = |text: &str| match parse(text) {
+            Ok(Command::Slash(Slash::Channel { channel, manage })) => (channel.to_string(), manage),
+            other => panic!("{text}: {other:?}"),
+        };
+        let none = Change::default;
+        let (ops, created) = channel("/channel create ops --member alice,@coder --owner @dev-a");
+        let change = Change {
+            add: vec![user("alice"), user("coder")],
+            messenger: Some(None),
+            owner: Some(Some(user("dev-a"))),
+            description: Some(None),
+            ..none()
+        };
+        assert_eq!((ops.as_str(), created), ("ops", Manage::Create(change)));
+        let (_, set) = channel("/CHANNEL set #ops --default-messenger --description 'Deploys and incidents'");
+        let change =
+            Change { messenger: Some(None), description: Some(Some("Deploys and incidents".into())), ..none() };
+        assert_eq!(set, Manage::Change(change));
+        let (_, added) = channel("/channel add ops @dev-b bob");
+        assert_eq!(added, Manage::Change(Change { add: vec![user("dev-b"), user("bob")], ..none() }));
+        let (_, removed) = channel("/channel remove ops dev-b");
+        assert_eq!(removed, Manage::Change(Change { remove: vec![user("dev-b")], ..none() }));
+        assert_eq!(channel("/channel delete #ops"), ("ops".into(), Manage::Delete));
+
+        let usage = parse("/channel").unwrap_err();
+        assert!(usage.starts_with("usage: /channel create NAME"), "{usage}");
+        for refused in ["/channel list", "/channel read ops", "/channel serve", "/channel ops"] {
+            assert_eq!(parse(refused).unwrap_err(), usage, "{refused}");
+        }
+        assert!(parse("/channel set ops").unwrap_err().starts_with("nothing to change: give --member"));
+        let missing = parse("/channel add ops").unwrap_err();
+        assert!(missing.starts_with("the following required arguments were not provided: <USER>"), "{missing}");
+        let flag = parse("/channel create ops --colour red").unwrap_err();
+        assert!(flag.starts_with("unexpected argument '--colour' found"), "{flag}");
+        assert!(parse("/channel create 'o p s'").unwrap_err().starts_with("invalid value 'o p s'"));
+        assert!(parse("/channel create ops --help").unwrap_err().starts_with("unexpected argument '--help'"));
+    }
+
     /// A sample of an argument [`COMMANDS`] names; a new placeholder needs one here.
     fn sample(arg: &str) -> &str {
         match arg {
@@ -611,6 +718,13 @@ pub(super) mod tests {
             "FLAGS" => "--model gpt-5 --allow 'execute:cargo test*'",
             "PATH" => "notes.txt",
             "ARGS" => r#"{"files": ["a.rs"]}"#,
+            "USER,..." => "dev-a,@bob",
+            "USER..." => "dev-a @bob",
+            "CHANGES" => "--member dev-a,bob --no-owner --description 'Deploys and incidents'",
+            "HARNESS" => "claude",
+            "MODEL" => "gpt-5",
+            "HUMAN" => "@bob",
+            "RULE..." => "'dev-a/execute:cargo test*' '*/read:/work/*'",
             literal if literal.starts_with("--") || literal.chars().all(|c| c.is_ascii_lowercase()) => literal,
             other => panic!("no sample for {other}"),
         }

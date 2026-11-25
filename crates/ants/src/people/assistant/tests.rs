@@ -613,9 +613,13 @@ async fn a_human_confirms_denies_or_pre_allows_its_assistant_s_decisions() {
     let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
     Box::pin(consent::confirm(&nats, Some(&tools::qualified(&push)), false, false)).await.unwrap();
     Box::pin(consent::confirm(&nats, Some(&tools::qualified(&rm)), true, false)).await.unwrap();
-    let err = consent::allow(&nats, vec!["execute:cargo test*".into()], false, false, false).await.unwrap_err();
+    let err = consent::allow(&nats, vec!["execute:cargo test*".into()], false, false, false, &mut Say::Print)
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("ANT/RULE"), "{err}");
-    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], false, false, false).await.unwrap();
+    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], false, false, false, &mut Say::Print)
+        .await
+        .unwrap();
 
     let state_of = async |r: &ApprovalRequest| {
         let (seq, _) = tools::find(&stream, &tools::qualified(r)).await.unwrap();
@@ -643,7 +647,7 @@ async fn a_human_confirms_denies_or_pre_allows_its_assistant_s_decisions() {
     assert_eq!(reader.answer(&alice, &pa, &act(&rm)), Some(ActAnswer::Deny));
     assert_eq!(reader.pre_allow(&alice, &pa).unwrap().rules, ["dev-a/execute:cargo test*"]);
 
-    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], true, false, false).await.unwrap();
+    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], true, false, false, &mut Say::Print).await.unwrap();
     assert_eq!(state_of(&test).await, State::Pending, "the rule removed");
 }
 
@@ -722,7 +726,7 @@ async fn an_assistant_s_admin_orders_wait_for_its_human_to_consent() {
     assert!(denied.reason.as_deref().unwrap_or_default().contains("denied by alice"), "{denied:?}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{text}paused = true\n"));
 
-    consent::allow(&nats, vec!["dev-a/order:resume".into()], false, false, false).await.unwrap();
+    consent::allow(&nats, vec!["dev-a/order:resume".into()], false, false, false, &mut Say::Print).await.unwrap();
     let resume = send(AdminOp::Resume).await;
     comes_to(&resume, OrderState::Applied).await;
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
@@ -759,7 +763,9 @@ async fn revoking_a_human_whole_ends_its_assistant_s_grant_and_rules_and_takes_i
 
     put(&js, &creds, &alice, Some(pa.clone()), Sealing::Keep).await.unwrap();
     let nats = Nats::new(&server.url, Some(&creds), None, None).unwrap();
-    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], false, false, false).await.unwrap();
+    consent::allow(&nats, vec!["dev-a/execute:cargo test*".into()], false, false, false, &mut Say::Print)
+        .await
+        .unwrap();
     let (_, bob_js) = server.connect_as(&p("bob"), Role::Human).await;
     let reader = Registry::new(human.clone()).verifying_grants(account);
     let _watching = reader.watch(bob_js, ants_daemon::people::humans::RETRY);

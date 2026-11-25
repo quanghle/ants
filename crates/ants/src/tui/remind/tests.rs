@@ -67,6 +67,7 @@ async fn the_reminders_job_lists_every_reminder_as_ants_remind_list_does() {
         account: None,
         keyring: None,
         admin: Err("unused".into()),
+        reach: nats.reach(),
     };
     let mut exec = Exec::new(ctx);
     exec.run(Job::Reminders, String::new());

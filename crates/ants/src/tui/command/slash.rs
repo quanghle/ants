@@ -6,11 +6,12 @@ use ants_proto::{ApprovalRequest, ChannelId, ChannelNotify, Questions, ThreadId,
 use chrono::{DateTime, Utc};
 
 use super::{COMMANDS, Goto, Needs, Notify, OnThread, Slash, Trail, parse};
+use crate::cmd::assistant::AssistantCommand;
 use crate::messages::forward;
 use crate::people::quiet;
 use crate::tui::exec::Job;
-use crate::tui::model::{Action, Focus, Model, Page};
-use crate::tui::{attach, nav, thread, trail};
+use crate::tui::model::{Action, Focus, Model, Page, Prompt};
+use crate::tui::{assistant, attach, nav, thread, trail};
 use crate::{live, tools};
 
 /// What `/grant` without a text sends the stuck ant.
@@ -112,6 +113,12 @@ impl Model {
             Slash::Add(add) => run(Job::Add(add)),
             Slash::Clone(clone) => run(Job::Clone(clone)),
             Slash::Retire(ant) => run(Job::Retire { ant }),
+            Slash::Channel { channel, manage } => run(Job::ManageChannel { channel, manage }),
+            Slash::Assistant(AssistantCommand::Disable(args)) if !args.retire => {
+                self.prompt = Some(Prompt::Disable(assistant::Disabling(args)));
+                Ok(None)
+            }
+            Slash::Assistant(command) => run(Job::Assistant(command)),
             Slash::Dead(dead) => self.dead(dead, now),
             Slash::Trail(Trail::Run { trail, conductor, args, limits, thread }) => {
                 let thread = thread.map(|on| self.on_thread(on, now)).transpose()?;

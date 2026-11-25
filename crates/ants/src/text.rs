@@ -1,5 +1,5 @@
-//! Text helpers the commands and the terminal UI share: excerpts, one-line notes, tables in columns and how long
-//! ago or how long from now a time is.
+//! Text helpers the commands and the terminal UI share: excerpts, one-line notes, tables in columns, how long ago
+//! or how long from now a time is, and where a command's lines go ([`Say`]).
 
 use std::time::Duration;
 
@@ -36,6 +36,32 @@ pub fn after_colon(text: &str) -> String {
         return format!(" {}", text.trim_start());
     }
     text.lines().fold(String::new(), |out, line| format!("{out}\n  {line}"))
+}
+
+/// Where a command the terminal UI runs too says what it does: printed line by line as the CLI runs it, or gathered
+/// for the UI to show.
+#[derive(Debug, Default)]
+pub enum Say {
+    #[default]
+    Print,
+    Gather(Vec<String>),
+}
+
+impl Say {
+    pub fn line(&mut self, line: impl std::fmt::Display) {
+        match self {
+            Self::Print => println!("{line}"),
+            Self::Gather(lines) => lines.push(line.to_string()),
+        }
+    }
+
+    /// The lines gathered: none once printed.
+    pub fn into_lines(self) -> Vec<String> {
+        match self {
+            Self::Print => Vec::new(),
+            Self::Gather(lines) => lines,
+        }
+    }
 }
 
 /// `rows` as columns two spaces apart, each as wide as its widest cell, without trailing blanks.

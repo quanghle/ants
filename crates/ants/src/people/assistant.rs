@@ -26,6 +26,7 @@ use crate::cas;
 use crate::connection::Nats;
 use crate::credentials::issued;
 use crate::people::{devices, humans};
+use crate::text::Say;
 use crate::{ants::colony, auth};
 
 pub(crate) mod consent;
@@ -166,7 +167,7 @@ pub(crate) fn signing_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
 }
 
 /// `ants assistant set ANT`.
-pub async fn set(nats: &Nats<'_>, ant: &UserId) -> Result<()> {
+pub async fn set(nats: &Nats<'_>, ant: &UserId, say: &mut Say) -> Result<()> {
     let creds = signing_creds(nats)?;
     let human = &nats.me.id;
     if ant == human {
@@ -186,42 +187,42 @@ pub async fn set(nats: &Nats<'_>, ant: &UserId) -> Result<()> {
     let team = auth::default_dir().ok().filter(|dir| auth::holds_team(dir));
     let local = Local::read(ant, &crate::defaults::path()?, team.as_deref());
     for warning in check(ant, &local, &colony)? {
-        println!("warning: {warning}");
+        say.line(format!("warning: {warning}"));
     }
     let (before, _) = put(&js, creds, human, Some(ant.clone()), Sealing::Keep).await?;
-    replaced(ant, human, before, None);
-    println!(
+    replaced(ant, human, before, None, say);
+    say.line(format!(
         "It acts for {human} only while its credentials name {human} as the human it assists, as the bus's account \
          signs them."
-    );
+    ));
     Ok(())
 }
 
-/// Say that `ant` is the assistant of `human` now, the grant replacing `before`, and that the enrollment of another
-/// assistant `before` held ended, as [`ended_sealing`] does with the config file `config`.
-fn replaced(ant: &UserId, human: &UserId, before: Option<VerifiedGrant>, config: Option<&Path>) {
+/// Say with `say` that `ant` is the assistant of `human` now, the grant replacing `before`, and that the enrollment of
+/// another assistant `before` held ended, as [`ended_sealing`] does with the config file `config`.
+fn replaced(ant: &UserId, human: &UserId, before: Option<VerifiedGrant>, config: Option<&Path>, say: &mut Say) {
     match before.as_ref().and_then(|g| g.assistant.as_ref()) {
-        Some(before) if before == ant => println!("{ant} stays the assistant of {human}"),
-        Some(before) => println!("{ant} is now the assistant of {human}, in place of {before}"),
-        None => println!("{ant} is now the assistant of {human}"),
+        Some(before) if before == ant => say.line(format!("{ant} stays the assistant of {human}")),
+        Some(before) => say.line(format!("{ant} is now the assistant of {human}, in place of {before}")),
+        None => say.line(format!("{ant} is now the assistant of {human}")),
     }
     if let Some(before) = before.filter(|g| g.assistant.as_ref() != Some(ant)) {
-        ended_sealing(&before, config);
+        ended_sealing(&before, config, say);
     }
 }
 
 /// `ants assistant clear`.
-pub async fn clear(nats: &Nats<'_>) -> Result<()> {
+pub async fn clear(nats: &Nats<'_>, say: &mut Say) -> Result<()> {
     let creds = signing_creds(nats)?;
     let human = &nats.me.id;
     let (_, js) = nats.connect("ants-assistant").await?;
     let (before, _) = put(&js, creds, human, None, Sealing::Off).await?;
     match before.as_ref().and_then(|g| g.assistant.as_ref()) {
-        Some(assistant) => println!("{assistant} is no longer the assistant of {human}"),
-        None => println!("{human} has no assistant"),
+        Some(assistant) => say.line(format!("{assistant} is no longer the assistant of {human}")),
+        None => say.line(format!("{human} has no assistant")),
     }
     if let Some(before) = &before {
-        ended_sealing(before, None);
+        ended_sealing(before, None, say);
     }
     Ok(())
 }
@@ -274,7 +275,7 @@ pub async fn seal_off(nats: &Nats<'_>) -> Result<()> {
     };
     let (before, _) = put(&js, creds, human, standing.assistant.clone(), Sealing::Off).await?;
     if let Some(before) = &before {
-        ended_sealing(before, None);
+        ended_sealing(before, None, &mut Say::Print);
     }
     Ok(())
 }
@@ -318,49 +319,49 @@ fn key_of(creds: &Path) -> Result<(XKey, bool)> {
     Ok((xkey, true))
 }
 
-/// Say that the enrollment `before` held, if any, ended, and what of the key's seed, deleted where the config file
-/// `config` (default: the CLI's) names the assistant's credentials.
-fn ended_sealing(before: &VerifiedGrant, config: Option<&Path>) {
+/// Say with `say` that the enrollment `before` held, if any, ended, and what of the key's seed, deleted where the
+/// config file `config` (default: the CLI's) names the assistant's credentials.
+fn ended_sealing(before: &VerifiedGrant, config: Option<&Path>, say: &mut Say) {
     let (Some(assistant), Some(sealing)) = (&before.assistant, &before.sealing) else { return };
-    println!(
+    say.line(format!(
         "{assistant} is no longer device {} of {}: nothing is sealed for it from now on, and it opens nothing",
         sealing.device, before.human
-    );
+    ));
     let creds = match config {
         Some(config) => creds_in(assistant, config),
         None => local_creds(assistant),
     };
     let path = creds.ok().map(|creds| sealing::key_path(&creds)).filter(|p| p.exists());
     match path.map(|path| std::fs::remove_file(&path).map(|()| path)) {
-        Some(Ok(path)) => println!("Deleted the seed of its encryption key, {}.", path.display()),
-        Some(Err(e)) => println!("warning: the seed of its encryption key stays: {e}"),
-        None => println!(
+        Some(Ok(path)) => say.line(format!("Deleted the seed of its encryption key, {}.", path.display())),
+        Some(Err(e)) => say.line(format!("warning: the seed of its encryption key stays: {e}")),
+        None => say.line(format!(
             "The seed of its encryption key stays beside its credentials, as {assistant}.xk, on the machine running \
              it: deleting it there leaves the messages sealed for it before unopened by anyone holding it."
-        ),
+        )),
     }
 }
 
 /// `ants assistant show [HUMAN] [--json]`.
-pub async fn show(nats: &Nats<'_>, human: Option<UserId>, json: bool) -> Result<()> {
+pub async fn show(nats: &Nats<'_>, human: Option<UserId>, json: bool, say: &mut Say) -> Result<()> {
     let human = human.unwrap_or_else(|| nats.me.id.clone());
     let (_, js) = nats.connect("ants-assistant").await?;
     let shown = |assistant: Option<&UserId>, verified: bool| serde_json::json!({ "human": human, "assistant": assistant, "verified": verified });
     let Some(grant) = read(&js, &human).await? else {
         if json {
-            println!("{}", shown(None, false));
+            say.line(shown(None, false));
         } else {
-            println!("{human} has no assistant");
+            say.line(format!("{human} has no assistant"));
         }
         return Ok(());
     };
     let Some(account) = &nats.account else {
         if json {
-            println!("{}", shown(grant.assistant.as_ref(), false));
+            say.line(shown(grant.assistant.as_ref(), false));
             return Ok(());
         }
         let named = grant.assistant.as_ref().map_or_else(|| "no assistant".to_owned(), ToString::to_string);
-        println!("{human}: {named}, not verified without credentials");
+        say.line(format!("{human}: {named}, not verified without credentials"));
         return Ok(());
     };
     match grant.verify(&assistant_grant_key(&human), account, Utc::now()) {
@@ -369,15 +370,15 @@ pub async fn show(nats: &Nats<'_>, human: Option<UserId>, json: bool) -> Result<
             json["issued_at"] = serde_json::json!(verified.issued_at);
             json["device"] = serde_json::json!(verified.device);
             json["sealing"] = serde_json::json!(verified.sealing);
-            println!("{json}");
+            say.line(json);
         }
-        Ok(verified) => println!("{}", describe(&verified)),
+        Ok(verified) => say.line(describe(&verified)),
         Err(e) if json => {
             let mut json = shown(None, false);
             json["refused"] = serde_json::json!(e.to_string());
-            println!("{json}");
+            say.line(json);
         }
-        Err(e) => println!("{human} has no assistant: its grant is not honoured ({e})"),
+        Err(e) => say.line(format!("{human} has no assistant: its grant is not honoured ({e})")),
     }
     Ok(())
 }

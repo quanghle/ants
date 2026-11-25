@@ -27,7 +27,7 @@ use async_nats::jetstream::kv;
 use async_nats::jetstream::{self, consumer};
 use futures::StreamExt as _;
 
-pub use change::{Change, Changed, teams};
+pub use change::{Change, Changed, Manage, teams};
 
 use crate::cas;
 use crate::people::humans::Me;
