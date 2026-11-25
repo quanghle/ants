@@ -24,6 +24,7 @@ use self::ants::{
 };
 use self::channels::check_channels;
 use self::credentials::{check_backup, check_cli_creds};
+use self::humans::check_config_humans;
 use self::leaf_node::{Leaf, check_leaf};
 use self::schedules::check_schedules;
 use self::server::{check_resolver, check_storage, check_store_account, reach};
@@ -43,6 +44,7 @@ mod ants;
 mod channels;
 mod colony;
 mod credentials;
+mod humans;
 mod leaf_node;
 mod schedules;
 mod server;
@@ -144,8 +146,8 @@ pub struct Setup {
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
 /// buckets, the versions of ants running across the colony, the JetStream storage, each ant's credentials, harness,
 /// workdir, reactions responder, trail saves and team changes, the trail worker and the runs of trails stuck, the team
-/// directory, the hub's account resolver and store account, the account keys' backup, the leaf node and outbox, the
-/// installed services, the WebSocket listeners' origins, the webhooks' config file and notification sinks, the config
+/// directory, the channels, the humans the config file names, the hub's account resolver and store account, the
+/// account keys' backup, the leaf node and outbox, the installed services, the WebSocket listeners' origins, the webhooks' config file and notification sinks, the config
 /// file's schedules (one firing no more or sending to an ant no daemon serves), and the Dev
 /// Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
@@ -227,6 +229,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     }
     checks.extend(check_teams(connected.as_ref(), setup, chrono::Utc::now()).await);
     checks.extend(check_channels(connected.as_ref(), setup).await);
+    checks.extend(check_config_humans(connected.as_ref(), loaded.as_ref(), &setup.config).await);
     checks.push(resolver);
     // After the CLI's connection, which has the hub load the bus's account if no member connected yet.
     checks.push(check_store_account(setup, through_leaf).await);

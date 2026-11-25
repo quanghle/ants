@@ -888,7 +888,7 @@ pub(crate) fn forgotten_note(human: &str) -> String {
     format!(
         "{human}'s entry, assistant grant, pre-allow rules and confirmations deleted from {HUMANS_BUCKET}: no daemon \
          takes {human} for a human, an owner or its assistant's human any more; a config file naming {human} as its \
-         `human` or a `stand_in` keeps it there until changed"
+         `human` or a `stand_in` keeps it there until changed, which `ants doctor` warns of (`config humans`)"
     )
 }
 
