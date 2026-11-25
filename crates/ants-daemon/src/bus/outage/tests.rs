@@ -1,6 +1,7 @@
-//! Tests of the outage watch: one ERROR per server out of reach for longer than the threshold, however many
-//! connections go to it, naming what runs it, an INFO once every connection is up again, and nothing for a shorter
-//! outage or one ending with its connections gone.
+//! Tests of the outage watch: one ERROR per server, or JetStream behind it, out of reach for longer than the
+//! threshold, however many connections or heartbeats report it, naming what runs it, an INFO once every reporter
+//! reaches it again, nothing for a shorter outage or one ending with its reporters gone, and nothing for JetStream
+//! while the server itself is out of reach.
 
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
@@ -45,7 +46,23 @@ impl tracing::Subscriber for Logged {
 }
 
 fn report(reports: &UnboundedSender<Report>, connection: u64, change: Change) {
-    reports.send(Report { url: URL.into(), connection, change }).unwrap();
+    reports.send(Report { url: URL.into(), of: Of::Server, reporter: connection, change }).unwrap();
+}
+
+fn heartbeat(reports: &UnboundedSender<Report>, ant: u64, change: Change) {
+    reports.send(Report { url: URL.into(), of: Of::JetStream, reporter: ant, change }).unwrap();
+}
+
+/// Wait until something more than `seen` lines is logged, as the question of what runs the server goes to a
+/// blocking thread, which paused time does not wait for.
+async fn logged_past(logged: &Logged, seen: usize) {
+    for _ in 0..200 {
+        if logged.lines().len() > seen {
+            return;
+        }
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Let the watch take what was sent, and wait `wait`.
@@ -64,7 +81,8 @@ async fn a_server_out_of_reach_past_the_threshold_gets_one_error_naming_what_run
     let asked = Arc::new(Mutex::new(Vec::new()));
     let runs = {
         let asked = asked.clone();
-        move |url: &str| {
+        move |url: &str, of: Of| {
+            assert_eq!(of, Of::Server);
             asked.locked().push(url.to_owned());
             Some("start its service with `launchctl kickstart gui/501/ants.nats`".to_owned())
         }
@@ -76,14 +94,7 @@ async fn a_server_out_of_reach_past_the_threshold_gets_one_error_naming_what_run
     settle(AFTER - Duration::from_secs(1)).await;
     assert_eq!(logged.lines(), Vec::<String>::new(), "not yet");
     settle(Duration::from_secs(2)).await;
-    // The question goes to a blocking thread, which paused time does not wait for.
-    for _ in 0..100 {
-        if !logged.lines().is_empty() {
-            break;
-        }
-        tokio::task::yield_now().await;
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    logged_past(&logged, 0).await;
     assert_eq!(
         logged.lines(),
         [format!(
@@ -110,7 +121,7 @@ async fn a_shorter_outage_or_one_whose_connections_are_gone_logs_nothing() {
     let logged = Logged::default();
     let _logging = tracing::subscriber::set_default(logged.clone());
     let (reports, rx) = unbounded_channel();
-    let _watch = tokio::spawn(run(AFTER, Arc::new(|_: &str| None), rx));
+    let _watch = tokio::spawn(run(AFTER, Arc::new(|_: &str, _| None), rx));
     report(&reports, 1, Change::Down);
     report(&reports, 2, Change::Down);
     settle(AFTER / 2).await;
@@ -131,16 +142,10 @@ async fn a_server_nothing_is_known_to_run_is_named_by_its_address_alone() {
     let logged = Logged::default();
     let _logging = tracing::subscriber::set_default(logged.clone());
     let (reports, rx) = unbounded_channel();
-    let _watch = tokio::spawn(run(AFTER, Arc::new(|_: &str| None), rx));
+    let _watch = tokio::spawn(run(AFTER, Arc::new(|_: &str, _| None), rx));
     report(&reports, 1, Change::Down);
     settle(AFTER * 2).await;
-    for _ in 0..100 {
-        if !logged.lines().is_empty() {
-            break;
-        }
-        tokio::task::yield_now().await;
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    logged_past(&logged, 0).await;
     assert_eq!(
         logged.lines(),
         [format!(
@@ -150,4 +155,53 @@ async fn a_server_nothing_is_known_to_run_is_named_by_its_address_alone() {
     report(&reports, 1, Change::Gone);
     settle(Duration::ZERO).await;
     assert_eq!(logged.lines().len(), 1, "gone, not answering: {:?}", logged.lines());
+}
+
+#[tokio::test(start_paused = true)]
+async fn jetstream_unanswered_through_a_server_that_answers_gets_its_own_error_held_while_the_server_is_out() {
+    let logged = Logged::default();
+    let _logging = tracing::subscriber::set_default(logged.clone());
+    let (reports, rx) = unbounded_channel();
+    let runs = |_: &str, of: Of| match of {
+        Of::Server => None,
+        Of::JetStream => Some("start the uplink's service with `launchctl kickstart gui/501/ants.bridge`".to_owned()),
+    };
+    let _watch = tokio::spawn(run(AFTER, Arc::new(runs), rx));
+
+    // The server is out of reach too: its ERROR alone.
+    report(&reports, 1, Change::Down);
+    heartbeat(&reports, 10, Change::Down);
+    heartbeat(&reports, 11, Change::Down);
+    settle(AFTER + Duration::from_secs(1)).await;
+    logged_past(&logged, 0).await;
+    settle(Duration::from_secs(5)).await;
+    let lines = logged.lines();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("ERROR the NATS server is out of reach"), "{lines:?}");
+
+    // Back, with JetStream still unanswered: its ERROR, overdue already.
+    report(&reports, 1, Change::Up);
+    settle(Duration::ZERO).await;
+    logged_past(&logged, 2).await;
+    let lines = logged.lines();
+    assert_eq!(lines[1], format!("INFO the NATS server answers again url={URL} out_for=66s"));
+    assert_eq!(
+        lines[2],
+        format!(
+            "ERROR JetStream does not answer through the NATS server for over 60s, as when a leaf node's uplink to the \
+             hub is down: start the uplink's service with `launchctl kickstart gui/501/ants.bridge` url={URL}"
+        )
+    );
+    heartbeat(&reports, 10, Change::Up);
+    settle(AFTER).await;
+    assert_eq!(logged.lines().len(), 3, "a heartbeat is still unanswered: {:?}", logged.lines());
+    heartbeat(&reports, 11, Change::Up);
+    settle(Duration::ZERO).await;
+    assert_eq!(logged.lines()[3], format!("INFO JetStream answers again url={URL} out_for=126s"));
+
+    // Unanswered alone, from the start.
+    heartbeat(&reports, 10, Change::Down);
+    settle(AFTER + Duration::from_secs(1)).await;
+    logged_past(&logged, 4).await;
+    assert!(logged.lines()[4].contains("`launchctl kickstart gui/501/ants.bridge`"), "{:?}", logged.lines());
 }

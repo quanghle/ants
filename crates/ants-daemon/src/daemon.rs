@@ -293,7 +293,7 @@ async fn serve(
     let provider = services.provider(providers.sense_of(&config.provider));
     let registration = {
         let open = config.connection.creds.is_none();
-        enter_colony(&js, entry.clone(), claimed, &workload, provider.sense, open).await?
+        enter_colony(&js, &config.connection.nats_url, entry.clone(), claimed, &workload, provider.sense, open).await?
     };
     let inbox = Inbox {
         client: &client,

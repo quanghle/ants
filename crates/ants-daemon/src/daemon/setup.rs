@@ -663,9 +663,11 @@ pub(super) async fn inbox_messages(
 
 /// Put the ant on the colony, holding its entry from the revision claimed, if any, its first entry showing the profile
 /// `sense`, its provider if sense, holds of it. With `open`, a server taking no credentials, its heartbeats create the
-/// buckets held in memory again when nats-server lost them ([`colony::Recreate`]).
+/// buckets held in memory again when nats-server lost them ([`colony::Recreate`]). Its heartbeats tell the process's
+/// outage watch whether JetStream answers through the server at `nats_url` ([`bus::outage`]).
 pub(super) async fn enter_colony(
     js: &jetstream::Context,
+    nats_url: &str,
     entry: ants_proto::ColonyEntry,
     claimed: Option<u64>,
     workload: &std::sync::Arc<colony::Workload>,
@@ -675,8 +677,9 @@ pub(super) async fn enter_colony(
     if let Some(sense) = sense {
         sense.first_profile(&entry.ant, workload).await;
     }
+    let answers = bus::outage::Reporter::jetstream(nats_url);
     Ok(match claimed {
-        Some(revision) => colony::hold(js, entry, revision, workload.clone(), open).await?,
-        None => colony::register(js, entry, workload.clone(), open).await?,
+        Some(revision) => colony::hold(js, entry, revision, workload.clone(), open, answers).await?,
+        None => colony::register(js, entry, workload.clone(), open, answers).await?,
     })
 }

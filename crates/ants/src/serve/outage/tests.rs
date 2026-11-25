@@ -1,5 +1,6 @@
 //! Tests of what the outage ERROR says runs the server: the daemon's `[nats_server]`, the nats-server service
-//! installed with its start command, or nothing known for an address elsewhere; and a daemon's connection to a
+//! installed with its start command, or nothing known for an address elsewhere; what carries the uplink to the hub
+//! whose JetStream does not answer: the HTTPS bridge or Dev Tunnel service, or nothing known; and a daemon's connection to a
 //! throwaway nats-server stopped past the threshold logging one ERROR naming the service's start command, then an INFO.
 
 use std::path::{Path, PathBuf};
@@ -23,20 +24,50 @@ fn stopped(home: &Path) -> Services {
     })
 }
 
-fn home_with_the_service() -> PathBuf {
+/// The services under `home`, with the service `label` (`ants.nats`, …), if installed, running.
+fn running(home: &Path, label: &'static str) -> Services {
+    Services::answering(home, move |command| {
+        let (ok, stdout) = match command {
+            "id -u" => (true, "501\n"),
+            c if c == format!("launchctl print gui/501/{label}") => (true, "\tstate = running\n\tpid = 4242\n"),
+            c if c.starts_with("launchctl print") => (true, "\tstate = not running\n"),
+            c if c.starts_with("systemctl --user is-active") && c.ends_with(&label.replace('.', "-")) => (true, ""),
+            _ => (false, ""),
+        };
+        Ran { ok, stdout: stdout.to_owned(), stderr: String::new() }
+    })
+}
+
+/// A home with the services `labels` (`ants.nats`, …) installed.
+fn home_with(labels: &[&str]) -> PathBuf {
     let home = scratch_dir("outage");
-    let unit = if cfg!(target_os = "macos") {
-        home.join("Library/LaunchAgents/ants.nats.plist")
-    } else {
-        home.join(".config/systemd/user/ants-nats.service")
-    };
-    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
-    std::fs::write(unit, "").unwrap();
+    for label in labels {
+        let unit = if cfg!(target_os = "macos") {
+            home.join(format!("Library/LaunchAgents/{label}.plist"))
+        } else {
+            home.join(format!(".config/systemd/user/{}.service", label.replace('.', "-")))
+        };
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        std::fs::write(unit, "").unwrap();
+    }
     home
 }
 
-fn start_command() -> &'static str {
-    if cfg!(target_os = "macos") { "launchctl kickstart gui/501/ants.nats" } else { "systemctl --user start ants-nats" }
+fn home_with_the_service() -> PathBuf {
+    home_with(&["ants.nats"])
+}
+
+/// The command starting the service `label` (`ants.nats`, …).
+fn start_of(label: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("launchctl kickstart gui/501/{label}")
+    } else {
+        format!("systemctl --user start {}", label.replace('.', "-"))
+    }
+}
+
+fn start_command() -> String {
+    start_of("ants.nats")
 }
 
 #[test]
@@ -56,6 +87,25 @@ fn names_the_daemon_s_own_server_the_service_installed_or_nothing() {
     let bare = scratch_dir("outage");
     assert_eq!(what_runs(local, None, &mut stopped(&bare)), None, "no service installed");
     std::fs::remove_dir_all(&home).unwrap();
+    std::fs::remove_dir_all(&bare).unwrap();
+}
+
+#[test]
+fn names_the_uplink_s_service_or_nothing_for_ants_doctor_to_check() {
+    let local = "nats://127.0.0.1:4222";
+    let bare = scratch_dir("outage");
+    assert_eq!(what_uplinks(local, &mut stopped(&bare)), None, "no uplink service: a direct uplink");
+    for label in ["ants.bridge", "ants.devtunnel"] {
+        let home = home_with(&["ants.nats", label]);
+        let told = what_uplinks(local, &mut stopped(&home));
+        let start = start_of(label);
+        assert_eq!(told, Some(format!("the uplink's service is installed and not running: start it with `{start}`")));
+        let told = what_uplinks(local, &mut running(&home, label)).unwrap();
+        assert!(told.starts_with("the uplink's service runs: see its log, or restart it with `"), "{told}");
+        assert!(told.contains(label) || told.contains(&label.replace('.', "-")), "{told}");
+        assert_eq!(what_uplinks("tls://hub.example.com:4222", &mut stopped(&home)), None, "not this machine's");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
     std::fs::remove_dir_all(&bare).unwrap();
 }
 
@@ -95,7 +145,7 @@ async fn a_server_stopped_past_the_threshold_gets_one_error_naming_its_service_t
     let home = home_with_the_service();
     let services = home.clone();
     let after = Duration::from_millis(500);
-    let _watching = bus::outage::watch(after, move |url| what_runs(url, None, &mut stopped(&services)));
+    let _watching = bus::outage::watch(after, move |url, _| what_runs(url, None, &mut stopped(&services)));
     let ant: ants_proto::UserId = "dev-a".parse().unwrap();
     let connecting = bus::connect_retrying(&server.url, None, None, &ant, "test", std::future::pending());
     let (client, _) = connecting.await.unwrap().unwrap();

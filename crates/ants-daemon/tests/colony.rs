@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ants_daemon::bus;
-use ants_daemon::colony::{self, Registration, Workload};
+use ants_daemon::colony::{self, Beats, Registration, Workload};
 use ants_proto::{Activity, ColonyEntry, MemoryLow, SignInNeeded};
 use ants_test_support::{NatsServer as Server, colony_entry, eventually_within};
 use async_nats::jetstream::kv;
@@ -102,7 +102,14 @@ async fn turning_working_or_idle_shows_before_the_next_beat() {
     let workload = Arc::new(Workload::default());
     workload.set_harnesses(1);
     let beat = Duration::from_secs(60);
-    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone()), None).await.unwrap();
+    let _a = Registration::start_with(
+        kv.clone(),
+        entry("dev-a"),
+        beat,
+        Beats { workload: Some(workload.clone()), ..Beats::default() },
+    )
+    .await
+    .unwrap();
     let first = read(&kv, "dev-a").await.unwrap();
     assert_eq!((first.activity, first.handling, first.harnesses), (Activity::Idle, 0, 1));
 
@@ -127,7 +134,14 @@ async fn a_signed_out_harness_shows_until_it_signs_in_before_the_next_beat() {
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     let beat = Duration::from_secs(60);
-    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone()), None).await.unwrap();
+    let _a = Registration::start_with(
+        kv.clone(),
+        entry("dev-a"),
+        beat,
+        Beats { workload: Some(workload.clone()), ..Beats::default() },
+    )
+    .await
+    .unwrap();
     assert_eq!(read(&kv, "dev-a").await.unwrap().signed_out, None);
 
     let out = SignInNeeded { since: chrono::Utc::now(), sign_in: Some("copilot login".to_owned()) };
@@ -144,7 +158,14 @@ async fn memory_turning_low_or_recovering_shows_before_the_next_beat() {
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let workload = Arc::new(Workload::default());
     let beat = Duration::from_secs(60);
-    let _a = Registration::start_with(kv.clone(), entry("dev-a"), beat, Some(workload.clone()), None).await.unwrap();
+    let _a = Registration::start_with(
+        kv.clone(),
+        entry("dev-a"),
+        beat,
+        Beats { workload: Some(workload.clone()), ..Beats::default() },
+    )
+    .await
+    .unwrap();
     assert_eq!(read(&kv, "dev-a").await.unwrap().memory_low, None);
 
     let limit = Duration::from_secs(5);
@@ -271,7 +292,7 @@ async fn the_builtin_messenger_hands_over_to_a_messenger_started_later() {
 
     let mut builtin = entry_on("messenger", "here");
     let revision = colony::wait_for_turn(&kv, &mut builtin, every).await.unwrap();
-    let held = Registration::hold(kv.clone(), builtin.clone(), revision, beat, None, None).await.unwrap();
+    let held = Registration::hold(kv.clone(), builtin.clone(), revision, beat, Beats::default()).await.unwrap();
 
     // Deleted under it, the entry is put back at once.
     kv.delete("messenger").await.unwrap();
@@ -314,11 +335,11 @@ async fn of_two_builtin_messengers_only_the_latest_put_serves() {
     kv.delete("messenger").await.unwrap();
     let mut b = entry_on("messenger", "here");
     let revision = colony::wait_for_turn(&kv, &mut b, every).await.unwrap();
-    let b_held = Registration::hold(kv.clone(), b.clone(), revision, beat, None, None).await.unwrap();
+    let b_held = Registration::hold(kv.clone(), b.clone(), revision, beat, Beats::default()).await.unwrap();
 
     let first = read(&kv, "messenger").await.unwrap();
 
-    let a_held = Registration::hold(kv.clone(), a, stale, beat, None, None).await.unwrap();
+    let a_held = Registration::hold(kv.clone(), a, stale, beat, Beats::default()).await.unwrap();
     assert!(a_held.is_lost(), "its entry was put by another daemon");
     a_held.deregister().await;
     let mut later = None;
@@ -341,10 +362,25 @@ async fn heartbeats_create_a_lost_colony_again() {
     let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
     let beat = Duration::from_millis(200);
 
-    let _listed = Registration::start_with(kv.clone(), entry("dev-a"), beat, None, Some(js.clone())).await.unwrap();
+    let _listed = Registration::start_with(
+        kv.clone(),
+        entry("dev-a"),
+        beat,
+        Beats { recreate: Some(js.clone()), ..Beats::default() },
+    )
+    .await
+    .unwrap();
     let mut messenger = entry_on("messenger", "here");
     let revision = colony::wait_for_turn(&kv, &mut messenger, beat).await.unwrap();
-    let held = Registration::hold(kv.clone(), messenger, revision, beat, None, Some(js.clone())).await.unwrap();
+    let held = Registration::hold(
+        kv.clone(),
+        messenger,
+        revision,
+        beat,
+        Beats { recreate: Some(js.clone()), ..Beats::default() },
+    )
+    .await
+    .unwrap();
 
     js.delete_key_value(ants_proto::COLONY_BUCKET).await.unwrap();
     let listed_again = async || {
@@ -353,4 +389,80 @@ async fn heartbeats_create_a_lost_colony_again() {
     };
     eventually_within(Duration::from_secs(10), "both entries put in a new colony", listed_again).await;
     assert!(!held.is_lost(), "its own entry, put again");
+}
+
+/// The ERROR and INFO lines logged, as `LEVEL message`.
+#[derive(Clone, Default)]
+struct Logged(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Logged {
+    fn has(&self, start: &str) -> bool {
+        self.0.lock().unwrap().iter().any(|l| l.starts_with(start))
+    }
+}
+
+impl tracing::Subscriber for Logged {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::INFO && metadata.target().starts_with("ants_daemon::bus::outage")
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut line = event.metadata().level().to_string();
+        event.record(&mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+            if field.name() == "message" {
+                line = format!("{line} {value:?}");
+            }
+        });
+        self.0.lock().unwrap().push(line);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Through a leaf node whose uplink to the hub is down, the heartbeats go unanswered while the leaf node answers:
+/// past the threshold the outage watch logs one ERROR naming what carries the uplink, and an INFO once the hub is back.
+#[tokio::test]
+async fn heartbeats_unanswered_behind_a_leaf_whose_hub_is_down_get_one_error_then_an_info() {
+    let uplink_port = ants_test_support::free_port();
+    let hub_conf = move |dir: &std::path::Path| {
+        format!(
+            "jetstream {{ store_dir: {:?}, domain: hub }}\nleafnodes {{ listen: \"127.0.0.1:{uplink_port}\" }}\n",
+            dir.join("js")
+        )
+    };
+    let Some(mut hub) = Server::spawn_with(hub_conf) else { return };
+    let leaf = Server::spawn_with(|dir| {
+        format!(
+            "jetstream {{ store_dir: {:?}, domain: m1 }}\nleafnodes {{ remotes: [{{ url: \
+             \"nats-leaf://127.0.0.1:{uplink_port}\" }}] }}\n",
+            dir.join("js")
+        )
+    })
+    .unwrap();
+    let logged = Logged::default();
+    let _logging = tracing::subscriber::set_default(logged.clone());
+    let runs = |_: &str, of: bus::outage::Of| (of == bus::outage::Of::JetStream).then(|| "the uplink, here".to_owned());
+    let _watching = bus::outage::watch(Duration::from_millis(500), runs);
+    let (human, domain) = (ants_test_support::human(), "hub".parse().unwrap());
+    let connecting = bus::connect_retrying(&leaf.url, None, Some(&domain), &human, "test", std::future::pending());
+    let (_client, js) = connecting.await.unwrap().unwrap();
+    let kv = bus::ensure_colony(&js, Duration::from_secs(30)).await.unwrap();
+    let answers = Some(bus::outage::Reporter::jetstream(&leaf.url));
+    // The hub's restart loses the buckets held in memory, the colony among them: the heartbeats create them again.
+    let beats = Beats { answers, recreate: Some(js.clone()), ..Beats::default() };
+    let _a = Registration::start_with(kv, entry("dev-a"), Duration::from_millis(200), beats).await.unwrap();
+
+    hub.stop();
+    let error = "ERROR JetStream does not answer through the NATS server for over 500ms";
+    eventually_within(Duration::from_secs(20), "the ERROR", async || logged.has(error)).await;
+    assert!(logged.has(&format!("{error}, as when a leaf node's uplink to the hub is down: the uplink, here")));
+    hub.start_again();
+    let info = "INFO JetStream answers again";
+    eventually_within(Duration::from_secs(30), "the INFO", async || logged.has(info)).await;
+    let lines = logged.0.lock().unwrap().clone();
+    assert_eq!(lines.iter().filter(|l| l.starts_with("ERROR")).count(), 1, "{lines:#?}");
 }

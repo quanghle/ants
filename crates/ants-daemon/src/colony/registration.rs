@@ -26,16 +26,38 @@ pub struct Registration {
 }
 
 /// List `entry` in the colony and keep it fresh, with its `workload`, until the registration ends. With `open`, a
-/// server taking no credentials, a failed heartbeat creates the buckets held in memory again ([`Recreate`]).
+/// server taking no credentials, a failed heartbeat creates the buckets held in memory again ([`Recreate`]). Each
+/// heartbeat tells `answers` whether JetStream answered it.
 pub async fn register(
     js: &jetstream::Context,
     mut entry: ColonyEntry,
     workload: Arc<Workload>,
     open: bool,
+    answers: bus::outage::Reporter,
 ) -> Result<Registration> {
     let kv = bus::ensure_colony(js, COLONY_TTL).await?;
     entry.heartbeat_at = Utc::now();
-    Registration::start_with(kv, entry, COLONY_HEARTBEAT, Some(workload), recreate_when(open, js)).await
+    let beats = Beats { workload: Some(workload), recreate: recreate_when(open, js), answers: Some(answers) };
+    Registration::start_with(kv, entry, COLONY_HEARTBEAT, beats).await
+}
+
+/// What the heartbeats of a [`Registration`] do besides putting the entry.
+#[derive(Default)]
+pub struct Beats {
+    /// Stamped on every put, with an extra put as soon as the ant turns idle or working.
+    pub workload: Option<Arc<Workload>>,
+    /// Created again after a failed put, which is then tried once more.
+    pub recreate: Recreate,
+    /// Told whether JetStream answered each heartbeat ([`bus::outage::Reporter::answered`]).
+    pub answers: Option<bus::outage::Reporter>,
+}
+
+impl Beats {
+    fn answered<T>(&self, outcome: &Result<T>) {
+        if let Some(answers) = &self.answers {
+            answers.answered(outcome.as_ref().map(|_| ()));
+        }
+    }
 }
 
 /// Over a server taking no credentials, where a daemon may create buckets: the JetStream to create the buckets held in
@@ -209,9 +231,11 @@ pub async fn hold(
     revision: u64,
     workload: Arc<Workload>,
     open: bool,
+    answers: bus::outage::Reporter,
 ) -> Result<Registration> {
     let kv = bus::ensure_colony(js, COLONY_TTL).await?;
-    Registration::hold(kv, entry, revision, COLONY_HEARTBEAT, Some(workload), recreate_when(open, js)).await
+    let beats = Beats { workload: Some(workload), recreate: recreate_when(open, js), answers: Some(answers) };
+    Registration::hold(kv, entry, revision, COLONY_HEARTBEAT, beats).await
 }
 
 /// Put `entry` over `revision`. When another write came in between: put it again if it is gone or ours, and give the
@@ -263,17 +287,16 @@ async fn keep_held(
     kv: kv::Store,
     mut entry: ColonyEntry,
     every: Duration,
-    workload: Option<Arc<Workload>>,
+    beats: Beats,
     held: watch::Sender<Option<u64>>,
     mut changes: Option<relayed::Watch>,
-    recreate: Recreate,
 ) {
     let Some(mut revision) = *held.borrow() else { return };
     let mut ticks = ticker(every);
     ticks.tick().await;
     loop {
         tokio::select! {
-            () = due(&mut ticks, workload.as_deref(), &mut entry) => {}
+            () = due(&mut ticks, beats.workload.as_deref(), &mut entry) => {}
             Some(change) = next_change(&mut changes) => {
                 if change.revision <= revision {
                     continue;
@@ -290,10 +313,12 @@ async fn keep_held(
                 entry.heartbeat_at = Utc::now();
             }
         }
-        match match renew(&kv, &entry, revision).await {
-            Err(e) if recreated(recreate.as_ref(), &e).await => renew(&kv, &entry, revision).await,
+        let renewed = match renew(&kv, &entry, revision).await {
+            Err(e) if recreated(beats.recreate.as_ref(), &e).await => renew(&kv, &entry, revision).await,
             renewed => renewed,
-        } {
+        };
+        beats.answered(&renewed);
+        match renewed {
             Ok(Some(put)) => {
                 revision = put;
                 held.send_replace(Some(put));
@@ -327,21 +352,13 @@ impl Registration {
     /// Put `entry` now, then again every `every`. The first put must succeed; later failures are logged and retried
     /// on the next beat, so a brief outage costs nothing as long as it is shorter than the bucket's max age.
     pub async fn start(kv: kv::Store, entry: ColonyEntry, every: Duration) -> Result<Self> {
-        Self::start_with(kv, entry, every, None, None).await
+        Self::start_with(kv, entry, every, Beats::default()).await
     }
 
-    /// Like [`Registration::start`], with `workload` stamped on every put, and an extra put as soon as the ant
-    /// turns idle or working. A failed put creates the buckets held in memory again with `recreate` and is tried
-    /// once more.
-    pub async fn start_with(
-        kv: kv::Store,
-        mut entry: ColonyEntry,
-        every: Duration,
-        workload: Option<Arc<Workload>>,
-        recreate: Recreate,
-    ) -> Result<Self> {
+    /// Like [`Registration::start`], the heartbeats doing what `beats` asks besides.
+    pub async fn start_with(kv: kv::Store, mut entry: ColonyEntry, every: Duration, beats: Beats) -> Result<Self> {
         let key = entry.key().to_owned();
-        if let Some(workload) = &workload {
+        if let Some(workload) = &beats.workload {
             workload.stamp(&mut entry);
         }
         put(&kv, &entry).await.with_context(|| format!("registering {key} in the colony"))?;
@@ -350,8 +367,10 @@ impl Registration {
             let mut ticks = ticker(every);
             ticks.tick().await;
             loop {
-                due(&mut ticks, workload.as_deref(), &mut entry).await;
-                if let Err(e) = beat(&beat_kv, &entry, recreate.as_ref()).await {
+                due(&mut ticks, beats.workload.as_deref(), &mut entry).await;
+                let beaten = beat(&beat_kv, &entry, beats.recreate.as_ref()).await;
+                beats.answered(&beaten);
+                if let Err(e) = beaten {
                     beat_failed(&entry, e);
                 }
             }
@@ -368,8 +387,7 @@ impl Registration {
         mut entry: ColonyEntry,
         revision: u64,
         every: Duration,
-        workload: Option<Arc<Workload>>,
-        recreate: Recreate,
+        beats: Beats,
     ) -> Result<Self> {
         let key = entry.key().to_owned();
         let changes = match kv.guarded_watch(&key).await {
@@ -379,13 +397,13 @@ impl Registration {
                 None
             }
         };
-        if let Some(workload) = &workload {
+        if let Some(workload) = &beats.workload {
             workload.stamp(&mut entry);
         }
         entry.heartbeat_at = Utc::now();
         let first = renew(&kv, &entry, revision).await.with_context(|| format!("registering {key} in the colony"))?;
         let (held, watching) = watch::channel(first);
-        let heartbeat = tokio::spawn(keep_held(kv.clone(), entry, every, workload, held, changes, recreate));
+        let heartbeat = tokio::spawn(keep_held(kv.clone(), entry, every, beats, held, changes));
         Ok(Self { kv, key, heartbeat, held: Some(watching) })
     }
 
