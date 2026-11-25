@@ -569,7 +569,7 @@ mod tests {
         let mut m = backend();
         keys(&mut m, [Key::Char('M')]);
         let refused = anyhow::anyhow!("dev-c is on team web already; each ant and team is on one team at most");
-        m.outcome(Outcome { result: Err(refused), text: String::new(), quoting: None });
+        m.outcome(Outcome { result: Err(refused), text: String::new(), quoting: None, answered: None });
         assert_eq!(status(&m).1, Tone::Error);
         assert!(status(&m).0.starts_with("dev-c is on team web already"));
         assert!(editor(&m).is_some(), "the editor stays");
@@ -579,7 +579,7 @@ mod tests {
         let shown = team_screen(&m, 100, 30);
         assert!(shown.contains("dev-d") && shown.contains("manage team backend"), "{shown}");
         let done = Done { line: "team backend: added dev-d".to_owned(), teams: true, ..Done::default() };
-        m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None });
+        m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None, answered: None });
         assert_eq!(status(&m), ("team backend: added dev-d".to_owned(), Tone::Done));
     }
 }

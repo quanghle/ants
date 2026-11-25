@@ -51,7 +51,7 @@ fn attach_stages_files_for_the_next_message_and_a_failed_send_stages_them_again(
     assert_eq!((files.len(), text.as_str()), (1, "@dev-a read this"));
     assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "sending with 1 file…");
     assert!(m.ui.bar.staged.names().is_empty(), "the files go with one message");
-    m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text, quoting: None });
+    m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text, quoting: None, answered: None });
     assert_eq!((m.ui.bar.text(), m.ui.bar.staged.names()), ("@dev-a read this".to_owned(), vec!["notes.txt"]));
 
     let thread = ThreadId::generate();

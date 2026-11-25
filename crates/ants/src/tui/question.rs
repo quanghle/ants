@@ -28,6 +28,9 @@ use crate::threads::thread::{answer_line, answers_to};
 /// How long a card stays at the bottom of its thread once answered.
 const ANSWERED_FOR: TimeDelta = TimeDelta::minutes(2);
 
+/// What a card answered here shows until the answer is read back.
+const ANSWERING: &str = "answer sent";
+
 /// The row of a focused card that takes a typed answer, before the text typed.
 const TYPE: &str = "type an answer";
 
@@ -548,7 +551,7 @@ impl Card<'_> {
 }
 
 /// The question cards of a thread at `now`, oldest first: the questions to the human with no answer stored, and those
-/// answered lately.
+/// answered lately; one answered here, its answer not read back yet, shows as answered.
 pub fn cards<'a>(data: &Data, entries: &'a [Entry], now: DateTime<Utc>) -> Vec<Card<'a>> {
     let mut cards: Vec<Card> = entries
         .iter()
@@ -559,7 +562,11 @@ pub fn cards<'a>(data: &Data, entries: &'a [Entry], now: DateTime<Utc>) -> Vec<C
             if answers.first().is_some_and(|(by, _)| now - by.stored_at >= ANSWERED_FOR) {
                 return None;
             }
-            let answers = answers.into_iter().map(|(by, answered)| answer_line(by, answered)).collect();
+            let mut answers: Vec<String> =
+                answers.into_iter().map(|(by, answered)| answer_line(by, answered)).collect();
+            if answers.is_empty() && asked.id.is_some_and(|id| data.answering.contains(&id)) {
+                answers.push(ANSWERING.to_owned());
+            }
             Some(Card { asked, question, answers, keys: false })
         })
         .collect();
@@ -795,5 +802,19 @@ mod tests {
             Some(Keyed::To(Box::new(To::Do(Action::Run(job, String::new()))))),
             "the key answers the card showing it"
         );
+    }
+
+    #[test]
+    fn a_card_answered_here_shows_its_answer_sent_and_takes_no_key() {
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut asked = message(1, &thread, "dev-b", "alice", "Ship it?");
+        asked.question = Some(question("Ship it?", &["yes", "no"], false).into());
+        let entries = vec![asked.clone()];
+        m.data.answering.insert(asked.id.unwrap());
+        let card = &cards(&m.data, &entries, at(2))[0];
+        assert!(!card.keys);
+        assert_eq!(shown(&card.lines(80, None, (false, false))), ["Ship it?", "1 yes  2 no", ANSWERING]);
+        assert_eq!(thread_key(Key::Char('1'), &m.data, &thread, &entries, at(2)), None);
     }
 }

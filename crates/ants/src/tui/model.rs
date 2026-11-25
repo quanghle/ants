@@ -147,7 +147,8 @@ const QUIT_WITHIN: TimeDelta = TimeDelta::seconds(1);
 
 /// Everything read of the ants that the views show: what the live feed reads, what the UI reads besides, and what is
 /// worked out of the messages read. It holds only what the bus and the store tell, the images of attachments among it,
-/// and what the human did here that they are yet to tell (the messages withdrawn, the dead letters cleared); how the
+/// and what the human did here that they are yet to tell (the messages withdrawn, the dead letters cleared, the
+/// questions answered); how the
 /// UI shows it, and what is typed, is [`Ui`]'s.
 pub struct Data {
     pub live: State,
@@ -197,6 +198,9 @@ pub struct Data {
     pub withdrawn: HashSet<Uuid>,
     /// The dead letters replayed or dropped here, by stream sequence: read, though the stream holds them no more.
     pub dead_cleared: HashSet<u64>,
+    /// The messages whose questions the human answered here, the answer sent or being sent: answered, though no
+    /// answer is read back yet, so a key or click does not answer them again. One whose answer fails leaves it.
+    pub answering: HashSet<Uuid>,
 }
 
 /// The state of the UI that the views read and mark beside [`Data`], when drawn or taking keys: where they were drawn,
@@ -435,6 +439,7 @@ impl Model {
             images: images::Images::default(),
             withdrawn: HashSet::new(),
             dead_cleared: HashSet::new(),
+            answering: HashSet::new(),
             credentials: credentials::Heard::default(),
             held: held::Held::default(),
             looks: faces::Looks::default(),

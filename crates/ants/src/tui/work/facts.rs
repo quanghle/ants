@@ -286,14 +286,16 @@ impl Data {
         self.question(thread).is_some()
     }
 
-    /// The latest question to the human on the thread with no answer yet: the one the bar's `/answer` answers.
+    /// The latest question to the human on the thread with no answer yet, read or sent here: the one the bar's
+    /// `/answer` answers.
     pub fn question(&self, thread: &ThreadId) -> Option<&Asked> {
-        self.facts.get(thread)?.questions.last()
+        self.facts.get(thread)?.questions.iter().rev().find(|q| !self.answering.contains(&q.id))
     }
 
-    /// The question to the human asked in the message `id` on the thread, while it has no answer yet.
+    /// The question to the human asked in the message `id` on the thread, while it has no answer yet, read or sent
+    /// here.
     pub fn asked(&self, thread: &ThreadId, id: Uuid) -> Option<&Asked> {
-        self.facts.get(thread)?.questions.iter().find(|q| q.id == id)
+        self.facts.get(thread)?.questions.iter().find(|q| q.id == id && !self.answering.contains(&q.id))
     }
 
     /// Whether an ant answered the human on a thread the human owns and nobody marked done, and is done with it: the

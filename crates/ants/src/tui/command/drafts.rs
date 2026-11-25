@@ -166,7 +166,7 @@ mod tests {
         let Some(Action::Run(_, text)) = m.key(Key::Enter, at(1)) else { panic!() };
         show(&mut m, &b);
         typed(&mut m, "and the docs");
-        m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text, quoting: None });
+        m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text, quoting: None, answered: None });
         assert_eq!(m.ui.bar.text(), "and the docs", "B keeps its draft");
         show(&mut m, &a);
         assert_eq!(m.ui.bar.text(), "ship it", "A has the text back");

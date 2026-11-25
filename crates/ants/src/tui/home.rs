@@ -1086,4 +1086,39 @@ mod tests {
         m.data.marker = Some(ants_proto::ReadMarker { below: 0, read: [1].into(), ..Default::default() });
         assert_eq!(items(&m.data, at(6)).len(), 1, "read, it leaves home");
     }
+
+    #[test]
+    fn a_question_answered_here_takes_no_second_answer_until_the_answer_fails() {
+        use crate::tui::exec::{Job, Outcome};
+
+        let thread = ThreadId::generate();
+        let mut m = model();
+        let mut question = message(1, &thread, "dev-b", "alice", "Ship it?");
+        let options = ["yes".to_owned(), "no".to_owned()];
+        question.question = Some(ants_proto::Question::new("Ship it?", &options, false).unwrap().into());
+        m.stored(vec![question.clone()], at(1));
+        let id = question.id.unwrap();
+        let Some(Action::Run(job, _)) = m.key(Key::Char('1'), at(2)) else { panic!("a digit answers") };
+        assert_eq!(job.answers(), Some(id));
+        m.data.answering.extend(job.answers());
+
+        assert_eq!(m.key(Key::Char('1'), at(2)), None, "a second key sends no second answer");
+        assert!(items(&m.data, at(2)).iter().all(|i| i.why != Why::Question), "nor does home list it");
+        assert_eq!(m.key(Key::Enter, at(2)), None);
+        assert!(!screen(&m, 140, 30, at(2)).contains("› "), "nor focus its card");
+
+        let failed = Outcome {
+            result: Err(anyhow::anyhow!("no route")),
+            text: String::new(),
+            quoting: None,
+            answered: Some(id),
+        };
+        m.outcome(failed);
+        let answer = Job::Answer { thread, question: id, picks: vec![ants_proto::Pick::option(2)] };
+        assert_eq!(
+            m.key(Key::Char('2'), at(3)),
+            Some(Action::Run(answer, String::new())),
+            "failed, it can be answered again"
+        );
+    }
 }

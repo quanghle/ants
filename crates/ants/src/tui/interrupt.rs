@@ -114,6 +114,7 @@ mod tests {
             result: Err(anyhow::anyhow!("dev-b has no prompt running on thread {thread}")),
             text: String::new(),
             quoting: None,
+            answered: None,
         };
         m.outcome(outcome);
         assert_eq!(

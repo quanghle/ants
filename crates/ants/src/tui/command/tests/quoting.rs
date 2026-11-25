@@ -32,6 +32,7 @@ fn gt_in_a_thread_replies_to_the_selected_message_quoting_it_and_mentioning_its_
         result: Err(anyhow::anyhow!("no route")),
         text: "@dev-a why staging?".into(),
         quoting: job.quoting(),
+        answered: None,
     };
     m.outcome(failed);
     assert_eq!(m.ui.bar.text(), "@dev-a why staging?");

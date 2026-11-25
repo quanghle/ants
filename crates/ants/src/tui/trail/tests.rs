@@ -18,7 +18,7 @@ use crate::tui::model::{Focus, Page};
 use crate::tui::test_support::{model, screen};
 
 fn done(result: Done) -> Outcome {
-    Outcome { result: Ok(result), text: String::new(), quoting: None }
+    Outcome { result: Ok(result), text: String::new(), quoting: None, answered: None }
 }
 
 /// The leg starting a run of `trail` with `script`.

@@ -46,7 +46,7 @@ fn dead_replays_the_stuck_thread_s_dead_letter_or_drops_it_once_y_confirms() {
     assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "dropping dead letter 2…");
 
     let done = Done { line: "dropped dead letter 2".into(), dead: Some(2), ..Done::default() };
-    m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None });
+    m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None, answered: None });
     assert_eq!(m.ui.bar.status.as_ref().unwrap().text, "dropped dead letter 2");
     assert!(!stuck(&m), "neither the dead letter nor the notice of it holds the thread");
     m.pages.push(Page::Thread(thread::Page::new(thread.clone())));

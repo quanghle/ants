@@ -629,7 +629,10 @@ impl Chat {
             }
             Action::MarkRead(thread) => self.reads.mark_read(thread),
             Action::MarkUnread(thread, seqs) => self.reads.mark_unread(thread, seqs),
-            Action::Run(job, text) => self.exec.run(job, text),
+            Action::Run(job, text) => {
+                self.model.data.answering.extend(job.answers());
+                self.exec.run(job, text);
+            }
             Action::Decide(request, verdict) => {
                 self.model.data.settled.deciding(&request);
                 self.feed.decide(*request, verdict, self.model.data.me().clone());

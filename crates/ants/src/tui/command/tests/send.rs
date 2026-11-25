@@ -126,14 +126,19 @@ fn i_in_a_thread_is_written_and_with_a_message_selected_focuses_the_bar_to_reply
 #[test]
 fn a_failed_send_comes_back_into_the_bar_and_a_new_thread_opens() {
     let mut m = model();
-    let failed = Outcome { result: Err(anyhow::anyhow!("no route")), text: "@dev-a deploy".into(), quoting: None };
+    let failed = Outcome {
+        result: Err(anyhow::anyhow!("no route")),
+        text: "@dev-a deploy".into(),
+        quoting: None,
+        answered: None,
+    };
     assert_eq!(m.outcome(failed), None);
     assert_eq!((m.ui.bar.text(), m.ui.bar.focused), ("@dev-a deploy".into(), true));
     assert_eq!(m.ui.bar.status, Some(Status { text: "no route".into(), tone: Tone::Error }));
     let thread = ThreadId::generate();
     let warnings = vec!["dev-a is served by no daemon".to_owned()];
     let done = Done { line: "sent to dev-a".into(), warnings, open: Some(thread.clone()), ..Done::default() };
-    let sent = Outcome { result: Ok(done), text: "@dev-a deploy".into(), quoting: None };
+    let sent = Outcome { result: Ok(done), text: "@dev-a deploy".into(), quoting: None, answered: None };
     assert_eq!(m.outcome(sent), Some(Action::Open(thread)));
     assert_eq!(m.page().name(), "thread");
     assert_eq!(m.ui.bar.text(), "@dev-a deploy", "a success leaves the bar's text alone");
@@ -149,7 +154,7 @@ fn a_message_withdrawn_to_edit_comes_back_into_the_bar_with_its_files() {
     let withdrawn = ants_proto::Uuid::new_v4();
     let edit = Some(("deploy the site".to_owned(), vec![dir.join("notes.txt"), dir.join("gone.txt")]));
     let done = Done { line: "withdrew".into(), withdrew: Some(withdrawn), edit, ..Done::default() };
-    m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None });
+    m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None, answered: None });
     assert!(m.data.withdrawn.contains(&withdrawn));
     assert!(m.ui.bar.focused && m.ui.bar.text() == "deploy the site");
     assert_eq!(m.ui.bar.staged.names(), ["notes.txt"]);

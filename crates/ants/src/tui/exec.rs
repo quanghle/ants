@@ -312,12 +312,14 @@ impl Done {
     }
 }
 
-/// How a job went, with the bar's text it came from and the message it replied to, quoting it, on its thread.
+/// How a job went, with the bar's text it came from, the message it replied to, quoting it, on its thread, and the
+/// message whose questions it answered.
 #[derive(Debug)]
 pub struct Outcome {
     pub result: Result<Done>,
     pub text: String,
     pub quoting: Option<(ThreadId, Quoted)>,
+    pub answered: Option<Uuid>,
 }
 
 /// The jobs running.
@@ -334,8 +336,8 @@ impl Exec {
     /// Run `job`, which the bar's `text` asked for.
     pub fn run(&mut self, job: Job, text: String) {
         let ctx = Rc::clone(&self.ctx);
-        let quoting = job.quoting();
-        self.jobs.push(async move { Outcome { result: job.run(&ctx).await, text, quoting } }.boxed_local());
+        let (quoting, answered) = (job.quoting(), job.answers());
+        self.jobs.push(async move { Outcome { result: job.run(&ctx).await, text, quoting, answered } }.boxed_local());
     }
 
     /// The next job to end; pending while none runs.
@@ -361,6 +363,14 @@ impl Job {
                 | Self::Later(_)
                 | Self::Forward { .. }
         )
+    }
+
+    /// The message whose questions the job answers.
+    pub fn answers(&self) -> Option<Uuid> {
+        match self {
+            Self::Answer { question, .. } => Some(*question),
+            _ => None,
+        }
     }
 
     /// The message the job replies to, quoting it, with its thread.

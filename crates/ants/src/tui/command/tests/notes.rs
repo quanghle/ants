@@ -33,7 +33,7 @@ fn n_rejects_a_tool_request_then_sends_the_note_to_its_ant_on_its_thread() {
     };
     assert_eq!(sent, [Action::Run(ask.clone(), note.into())], "the note goes once the rejection is stored");
     assert!(m.asking().is_none());
-    m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text: note.into(), quoting: None });
+    m.outcome(Outcome { result: Err(anyhow::anyhow!("no route")), text: note.into(), quoting: None, answered: None });
     assert_eq!((m.ui.bar.text(), &m.ui.bar.noting), (note.to_owned(), &Some(Note::Reply(Box::new(push)))));
     assert_eq!(m.key(Key::Enter, at(1)), Some(Action::Run(ask, note.into())), "sent again as a reply");
 }

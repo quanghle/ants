@@ -542,7 +542,7 @@ mod tests {
         let mut m = ops();
         keys(&mut m, [Key::Up, Key::Char('M')]);
         let refused = anyhow::anyhow!("no permission to write ants_channels");
-        m.outcome(Outcome { result: Err(refused), text: String::new(), quoting: None });
+        m.outcome(Outcome { result: Err(refused), text: String::new(), quoting: None, answered: None });
         assert_eq!(status(&m), ("no permission to write ants_channels".to_owned(), Tone::Error));
         assert!(!m.ui.bar.focused && editor(&m).is_some(), "the editor stays");
         let entry = ChannelEntry { members: vec![user("alice")], ..m.data.channels[0].clone() };
@@ -550,7 +550,7 @@ mod tests {
         let shown = channel_screen(&m, 130, 30);
         assert!(shown.lines().nth(2).unwrap().contains("+ add"), "the rows follow the entry read back: {shown}");
         let done = Done { line: "#ops: removed bob".to_owned(), ..Done::default() };
-        m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None });
+        m.outcome(Outcome { result: Ok(done), text: String::new(), quoting: None, answered: None });
         assert_eq!(status(&m), ("#ops: removed bob".to_owned(), Tone::Done));
     }
 

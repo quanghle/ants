@@ -46,6 +46,9 @@ impl Model {
                 Some(Action::Open(thread))
             }
             Err(e) => {
+                if let Some(question) = outcome.answered {
+                    self.data.answering.remove(&question);
+                }
                 self.ui.bar.set_status(format!("{e:#}"), Tone::Error);
                 if let Some(typed) = typed
                     && !outcome.text.is_empty()
