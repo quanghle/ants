@@ -202,8 +202,14 @@ fn exercise_daemon(custom_tools: bool) {
     assert_eq!(record.sense.as_ref().map(SenseId::as_str), kept.as_deref().map(str::trim), "{record:?}");
     assert!(kept.is_some(), "an ant with built-in sense keeps a sense id");
 
-    let shown = run(ants(&["ant", "show", "dev-a"]));
-    let text = String::from_utf8_lossy(&shown.stdout);
+    // ask --wait returns on the reply, which comes before the daemon acks the message: its queue empties soon after.
+    let text = wait_until(WAIT, POLL, || {
+        let text = String::from_utf8_lossy(&run(ants(&["ant", "show", "dev-a"])).stdout).into_owned();
+        if text.contains("no messages waiting") {
+            return Ok(text);
+        }
+        Err(format!("the queue did not empty:\n{text}\ndaemon log:\n{}", daemon_log()))
+    });
     // The ant's face goes before its name.
     let first = text.lines().next().unwrap_or_default();
     assert!(first.contains(" dev-a: live") && text.contains("holds:\n  none"), "{text}");

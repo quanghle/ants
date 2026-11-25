@@ -15,6 +15,7 @@ use futures::StreamExt as _;
 use super::Approver;
 use crate::auth;
 use crate::credentials::issued;
+use crate::text::ago;
 
 impl Approver {
     /// Check that `request` proves credentials of the bus's account named as it says, unexpired and not revoked:
@@ -105,9 +106,9 @@ impl Approver {
             println!("no renewal requests heard in {}s", self.listen.as_secs());
         }
         for r in heard {
-            let age = (Utc::now() - r.sent_at).num_seconds().max(0);
+            let age = ago(r.sent_at, Utc::now());
             let holder = Finding::from_jwt(&r.current).map_or_else(|_| r.name.clone(), |f| f.holder());
-            println!("{}  {holder}  new key {}  host {}  asked {age}s ago", r.name, r.public_key, r.host);
+            println!("{}  {holder}  new key {}  host {}  asked {age}", r.name, r.public_key, r.host);
         }
         Ok(())
     }

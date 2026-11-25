@@ -16,6 +16,7 @@ use crate::auth;
 use crate::credentials::issued::{self, Kind};
 use crate::credentials::revoke;
 use crate::node::{members, outbox};
+use crate::text::ago;
 
 /// What [`Approver::approve`] did.
 #[derive(Debug)]
@@ -154,10 +155,10 @@ impl Approver {
             println!("no enrollment requests heard in {}s", self.listen.as_secs());
         }
         for r in pending {
-            let age = (Utc::now() - r.sent_at).num_seconds().max(0);
+            let age = ago(r.sent_at, Utc::now());
             let leaf = r.leaf.map_or_default(|l| format!("  leaf {}", l.machine));
             let host_creds = r.host_creds.map_or_default(|h| format!("  with host creds of {}", h.machine));
-            println!("{}  {}  host {}{leaf}{host_creds}  asked {age}s ago", r.ant, r.public_key, r.host);
+            println!("{}  {}  host {}{leaf}{host_creds}  asked {age}", r.ant, r.public_key, r.host);
         }
         Ok(())
     }
