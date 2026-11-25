@@ -20,7 +20,7 @@ use crate::daemon::{
     Config, Connection, HarnessSettings, Policy, Pooling, Presence, Spending, Storage, WorktreeSettings,
 };
 use crate::escalation::Chain;
-use crate::harness::{self, Harness, Harnesses, ModelSettings, PromptLimits, Tools};
+use crate::harness::{self, Harness, Harnesses, ModelSettings, PromptLimits, Reported, Tools};
 use crate::limits::caps::{Caps, Pool};
 use crate::limits::fallback::{self, Fallback};
 use crate::limits::pressure;
@@ -383,13 +383,31 @@ impl Ant {
     /// Why its caps, its own and its template's pool's, never trip on its harness or a fallback of it, with the harness
     /// ([`crate::limits::caps::uncounted`]); none where these do not resolve.
     pub fn uncounted_caps(&self, harnesses: &Harnesses) -> Vec<(String, Arc<Harness>)> {
-        let Ok(own) = harnesses.named(self.harness.as_deref()) else { return Vec::new() };
+        let Some(ran) = self.ran(harnesses) else { return Vec::new() };
+        let uncounted = crate::limits::caps::uncounted(&self.caps(), self.pool.as_ref(), ran.iter().map(|h| &**h));
+        uncounted.into_iter().map(|(why, harness)| (why, Arc::new(harness.clone()))).collect()
+    }
+
+    /// Why caps kept outside the ant on what it spends, `counted` by config key with what each counts (such as `[cli]`
+    /// `summary_daily_tokens`), never trip on its harness or a fallback of it, with the harness
+    /// ([`Harness::uncounted`]); none where these do not resolve.
+    pub fn unreported(&self, harnesses: &Harnesses, counted: &[(&str, Reported)]) -> Vec<(String, Arc<Harness>)> {
+        let Some(ran) = self.ran(harnesses) else { return Vec::new() };
+        let mut seen = BTreeSet::new();
+        ran.into_iter()
+            .filter(|harness| seen.insert(harness.name().to_owned()))
+            .filter_map(|harness| harness.uncounted(counted).map(|why| (why, harness)))
+            .collect()
+    }
+
+    /// Its harness and then its fallbacks' as they resolve in `harnesses`; None where its own does not.
+    fn ran(&self, harnesses: &Harnesses) -> Option<Vec<Arc<Harness>>> {
+        let own = harnesses.named(self.harness.as_deref()).ok()?;
         let settings = ModelSettings { model: self.model.clone(), ..ModelSettings::default() };
         let fallbacks = fallbacks(self.template.is_some(), &self.fallback, &own, &settings, harnesses, None);
         let mut ran = vec![own];
         ran.extend(fallbacks.unwrap_or_default().into_iter().map(|fallback| fallback.harness));
-        let uncounted = crate::limits::caps::uncounted(&self.caps(), self.pool.as_ref(), ran.iter().map(|h| &**h));
-        uncounted.into_iter().map(|(why, harness)| (why, Arc::new(harness.clone()))).collect()
+        Some(ran)
     }
 
     /// The escalation chain names other ants, each once, the stand-in is not the ant, and the spend warning comes short

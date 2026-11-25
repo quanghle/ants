@@ -365,6 +365,8 @@ impl Native for Codex {
 
     const ASKS: bool = true;
 
+    const COST_WITH: Option<&'static str> = Some("ChatGPT");
+
     fn credentials(&self) -> Option<Credentials> {
         let path = self.home.as_ref()?.join("auth.json");
         let stored = std::fs::read(&path).ok()?;

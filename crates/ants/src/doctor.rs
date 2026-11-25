@@ -27,6 +27,7 @@ use self::leaf_node::{Leaf, check_leaf};
 use self::schedules::check_schedules;
 use self::server::{check_resolver, check_storage, check_store_account, reach};
 use self::services::{check_services, check_webhook_trails, check_webhooks};
+use self::summaries::check_summary_tokens;
 use self::teams::{check_team_changes, check_teams};
 pub use self::trails::trail_worker;
 use self::trails::{check_runs, check_worker};
@@ -46,6 +47,7 @@ mod leaf_node;
 mod schedules;
 mod server;
 mod services;
+mod summaries;
 mod teams;
 mod trails;
 mod transports;
@@ -145,7 +147,8 @@ pub struct Setup {
 /// workdir, reactions responder, trail saves and team changes, the trail worker and the runs of trails stuck, the team
 /// directory, the hub's account resolver and store account, the account keys' backup, the leaf node and outbox, the
 /// installed services, the WebSocket listeners' origins, the webhooks' config file and notification sinks, the config
-/// file's schedules (one firing no more or sending to an ant no daemon serves), and the Dev
+/// file's schedules (one firing no more or sending to an ant no daemon serves), the harnesses of the summary ant
+/// served here reporting the tokens `summaries = "ahead"` counts, and the Dev
 /// Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
@@ -216,6 +219,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     if let Some(loaded) = &loaded {
         checks.extend(check_bypassed(loaded, webhooks));
         checks.extend(check_caps(loaded));
+        let summaries = config::CliDefaults::load(&setup.config).map_or_default(|cli| cli.summaries);
+        checks.extend(check_summary_tokens(loaded, &summaries));
         checks.extend(check_schedules(&loaded.schedules, read_colony, chrono::Utc::now()));
     }
     checks.push(worker);

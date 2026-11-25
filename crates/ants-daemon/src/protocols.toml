@@ -13,6 +13,7 @@ reports = ["tokens", "cost"]
 [protocols.codex]
 memory_files = ["AGENTS.md", "AGENTS.override.md", "~/.codex/AGENTS.md", "~/.codex/AGENTS.override.md"]
 review = { mode = "read-only" }
+# A cost too, codex's estimate, signed in with ChatGPT only: a cost cap is warned of as tripping only then.
 reports = ["tokens"]
 
 [protocols.copilot-sdk]

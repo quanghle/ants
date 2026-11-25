@@ -86,6 +86,15 @@ pub struct Harness {
     pub(crate) reports: Option<Vec<Reported>>,
 }
 
+/// `caps` as a list in a sentence, with the verb saying they never trip; None for no caps.
+fn listed(caps: &[&str]) -> Option<(String, &'static str)> {
+    let (last, rest) = caps.split_last()?;
+    Some(match rest {
+        [] => ((*last).to_owned(), "never trips"),
+        _ => (format!("{} and {last}", rest.join(", ")), "never trip"),
+    })
+}
+
 /// What a harness reports of the spend of a prompt: its tokens or its cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -257,32 +266,58 @@ impl Harness {
     }
 
     /// Why the caps of `caps`, by config key with what each counts, never trip on this harness: those counting what its
-    /// definition says it does not report (its `reports`). None when it reports all they count, or its definition
-    /// says nothing of what it reports.
+    /// definition says it does not report (its `reports`), a cap of cost tripping only with the sign-in its CLI reports
+    /// a cost with, when its protocol names one (`cost_with`). None when it reports all they count, or its
+    /// definition says nothing of what it reports.
     pub fn uncounted(&self, caps: &[(&str, Reported)]) -> Option<String> {
         let reports = self.reports.as_deref()?;
-        let missing: Vec<&str> =
-            caps.iter().filter(|(_, counts)| !reports.contains(counts)).map(|(cap, _)| *cap).collect();
-        let (last, rest) = missing.split_last()?;
-        let (caps, verb) = match rest {
-            [] => ((*last).to_owned(), "never trips"),
-            _ => (format!("{} and {last}", rest.join(", ")), "never trip"),
+        let cost_with = self.cost_with();
+        let unreported = |signed_in: bool| -> Vec<&str> {
+            let only_signed_in = |counts: Reported| cost_with.is_some() && counts == Reported::Cost;
+            caps.iter()
+                .filter(|(_, counts)| !reports.contains(counts) && only_signed_in(*counts) == signed_in)
+                .map(|(cap, _)| *cap)
+                .collect()
         };
-        let reported = match (reports.contains(&Reported::Tokens), reports.contains(&Reported::Cost)) {
-            (false, false) => "neither tokens nor cost",
-            (true, _) => "no cost",
-            (false, true) => "no tokens",
+        let mut clauses: Vec<String> =
+            listed(&unreported(false)).map(|(caps, verb)| format!("{caps} {verb} on it")).into_iter().collect();
+        clauses
+            .extend(listed(&unreported(true)).map(|(caps, verb)| format!("{caps} {verb} on it signed in otherwise")));
+        if clauses.is_empty() {
+            return None;
+        }
+        let tokens = reports.contains(&Reported::Tokens);
+        let reported = match (tokens, reports.contains(&Reported::Cost), cost_with) {
+            (true, _, Some(sign_in)) => format!("cost only signed in with {sign_in}"),
+            (false, _, Some(sign_in)) => format!("no tokens and cost only signed in with {sign_in}"),
+            (false, false, None) => "neither tokens nor cost".to_owned(),
+            (true, _, None) => "no cost".to_owned(),
+            (false, true, None) => "no tokens".to_owned(),
         };
-        Some(format!("harness {} reports {reported}, so {caps} {verb} on it", self.name))
+        Some(format!("harness {} reports {reported}, so {}", self.name, clauses.join(" and ")))
+    }
+
+    /// The sign-in its CLI reports a prompt's cost with, when its definition says it reports no cost and its protocol
+    /// reports one with that sign-in only (codex signed in with ChatGPT).
+    fn cost_with(&self) -> Option<&'static str> {
+        let reports = self.reports.as_deref()?;
+        if reports.contains(&Reported::Cost) {
+            return None;
+        }
+        super::native::cost_with(self.protocol)
     }
 
     /// What to change for the caps of an ant to trip on the harness.
     pub fn uncounted_fix(&self) -> String {
-        format!(
-            "set caps of what harness {} reports, or run the ant and its fallbacks on harnesses reporting what its caps \
-             count (docs/config.md#prompt-limits-and-spending-caps)",
-            self.name
-        )
+        let name = &self.name;
+        let fix = format!(
+            "set caps of what harness {name} reports, or run the ant and its fallbacks on harnesses reporting what its \
+             caps count (docs/config.md#prompt-limits-and-spending-caps)"
+        );
+        let Some(sign_in) = self.cost_with() else { return fix };
+        let tokens =
+            if self.reports.as_deref().is_some_and(|r| r.contains(&Reported::Tokens)) { "\"tokens\", " } else { "" };
+        format!("signed in with {sign_in}, set reports = [{tokens}\"cost\"] in [harnesses.{name}]; otherwise {fix}")
     }
 
     /// The harness a review session runs: its `Self::review` variant, else itself when it asks before running tools.

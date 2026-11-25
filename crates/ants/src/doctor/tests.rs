@@ -8,6 +8,7 @@ mod credentials;
 mod leaf_node;
 mod server;
 mod services;
+mod summaries;
 mod teams;
 mod trails;
 mod transports;
