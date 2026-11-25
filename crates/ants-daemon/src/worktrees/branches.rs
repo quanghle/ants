@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use ants_proto::{ThreadId, UserId};
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 
 use super::{Base, FETCH_TIMEOUT, Worktrees};
 use crate::process::{git, remote_git};
@@ -194,9 +194,19 @@ impl Worktrees {
         git(&self.repo, ["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_ok()
     }
 
-    /// Delete `branch`, whatever commits it holds.
+    /// Delete `branch`, whatever commits it holds, with its reflog and its config (its description), unless the
+    /// repository's `HEAD` is on it. As `git branch --delete --force`, but without git first reading every worktree of
+    /// the repository for one on the branch, which takes the longer the more worktrees it has: the others are the
+    /// threads' worktrees, each on a branch of its own.
     pub(super) async fn delete_branch(&self, branch: &str) -> Result<()> {
-        git(&self.repo, ["branch", "--delete", "--force", "--quiet", branch]).await.map(drop)
+        let full = format!("refs/heads/{branch}");
+        if git(&self.repo, ["symbolic-ref", "--quiet", "HEAD"]).await.is_ok_and(|head| head.trim() == full) {
+            bail!("branch {branch} is checked out at {}", self.repo.display());
+        }
+        git(&self.repo, ["update-ref", "-d", &full]).await?;
+        // Fails when the branch has no config.
+        let _ = git(&self.repo, ["config", "--remove-section", &format!("branch.{branch}")]).await;
+        Ok(())
     }
 }
 

@@ -10,10 +10,15 @@
 //! `remove`, `prune`). A repository whose refs are not files (reftable), with per-worktree config or a sparse checkout,
 //! which `git worktree add` copies, gets its worktrees from `git worktree add` instead, as does any on Windows
 //! ([`by_hand`]).
+//!
+//! A thread's worktree is removed by hand too, any of them: its directory and the registration its `.git` file names,
+//! as `git worktree remove` and `git worktree prune` do, each of which reads every worktree of the repository first.
+//! Git removes one that is not registered as git registers one, or is locked, and any on Windows
+//! ([`Worktrees::unregister`]).
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 
 use super::Worktrees;
 use crate::process::{git, run};
@@ -103,6 +108,49 @@ impl Worktrees {
                 }
             }
         }
+    }
+
+    /// Remove the worktree `path` and its registration, as `git worktree remove --force` and the `git worktree prune`
+    /// after it do: its directory, whatever it holds, and the registration its `.git` file names. A directory with no
+    /// `.git` file goes with the registrations of its making cut short ([`Worktrees::forget_cut_short`]). Fails when
+    /// the registration is no worktree of the repository's that tells of `path`, or it is locked, which `git worktree
+    /// remove` would not remove either, and always on Windows: git is then left to remove the worktree.
+    pub(super) fn unregister(&self, path: &Path) -> Result<()> {
+        if cfg!(windows) {
+            bail!("git writes the paths of a registration its own way on Windows");
+        }
+        let git_file = path.join(".git");
+        if std::fs::symlink_metadata(&git_file).is_err() {
+            let dir = self.dir.canonicalize().with_context(|| format!("finding {}", self.dir.display()))?;
+            if path.exists() {
+                std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?;
+            }
+            if let Some(name) = path.file_name() {
+                self.forget_cut_short(&dir.join(name));
+            }
+            return Ok(());
+        }
+        let text = std::fs::read_to_string(&git_file).with_context(|| format!("reading {}", git_file.display()))?;
+        let admin = text.strip_prefix("gitdir:").with_context(|| format!("{} names no gitdir", git_file.display()))?;
+        let admin = path.join(admin.trim());
+        let admin = admin.canonicalize().with_context(|| format!("finding {}", admin.display()))?;
+        if admin.parent() != Some(&self.common.join("worktrees")) {
+            bail!("{} is no worktree registration of the repository", admin.display());
+        }
+        let gitdir = admin.join("gitdir");
+        let named = std::fs::read_to_string(&gitdir).with_context(|| format!("reading {}", gitdir.display()))?;
+        if admin.join(named.trim()).canonicalize().ok() != Some(git_file.canonicalize()?) {
+            bail!("{} tells of another worktree", admin.display());
+        }
+        if admin.join("locked").exists() {
+            bail!("the worktree is locked");
+        }
+        // The .git file first, so that a removal cut short leaves a directory that is no worktree, removed as above.
+        std::fs::remove_file(&git_file).with_context(|| format!("removing {}", git_file.display()))?;
+        std::fs::remove_dir_all(&admin).with_context(|| format!("removing {}", admin.display()))?;
+        // As git does once the repository has no worktree left; fails while it has some.
+        let _ = std::fs::remove_dir(self.common.join("worktrees"));
+        std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))
     }
 }
 

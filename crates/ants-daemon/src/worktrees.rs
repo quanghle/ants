@@ -21,12 +21,13 @@
 //! of a repository go alone across the daemon, by its git common directory. Adds do run beside each other,
 //! `ADDS_AT_ONCE` at a time, so a burst of new threads of many ants does not wait for each checkout one after the
 //! other. A worktree on a new branch is registered by hand rather than by `git worktree add`, which takes the longer
-//! the more worktrees the repository has (`register`). An add that fails anyway, as with another process's git racing
-//! it, is tried once more, alone, and a branch made by an add that failed is deleted; an add git does not finish
-//! within [`ADD_TIMEOUT`] is stopped, and failed. Fetches of one repository go one at a time, apart from those
-//! changes, so they do not clash on the remote's refs while other ants' worktrees need not wait for the remote. A
-//! branch of the ant left without a worktree, as by a daemon killed while adding one, is deleted once its thread has
-//! no session, unless it holds commits.
+//! the more worktrees the repository has (`register`). It is removed by hand too, with its branch: `git worktree
+//! remove`, `git worktree prune` and `git branch --delete` take the longer as well, while new threads' worktrees wait
+//! for the removal. An add that fails anyway, as with another process's git racing it, is tried once more, alone, and
+//! a branch made by an add that failed is deleted; an add git does not finish within [`ADD_TIMEOUT`] is stopped, and
+//! failed. Fetches of one repository go one at a time, apart from those changes, so they do not clash on the remote's
+//! refs while other ants' worktrees need not wait for the remote. A branch of the ant left without a worktree, as by a
+//! daemon killed while adding one, is deleted once its thread has no session, unless it holds commits.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -400,38 +401,38 @@ impl Worktrees {
     }
 
     /// Remove the thread's worktree, and its branch unless that holds commits not in the repository's `HEAD`: then the
-    /// branch kept.
+    /// branch kept. Both by hand where they can be ([`Worktrees::unregister`], [`Worktrees::delete_branch`]), which
+    /// takes the same time however many worktrees the repository has.
     async fn remove(&self, thread: &ThreadId) -> Result<Option<Branch>> {
         let path = self.path(thread);
         let _alone = self.repository.changes.alone().await;
-        let removed =
-            git(&self.repo, [OsStr::new("worktree"), "remove".as_ref(), "--force".as_ref(), path.as_ref()]).await;
-        if let Err(e) = removed {
-            if path.join(".git").exists() {
-                return Err(e);
+        if let Err(e) = self.unregister(&path) {
+            tracing::debug!(%thread, error = format!("{e:#}"), "removing the thread's git worktree with git");
+            let removed =
+                git(&self.repo, [OsStr::new("worktree"), "remove".as_ref(), "--force".as_ref(), path.as_ref()]).await;
+            if let Err(e) = removed {
+                if path.join(".git").exists() {
+                    return Err(e);
+                }
+                std::fs::remove_dir_all(&path).with_context(|| format!("removing {}", path.display()))?;
             }
-            std::fs::remove_dir_all(&path).with_context(|| format!("removing {}", path.display()))?;
+            git(&self.repo, ["worktree", "prune"]).await?;
         }
-        git(&self.repo, ["worktree", "prune"]).await?;
         let counted = self.count(thread).await;
         let kept = counted.as_ref().ok().filter(|b| b.commits > 0).cloned();
-        match &kept {
-            Some(branch) => {
+        let branch = self.branch(thread);
+        let deleted = match (&kept, &counted) {
+            (Some(branch), _) => {
                 tracing::info!(%thread, branch = branch.name, commits = branch.commits, "keeping the thread's branch");
+                Ok(())
             }
-            None => {
-                let branch = self.branch(thread);
-                let mut args = vec!["branch", "--delete", "--quiet"];
-                // Known to hold nothing new, the branch goes even when started from a remote branch HEAD lacks; should
-                // counting have failed, git still refuses to delete a branch with commits not merged into HEAD.
-                if counted.is_ok() {
-                    args.push("--force");
-                }
-                args.push(&branch);
-                if let Err(e) = git(&self.repo, args).await {
-                    tracing::info!(%thread, %branch, error = format!("{e:#}"), "keeping the thread's branch");
-                }
-            }
+            // Known to hold nothing new, the branch goes even when started from a remote branch HEAD lacks.
+            (None, Ok(_)) => self.delete_branch(&branch).await,
+            // Should counting have failed, git refuses to delete a branch with commits not merged into HEAD.
+            (None, Err(_)) => git(&self.repo, ["branch", "--delete", "--quiet", &branch]).await.map(drop),
+        };
+        if let Err(e) = deleted {
+            tracing::info!(%thread, %branch, error = format!("{e:#}"), "keeping the thread's branch");
         }
         tracing::info!(%thread, worktree = %path.display(), "removed the git worktree of the expired thread");
         Ok(kept)
