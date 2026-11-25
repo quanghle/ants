@@ -1,4 +1,4 @@
-//! A team made before the store account: `ants auth init` adds it.
+//! A bus set up before the store account: `ants auth init` adds it.
 
 use super::*;
 

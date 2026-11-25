@@ -190,7 +190,7 @@ impl Confirmations {
         signed_lines("ants-assistant-confirmations", &[self.human.as_str()], self.issued_at, &self.acts)
     }
 
-    /// Check the record, read from `key`, for a reader of the team whose account is `account` at `now`, as
+    /// Check the record, read from `key`, for a reader on the bus whose account is `account` at `now`, as
     /// [`crate::AssistantGrant::verify`] checks a grant. Returns the device that signed it.
     pub fn verify(&self, key: &str, account: &str, now: DateTime<Utc>) -> Result<DeviceId, ConsentError> {
         if self.acts.len() > MAX_CONFIRMED {
@@ -266,7 +266,7 @@ impl PreAllow {
         signed_lines("ants-assistant-pre-allow", &fields, self.issued_at, &self.rules)
     }
 
-    /// Check the record, read from `key`, for a reader of the team whose account is `account` at `now`, as
+    /// Check the record, read from `key`, for a reader on the bus whose account is `account` at `now`, as
     /// [`crate::AssistantGrant::verify`] checks a grant, and each rule's form. Returns the device that signed it.
     pub fn verify(&self, key: &str, account: &str, now: DateTime<Utc>) -> Result<DeviceId, ConsentError> {
         if self.rules.len() > MAX_PRE_ALLOW {
@@ -366,7 +366,7 @@ fn keep<T: serde::de::DeserializeOwned>(
 
 impl Consents {
     /// Apply `value`, what the key `key` of [`HUMANS_BUCKET`] holds now (none: deleted or purged), checked for the
-    /// team of the account `account` at `now`; None when `key` is no consent record's key.
+    /// bus of the account `account` at `now`; None when `key` is no consent record's key.
     pub fn apply(
         &mut self,
         key: &str,

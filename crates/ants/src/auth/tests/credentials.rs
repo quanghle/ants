@@ -427,7 +427,7 @@ fn credentials_of_the_longest_names_fit_max_control_line() {
 }
 
 /// The longest credentials, an ant's of the longest name in the longest domain, connect to a server including the
-/// team's server.conf and read through their inbox consumer.
+/// bus's server.conf and read through their inbox consumer.
 #[tokio::test]
 async fn the_longest_credentials_connect() {
     let domain: JsDomain = "d".repeat(64).parse().unwrap();

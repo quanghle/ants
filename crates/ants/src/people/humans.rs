@@ -1,4 +1,4 @@
-//! The team's humans: the KV bucket [`HUMANS_BUCKET`], which only humans' credentials write and ants read, and the
+//! The bus's humans: the KV bucket [`HUMANS_BUCKET`], which only humans' credentials write and ants read, and the
 //! human the CLI acts as ([`Me`]), which registers itself there when it connects ([`register`]).
 
 use ants_daemon::bus::relayed::GuardedKv as _;

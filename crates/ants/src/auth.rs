@@ -1,4 +1,4 @@
-//! Team credentials for NATS decentralized auth: one operator, the bus's account, and one user per ant or human whose
+//! Bus credentials for NATS decentralized auth: one operator, the bus's account, and one user per ant or human whose
 //! JWT carries the permissions of [`Permissions::for_user`] in its role.
 //!
 //! The streams, KV buckets and object stores live in an account of their own, the store account, the only one with
@@ -88,7 +88,7 @@ pub fn team_dir(dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// The keys of a team: its operator, system account, store account and the bus's account.
+/// The keys of a bus: its operator, system account, store account and the bus's account.
 struct Keys {
     operator: KeyPair,
     system: KeyPair,
@@ -130,7 +130,7 @@ pub fn init(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Add the store account to the team in `dir`, made before there was one, and write its `server.conf` again with the
+/// Add the store account to the bus in `dir`, made before there was one, and write its `server.conf` again with the
 /// revocations still in effect ([`revoke::apply`]), the operator JWT kept.
 pub fn add_store(dir: &Path) -> Result<()> {
     if !holds_team(dir) || !dir.join(ACCOUNT_SEED).is_file() {
@@ -159,9 +159,9 @@ pub struct Revocations {
     pub system: BTreeMap<String, u64>,
 }
 
-/// Write the `server.conf` of the team in `dir` again, its accounts revoking the user keys of `revocations`. Returns
-/// the store account's public key and JWT, then the team account's, the order in which a server takes them: the
-/// team's account imports from the store's; then the system account's, last, as revoking a leaf node's system account
+/// Write the `server.conf` of the bus in `dir` again, its accounts revoking the user keys of `revocations`. Returns
+/// the store account's public key and JWT, then the bus's account's, the order in which a server takes them: the
+/// bus's account imports from the store's; then the system account's, last, as revoking a leaf node's system account
 /// uplink stops the leaf hearing the pushes.
 pub fn write_server_conf(dir: &Path, revocations: &Revocations) -> Result<[AccountJwt; 3]> {
     let keys = Keys::load(dir)?;
@@ -181,12 +181,12 @@ pub fn write_server_conf(dir: &Path, revocations: &Revocations) -> Result<[Accou
     ])
 }
 
-/// Whether `dir` holds the keys of a team, those of its system account included.
+/// Whether `dir` holds the keys of a bus, those of its system account included.
 pub fn holds_team(dir: &Path) -> bool {
     dir.join(SYSTEM_SEED).is_file()
 }
 
-/// Whether the team in `dir` has its store account.
+/// Whether the bus in `dir` has its store account.
 pub fn holds_store(dir: &Path) -> bool {
     dir.join(STORE_SEED).is_file()
 }
@@ -247,7 +247,7 @@ pub fn members(ants: &[UserId], humans: &[UserId]) -> Vec<(UserId, Role)> {
     members
 }
 
-/// Fail unless the ant `user` may get the credentials of the assistant of `human` in the team in `dir`: `human` is one
+/// Fail unless the ant `user` may get the credentials of the assistant of `human` on the bus in `dir`: `human` is one
 /// the registry knows, `user` is neither a human nor an ant a manager added from a template, and
 /// no credentials neither revoked nor expired make another ant `human`'s assistant or `user` another human's.
 pub fn check_assistant(dir: &Path, user: &UserId, human: &UserId) -> Result<()> {
@@ -290,7 +290,7 @@ fn live_in(dir: &Path) -> Result<impl Fn(&Issued) -> bool> {
     Ok(move |i: &Issued| !revoked.iter().any(|r| r.key == i.key) && i.expires_at.is_none_or(|exp| exp > now))
 }
 
-/// The ants of the team in `dir` that are a human's assistant, as their credentials neither revoked nor expired make
+/// The ants of the bus in `dir` that are a human's assistant, as their credentials neither revoked nor expired make
 /// them, each with its human.
 fn assistants(dir: &Path) -> Result<BTreeMap<UserId, UserId>> {
     let live = live_in(dir)?;
@@ -308,7 +308,7 @@ fn leaf_role<'a>(assistants: &'a BTreeMap<UserId, UserId>, member: &UserId, role
     }
 }
 
-/// Fail when `user` is a name the team reserves: [`UserId::channel_manager`], which no ant or human may take,
+/// Fail when `user` is a name the bus reserves: [`UserId::channel_manager`], which no ant or human may take,
 /// [`REVOKED_DEVICES`], under which the devices bucket keeps its revocation records, [`UserId::signer`], and
 /// [`ants_proto::BOOTSTRAP_USER`], the name of the public bootstrap credentials, which `ants auth revoke bootstrap`
 /// revokes: those [`UserId::is_reserved`] holds.
@@ -334,7 +334,7 @@ pub fn check_not_reserved(user: &UserId) -> Result<()> {
     bail!("{user} is a reserved name; choose another name")
 }
 
-/// The `server.conf` of the team, with `operator_jwt` if given, else a new one.
+/// The `server.conf` of the bus, with `operator_jwt` if given, else a new one.
 fn server_conf(keys: &Keys, operator_jwt: Option<&str>, revocations: &Revocations) -> Result<String> {
     let Keys { operator, system, store, account } = keys;
     let operator_jwt = match operator_jwt {
@@ -417,7 +417,7 @@ fn account_jwt(keys: &Keys, revocations: &BTreeMap<String, u64>) -> Result<Strin
     jwt(&keys.operator, &keys.account.public_key(), TEAM, nats, None)
 }
 
-/// Write the `server.conf` of the team in `dir` as `ants auth init` wrote it before the store account: the team's
+/// Write the `server.conf` of the bus in `dir` as `ants auth init` wrote it before the store account: the bus's
 /// account holding JetStream itself, and no store account.
 #[cfg(test)]
 pub(crate) fn write_server_conf_before_store(dir: &Path) -> Result<()> {

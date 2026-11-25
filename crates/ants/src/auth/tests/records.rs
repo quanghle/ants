@@ -1,4 +1,4 @@
-//! What ants and humans record in the team's buckets: colony entries, storage warnings, escalation chains,
+//! What ants and humans record in the bus's buckets: colony entries, storage warnings, escalation chains,
 //! links, attachments, reactions, saved trails and trail runs.
 
 use super::*;

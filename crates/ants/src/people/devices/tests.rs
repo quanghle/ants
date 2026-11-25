@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::*;
 use crate::test_support::Server;
 
-/// Issue credentials of `user` in `role` from the team in `team`, as `ants auth user` does, returning their file's
+/// Issue credentials of `user` in `role` from the bus in `team`, as `ants auth user` does, returning their file's
 /// text.
 fn issue(team: &Path, user: &UserId, role: Role) -> String {
     let out = team.join(format!("{user}-{role:?}.creds"));

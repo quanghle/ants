@@ -91,7 +91,7 @@ pub async fn confirm(nats: &Nats<'_>, act: Option<&str>, deny: bool, json: bool)
 }
 
 /// Record `human`'s `answer` to the decision on `request`, of those its assistants made for it (`held`), that the
-/// assistant its grant names now made, signed with the device credentials `creds` of the team of `account`. What was
+/// assistant its grant names now made, signed with the device credentials `creds` of the bus of `account`. What was
 /// done, in a line.
 pub(crate) async fn answer_decision(
     js: &jetstream::Context,
@@ -150,7 +150,7 @@ async fn record(
 }
 
 /// Record `human`'s `answer` to `order`, which a machine's daemon holds for it, signed with the device credentials
-/// `creds` of the team of `account`: refused unless the assistant the grant names now sent it. What was done, in a line.
+/// `creds` of the bus of `account`: refused unless the assistant the grant names now sent it. What was done, in a line.
 pub(crate) async fn answer_order(
     js: &jetstream::Context,
     creds: &std::path::Path,

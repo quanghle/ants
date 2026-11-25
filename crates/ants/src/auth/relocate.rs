@@ -20,7 +20,7 @@ pub struct Moved {
     pub streams: Vec<String>,
     /// Those of them that replaced a stream of the same name in the store account.
     pub replaced: Vec<String>,
-    /// The team account's directory, when left in place as it holds more than streams.
+    /// The bus's account's directory, when left in place as it holds more than streams.
     pub left: Option<PathBuf>,
 }
 

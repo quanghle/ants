@@ -133,7 +133,7 @@ pub struct Directory {
 }
 
 impl Directory {
-    /// The directory on the hub `js` reaches, read for the team of the account `account` (the issuer of the reader's
+    /// The directory on the hub `js` reaches, read for the bus of the account `account` (the issuer of the reader's
     /// credentials).
     pub async fn open(js: &jetstream::Context, account: &str) -> Result<Self> {
         let kv = match js.get_key_value(DEVICES_BUCKET).await {

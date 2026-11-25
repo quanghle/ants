@@ -1,4 +1,4 @@
-//! Renewing credentials for a new key: the rights they carry, reread from the team's records, and the record of
+//! Renewing credentials for a new key: the rights they carry, reread from the bus's records, and the record of
 //! the renewed ones.
 
 use std::collections::BTreeMap;

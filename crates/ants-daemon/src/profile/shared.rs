@@ -7,7 +7,7 @@
 //! shared ([`shares`]): the others follow the template as the config loads it.
 //!
 //! As any machine's host credentials may write any ant's record, a record is signed with the ant's own credentials,
-//! which only the machines serving the ant hold ([`Signer`]); a daemon whose team has credentials applies only a record
+//! which only the machines serving the ant hold ([`Signer`]); a daemon whose bus has credentials applies only a record
 //! so signed, and writes its config's settings over any other ([`read`], [`refresh`]). It refuses a record signed with
 //! revoked credentials, and one the ant signed that was put back after it was replaced: stored at another stream
 //! sequence, or in another incarnation of the bucket ([`incarnation`]), than the ones it was signed for ([`write()`],
@@ -389,7 +389,7 @@ pub struct Bucket<'a> {
     pub identities: &'a DirectKv,
     /// [`DEVICES_BUCKET`], whose revocation records name the keys of credentials that sign no record.
     pub devices: &'a DirectKv,
-    /// The team account's public keys, which sign the ants' credentials; none on a server without authentication.
+    /// The bus's account's public keys, which sign the ants' credentials; none on a server without authentication.
     pub accounts: &'a [String],
 }
 
@@ -578,7 +578,7 @@ pub async fn follow(shared: Shared, mut vias: watch::Receiver<Vec<Via>>, machine
     }
 }
 
-/// The buckets over a connection as a [`Via`] names it, and the team account its credentials verify records against.
+/// The buckets over a connection as a [`Via`] names it, and the bus's account its credentials verify records against.
 struct Reader {
     identities: DirectKv,
     devices: DirectKv,

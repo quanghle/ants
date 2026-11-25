@@ -413,14 +413,24 @@ async fn a_rejection_or_the_expiry_ends_the_request() {
         let second = request(&server.url, Enrollment::new(&creds, &dev_a, &second), REPEAT, pending());
         tokio::join!(first, second)
     };
+    // A loaded machine may start one requester after a listen has passed: an approval hearing only the other would go
+    // through, and a rejection would end only the one heard.
     let answering = async {
+        while approver.pending(Some(&dev_a)).await.unwrap().len() < 2 {}
         let err = once_heard(async || approver.approve(&team, &dev_a, None).await).await.unwrap_err().to_string();
         assert!(err.contains("several machines ask for dev-a"), "{err}");
-        once_heard(async || approver.reject(&dev_a, None, Some("unknown machine")).await).await.unwrap()
+        let mut rejected = std::collections::BTreeSet::new();
+        while rejected.len() < 2 {
+            rejected.extend(
+                once_heard(async || approver.reject(&dev_a, None, Some("unknown machine")).await).await.unwrap(),
+            );
+        }
+        rejected
     };
     let ((first_err, second_err), rejected) =
         Box::pin(timeout(WAIT * 2, async { tokio::join!(both, answering) })).await.unwrap();
-    assert_eq!(rejected.len(), 2);
+    let asked = [first.public_key(), second.public_key()];
+    assert_eq!(rejected, asked.into_iter().collect());
     for err in [first_err.unwrap_err(), second_err.unwrap_err()] {
         assert!(err.to_string().contains("rejected: unknown machine"), "{err:#}");
     }
