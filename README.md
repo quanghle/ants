@@ -148,7 +148,7 @@ ants ask --wait @dev-b "run the test suite"
 
 ## Contributing
 
-Workspace crates: `ants-proto` (wire types and NATS permissions, no I/O), `ants-client` (what a human's client shows and sends, with no I/O, and its reads and writes over a transport trait; also built for `wasm32-unknown-unknown`), `ants-sense` (built-in identity, memory and work provider), `ants-trail` (trails: Python scripts run by Monty in one-shot `ants subprocess` workers), `ants-process` (the wait for a child process that the daemon and the trail runner share, on macOS by a kqueue of its own), `ants-daemon` (bus, ACP pool, delivery, approvals, MCP server), `ants` (CLI and service binary), and `ants-test-support` (test helpers).
+Workspace crates: `ants-proto` (wire types and NATS permissions, no I/O), `ants-client` (what a human's client shows and sends, with no I/O, and its reads and writes over a transport trait; also built for `wasm32-unknown-unknown`), `ants-sense` (built-in identity, memory and work provider), `ants-trail` (trails: Python scripts run by Monty in one-shot `ants subprocess` workers), `ants-process` (the start of a child process in the blocking pool and the wait for it that the daemon and the trail runner share, the wait on macOS by a kqueue of its own), `ants-daemon` (bus, ACP pool, delivery, approvals, MCP server), `ants` (CLI and service binary), and `ants-test-support` (test helpers).
 
 Run the full CI check suite locally before submitting changes (`rust-toolchain.toml` pins Rust 1.100):
 

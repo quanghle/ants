@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
 /// Run git in `dir` and return what it printed, or fail with what it printed on stderr.
 pub(crate) async fn git<I, S>(dir: &Path, args: I) -> Result<String>
@@ -89,13 +89,6 @@ where
     wait(&mut spawn(command).await.ok()?).await.ok()?.code()
 }
 
-/// Start `command` in the blocking pool rather than on the calling thread, which the fork and exec of the program
-/// would hold for the time of the system call: a burst of sessions, each starting git, would otherwise hold the
-/// runtime's one thread. The child is the runtime's, waited for and killed on drop as any other.
-pub(crate) async fn spawn(mut command: Command) -> io::Result<Child> {
-    tokio::task::spawn_blocking(move || command.spawn()).await.map_err(io::Error::other)?
-}
-
 /// Run `command` for its exit status and what it printed, as tokio's `Command::output` does, started as [`spawn`]
 /// does and waited for as [`wait`] does.
 pub(crate) async fn output(mut command: Command) -> io::Result<Output> {
@@ -118,6 +111,10 @@ async fn output_of(command: Command) -> io::Result<Output> {
     Ok(Output { status, stdout, stderr })
 }
 
+/// Start `command` in the blocking pool rather than on the calling thread, which the fork and exec of the program
+/// would hold for the time of the system call: a burst of sessions, each starting git, would otherwise hold the
+/// runtime's one thread. The child is the runtime's, waited for and killed on drop as any other.
+pub(crate) use ants_process::spawn;
 /// Wait for `child` to exit, its stdin closed first, as tokio's `Child::wait` does, but on macOS by a kqueue of its own
 /// rather than by SIGCHLD, so that no other child's exit wakes it, as with Linux's pidfds.
 pub(crate) use ants_process::wait;
