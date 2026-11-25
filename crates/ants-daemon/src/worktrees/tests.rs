@@ -120,6 +120,7 @@ async fn ants_sharing_a_repository_check_out_and_prune_at_once() {
     assert!(pruned.iter().all(|p| *p == Pruned { removed: 3, kept: Vec::new() }), "{pruned:?}");
     assert_eq!(run(&repo, &["branch", "--list", "ants/*"]), "");
     assert_eq!(run(&repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
+    assert!(!repo.join(".git/worktrees").exists(), "removed once it holds no registration, as git does");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -469,5 +470,39 @@ async fn a_sparse_checkout_gets_its_worktrees_from_git() {
     let path = worktrees.checkout(&thread("a")).await.unwrap();
     assert!(path.join("sub/file").is_file() && !path.join("other").exists(), "sparse as the repository");
     assert_eq!(run(&path, &["branch", "--show-current"]).trim(), "ants/dev-a/a");
+    std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn removing_a_worktree_reads_no_other_worktree_of_the_repository() {
+    let Some(repo) = repo("worktrees-remove-alone") else { return };
+    let home = repo.parent().unwrap().join("home");
+    let worktrees = Worktrees::find(&ant(), &repo, &home).await.unwrap();
+    let (a, b) = (thread("a"), thread("b"));
+    worktrees.checkout(&a).await.unwrap();
+    worktrees.checkout(&b).await.unwrap();
+    worktrees.describe(&a, "the work of a").await.unwrap();
+    assert!(worktrees.description(&a).await.is_some());
+    commit(&home.join("worktrees/b"), "work of b");
+    // A branch of the ant without a worktree, which HEAD is on: kept.
+    run(&repo, &["switch", "--quiet", "--create", "ants/dev-a/c"]);
+    // A worktree whose gitdir file nobody writes to: git reading every worktree of the repository waits for it.
+    let stuck = repo.join(".git/worktrees/stuck");
+    std::fs::create_dir(&stuck).unwrap();
+    assert!(Command::new("mkfifo").arg(stuck.join("gitdir")).status().unwrap().success());
+    let list = tokio::time::timeout(Duration::from_secs(1), git(&repo, ["worktree", "list"])).await;
+    assert!(list.is_err(), "git worktree list reads every worktree: {list:?}");
+    let pruned = tokio::time::timeout(Duration::from_secs(60), worktrees.prune(async |_: &ThreadId| true)).await;
+    let ahead = Branch { thread: b.clone(), name: "ants/dev-a/b".to_owned(), commits: 1, upstream: None };
+    assert_eq!(pruned.expect("the removals read other worktrees"), Pruned { removed: 2, kept: vec![ahead] });
+    std::fs::remove_dir_all(&stuck).unwrap();
+    assert!(worktrees.threads().is_empty());
+    assert_eq!(run(&repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
+    let branches = run(&repo, &["branch", "--list", "ants/*", "--format=%(refname:short)"]);
+    assert_eq!(branches.lines().collect::<Vec<_>>(), ["ants/dev-a/b", "ants/dev-a/c"]);
+    let config = Command::new("git").args(["config", "--get-regexp", "^branch\\.ants/"]).current_dir(&repo).output();
+    assert_eq!(String::from_utf8(config.unwrap().stdout).unwrap(), "", "a's description is gone");
+    assert!(!repo.join(".git/logs/refs/heads/ants/dev-a/a").exists(), "a's reflog is gone");
     std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
 }
