@@ -112,6 +112,7 @@ impl Model {
             Slash::Add(add) => run(Job::Add(add)),
             Slash::Clone(clone) => run(Job::Clone(clone)),
             Slash::Retire(ant) => run(Job::Retire { ant }),
+            Slash::Channel { channel, manage } => run(Job::ManageChannel { channel, manage }),
             Slash::Dead(dead) => self.dead(dead, now),
             Slash::Trail(Trail::Run { trail, conductor, args, limits, thread }) => {
                 let thread = thread.map(|on| self.on_thread(on, now)).transpose()?;

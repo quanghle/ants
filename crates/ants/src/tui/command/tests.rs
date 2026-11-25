@@ -14,6 +14,7 @@ use crate::tui::test_support::{model, typed};
 use crate::tui::{nav, thread};
 
 mod attach;
+mod channel;
 mod notes;
 mod quoting;
 mod send;

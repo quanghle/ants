@@ -9,10 +9,10 @@ use clap_complete::engine::ArgValueCandidates;
 
 use crate::channel::reads;
 use crate::connection::{Connection, Nats};
-use crate::people::{humans, quiet};
+use crate::people::quiet;
 use crate::release::upgrade;
 use crate::threads::{thread, thread_meta};
-use crate::{ants::colony, channel, completions};
+use crate::{channel, completions};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ChannelCommand {
@@ -163,38 +163,18 @@ pub(crate) async fn run(conn: &Connection<'_>, command: ChannelCommand) -> Resul
 
 /// Every `ants channel` subcommand but `serve`, as the CLI's user.
 async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
+    let managed = command.managed().transpose()?;
     let (_, js) = nats.connect("ants-cli").await?;
+    if let Some((channel, manage)) = managed {
+        let managed = manage.run(&js, &nats.me, nats.domain, &channel).await?;
+        for warning in &managed.warnings {
+            tracing::warn!("{warning}");
+        }
+        println!("{}", managed.line);
+        return Ok(());
+    }
     let kv = channel::open(&js).await?;
-    let humans = humans::load(&js, &nats.me).await;
-    let named =
-        matches!(command, ChannelCommand::Create { .. } | ChannelCommand::Set { .. } | ChannelCommand::Add { .. });
-    let teams = if named { channel::teams(&js, nats.domain).await } else { None };
-    let teams = teams.as_ref();
     match command {
-        ChannelCommand::Create { channel, members, messenger, owner, description } => {
-            let change = channel::Change {
-                add: members,
-                messenger: Some(messenger),
-                owner: Some(owner),
-                description: Some(description),
-                ..channel::Change::default()
-            };
-            change.check(&channel, &humans, teams)?;
-            let mut entry = ants_proto::ChannelEntry::new(channel);
-            change.apply(&mut entry);
-            channel::create(&kv, &entry).await?;
-            warn_unserved(&js, entry.members.iter().chain(&entry.messenger).chain(&entry.owner), &humans).await;
-            println!("created {}", channel::describe(&entry));
-        }
-        command @ ChannelCommand::Set { .. } => set(&js, &kv, &humans, teams, command).await?,
-        ChannelCommand::Add { channel, users } => {
-            let change = channel::Change { add: users, ..channel::Change::default() };
-            write(&js, &kv, &humans, teams, &channel, &change).await?;
-        }
-        ChannelCommand::Remove { channel, users } => {
-            let change = channel::Change { remove: users, ..channel::Change::default() };
-            write(&js, &kv, &humans, teams, &channel, &change).await?;
-        }
         ChannelCommand::List { json } => {
             let entries = channel::list(&kv).await?;
             let unread = if entries.is_empty() { None } else { unread(nats, &js, &entries).await };
@@ -229,67 +209,68 @@ async fn manage(nats: &Nats<'_>, command: ChannelCommand) -> Result<()> {
         ChannelCommand::Read { channel, thread, limit, archived, peek, json } => {
             read(nats, &js, &kv, &channel, Pick { thread, limit, archived }, Printed { peek, json }).await?;
         }
-        ChannelCommand::Delete { channel } => {
-            channel::delete(&kv, &channel).await?;
-            println!("deleted #{channel}; the posts to #{channel} stay in the stream");
-        }
+        ChannelCommand::Create { .. }
+        | ChannelCommand::Set { .. }
+        | ChannelCommand::Add { .. }
+        | ChannelCommand::Remove { .. }
+        | ChannelCommand::Delete { .. } => unreachable!("managed above"),
         ChannelCommand::Serve { .. } => unreachable!("`serve` runs the channel manager"),
     }
     Ok(())
 }
 
-/// `ants channel set`: change what `command` gives of a channel.
-async fn set(
-    js: &async_nats::jetstream::Context,
-    kv: &async_nats::jetstream::kv::Store,
-    humans: &ants_proto::Humans,
-    teams: Option<&ants_proto::TeamDirectory>,
-    command: ChannelCommand,
-) -> Result<()> {
-    let ChannelCommand::Set {
-        channel,
-        members,
-        messenger,
-        default_messenger,
-        owner,
-        no_owner,
-        description,
-        no_description,
-    } = command
-    else {
-        unreachable!("`set` runs only `ants channel set`");
-    };
-    let change = channel::Change {
-        members,
-        messenger: (messenger.is_some() || default_messenger).then_some(messenger),
-        owner: (owner.is_some() || no_owner).then_some(owner),
-        description: (description.is_some() || no_description).then_some(description),
-        ..channel::Change::default()
-    };
-    if change.is_empty() {
-        bail!(
-            "nothing to change: give --member, --messenger, --default-messenger, --owner, --no-owner, \
-             --description or --no-description"
-        );
+impl ChannelCommand {
+    /// The channel `create`, `set`, `add`, `remove` or `delete` names and what it does to it, or why it does nothing;
+    /// none for the other subcommands. ants chat's `/channel` reads its words into these too.
+    pub(crate) fn managed(&self) -> Option<Result<(ChannelId, channel::Manage)>> {
+        use channel::{Change, Manage};
+        let managed = match self {
+            Self::Create { channel, members, messenger, owner, description } => {
+                let change = Change {
+                    add: members.clone(),
+                    messenger: Some(messenger.clone()),
+                    owner: Some(owner.clone()),
+                    description: Some(description.clone()),
+                    ..Change::default()
+                };
+                (channel, Manage::Create(change))
+            }
+            Self::Set {
+                channel,
+                members,
+                messenger,
+                default_messenger,
+                owner,
+                no_owner,
+                description,
+                no_description,
+            } => {
+                let change = Change {
+                    members: members.clone(),
+                    messenger: (messenger.is_some() || *default_messenger).then(|| messenger.clone()),
+                    owner: (owner.is_some() || *no_owner).then(|| owner.clone()),
+                    description: (description.is_some() || *no_description).then(|| description.clone()),
+                    ..Change::default()
+                };
+                if change.is_empty() {
+                    return Some(Err(anyhow::anyhow!(
+                        "nothing to change: give --member, --messenger, --default-messenger, --owner, --no-owner, \
+                         --description or --no-description"
+                    )));
+                }
+                (channel, Manage::Change(change))
+            }
+            Self::Add { channel, users } => {
+                (channel, Manage::Change(Change { add: users.clone(), ..Change::default() }))
+            }
+            Self::Remove { channel, users } => {
+                (channel, Manage::Change(Change { remove: users.clone(), ..Change::default() }))
+            }
+            Self::Delete { channel } => (channel, Manage::Delete),
+            Self::List { .. } | Self::Notify { .. } | Self::Read { .. } | Self::Serve { .. } => return None,
+        };
+        Some(Ok((managed.0.clone(), managed.1)))
     }
-    write(js, kv, humans, teams, &channel, &change).await
-}
-
-/// Write `change` to `channel`, warning of what it warns of, and print the channel as it stored it.
-async fn write(
-    js: &async_nats::jetstream::Context,
-    kv: &async_nats::jetstream::kv::Store,
-    humans: &ants_proto::Humans,
-    teams: Option<&ants_proto::TeamDirectory>,
-    channel: &ChannelId,
-    change: &channel::Change,
-) -> Result<()> {
-    let changed = change.write(js, kv, channel, humans, teams).await?;
-    for warning in &changed.warnings {
-        tracing::warn!("{warning}");
-    }
-    println!("{}", channel::describe(&changed.entry));
-    Ok(())
 }
 
 /// A channel as `ants channel list --json` prints it: its entry, with the posts `unread` when counted.
@@ -469,19 +450,6 @@ async fn mark_read(
     };
     if let Err(e) = marked.await {
         tracing::warn!("not marking the posts of #{channel} read: {e:#}");
-    }
-}
-
-/// Warn about members, messengers and owners no daemon serves now ([`colony::unserved`]), rather than refuse them:
-/// one may start later. `humans` need none.
-pub(crate) async fn warn_unserved<'a>(
-    js: &async_nats::jetstream::Context,
-    users: impl IntoIterator<Item = &'a UserId>,
-    humans: &ants_proto::Humans,
-) {
-    let users: Vec<&UserId> = users.into_iter().filter(|u| !humans.contains(u)).collect();
-    for warning in colony::unserved_warnings(js, &users).await {
-        tracing::warn!("{warning}");
     }
 }
 

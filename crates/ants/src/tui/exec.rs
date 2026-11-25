@@ -1,6 +1,7 @@
 //! What the command bar's sends and slash commands do over the CLI's connection, in the background while the UI goes
 //! on: the same library code as `ants ask`, `ants post`, `ants notes`, `ants answer`, `ants react`, `ants cancel`,
-//! `ants thread done|title|pin|mute...`, `ants dead replay|drop`, `ants notify` ([`super::notify`]), `ants remind list`
+//! `ants thread done|title|pin|mute...`, `ants channel create|set|add|remove|delete`, `ants dead replay|drop`, `ants
+//! notify` ([`super::notify`]), `ants remind list`
 //! ([`super::remind`]) and `ants trail` ([`super::trail`]) run, each returning the line those print and the warnings
 //! they log. The sends are in [`send`].
 
@@ -133,6 +134,11 @@ pub enum Job {
     Channel {
         channel: ChannelId,
         change: crate::channel::Change,
+    },
+    /// Create, change or delete `channel` as `ants channel create|set|add|remove|delete` does.
+    ManageChannel {
+        channel: ChannelId,
+        manage: crate::channel::Manage,
     },
     /// Change `team` as `ants team add|remove|set` does, refused as it refuses it.
     Team {
@@ -392,6 +398,10 @@ impl Job {
             Self::Mute { thread, hold } => Ok(Done::line(quiet::muted(&ctx.js, me, &thread, hold).await?)),
             Self::Unmute { thread } => Ok(Done::line(quiet::unmuted(&ctx.js, me, &thread).await?)),
             Self::Channel { channel, change } => change_channel(ctx, channel, &change).await,
+            Self::ManageChannel { channel, manage } => {
+                let managed = manage.run(&ctx.js, &ctx.me, ctx.domain.as_ref(), &channel).await?;
+                Ok(Done { line: managed.line, warnings: managed.warnings, channel: Some(channel), ..Done::default() })
+            }
             Self::Team { team, change } => change_team(ctx, &team, &change).await,
             Self::ChannelNotify { channel, level } => {
                 Ok(Done::line(quiet::channel_notify(&ctx.js, me, &channel, level).await?))

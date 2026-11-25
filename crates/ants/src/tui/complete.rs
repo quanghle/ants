@@ -1,5 +1,6 @@
 //! Completion in the command bar: `@` lists users and teams and `#` channels, narrowed by what follows them up to the cursor;
-//! after `/attach`, the paths of the directory typed. `/` at the start lists the palette ([`super::palette`]).
+//! after `/attach`, the paths of the directory typed; after `/channel`, `@` lists every ant and human,
+//! after a comma too. `/` at the start lists the palette ([`super::palette`]).
 
 use std::collections::BTreeSet;
 
@@ -15,6 +16,9 @@ use super::style;
 
 /// Most completions shown at once.
 const ROWS: usize = 8;
+
+/// The slash commands whose arguments name users, with the space after them.
+const MANAGING: [&str; 1] = ["/channel "];
 
 /// A completion of the word at the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,16 +92,23 @@ impl Model {
             return Vec::new();
         }
         let (start, typed) = self.ui.bar.word();
-        if self.ui.bar.raw().chars().take(start).eq("/attach ".chars()) {
+        let before: String = self.ui.bar.raw().chars().take(start).collect();
+        if before == "/attach " {
             return super::attach::paths(&typed);
         }
-        let Some(word) = Word::of(&typed) else {
+        // The arguments of `/channel` name users, `--member` a list of them, whatever the view.
+        let managing = MANAGING.iter().any(|command| before.to_lowercase().starts_with(command));
+        let (lead, typed) = match typed.rfind(',') {
+            Some(at) if managing => typed.split_at(at + 1),
+            _ => ("", typed.as_str()),
+        };
+        let Some(word) = Word::of(typed) else {
             return Vec::new();
         };
         match word {
-            Word::User(typed) => narrow(typed, self.users().into_iter().map(|(u, what)| (u.to_string(), what)))
+            Word::User(typed) => narrow(typed, self.users(managing).into_iter().map(|(u, what)| (u.to_string(), what)))
                 .into_iter()
-                .map(|(name, detail)| Candidate { word: format!("@{name}"), detail })
+                .map(|(name, detail)| Candidate { word: format!("{lead}@{name}"), detail })
                 .collect(),
             Word::Channel(typed) => {
                 let channels = self.data.channels.iter().map(|c| (c.channel.to_string(), c.members.len()));
@@ -109,10 +120,10 @@ impl Model {
         }
     }
 
-    /// The users `@` completes, by name, each an "ant" or a "human": the members of the channel on view, else the
-    /// colony's ants, the registered humans and the teams, each team with its lead; the human using the UI is left
-    /// out.
-    fn users(&self) -> Vec<(UserId, String)> {
+    /// The users `@` completes, by name, each an "ant" or a "human": with `every`, the colony's ants and the
+    /// registered humans; else the members of the channel on view, else those and the teams, each team with its lead.
+    /// The human using the UI is left out.
+    fn users(&self, every: bool) -> Vec<(UserId, String)> {
         let data = &self.data;
         let channel = match self.page() {
             Page::Channel(page) => Some(page.channel.clone()),
@@ -127,8 +138,9 @@ impl Model {
             | Page::Credentials(_)
             | Page::Held(_) => None,
         };
-        let members = channel.and_then(|channel| data.channels.iter().find(|c| c.channel == channel));
-        let teams = data.teams.iter().flat_map(|d| &d.teams).filter(|_| members.is_none());
+        let members =
+            channel.filter(|_| !every).and_then(|channel| data.channels.iter().find(|c| c.channel == channel));
+        let teams = data.teams.iter().flat_map(|d| &d.teams).filter(|_| members.is_none() && !every);
         let users: BTreeSet<&UserId> = match members {
             Some(entry) => entry.members.iter().collect(),
             None => data.live.colony.iter().map(|e| &e.ant).chain(data.humans.iter().flat_map(Humans::iter)).collect(),
@@ -264,6 +276,24 @@ mod tests {
         assert_eq!(words(&m), ["#devops", "#ops"]);
         m.ui.bar.set_text("/mu");
         assert!(m.completions().is_empty(), "the palette lists the commands");
+    }
+
+    #[test]
+    fn after_channel_at_lists_every_ant_and_human_after_a_comma_too() {
+        let mut m = team();
+        m.ui.bar.focused = true;
+        m.pages.push(Page::Channel(channel::Page::new("ops".parse().unwrap())));
+        m.ui.bar.set_text("/channel add ops @d");
+        assert_eq!(words(&m), ["@dev-a", "@dev-b"], "not only the members of the channel on view");
+        m.ui.bar.set_text("");
+        typed(&mut m, "/channel create qa --member bob,@car");
+        assert_eq!(words(&m), ["bob,@carol"]);
+        m.key(Key::Tab, at(0));
+        assert_eq!(m.ui.bar.text(), "/channel create qa --member bob,@carol ");
+        m.ui.bar.set_text("/channel set #o");
+        assert_eq!(words(&m), ["#ops", "#devops"]);
+        m.ui.bar.set_text("hi @bob,@ca");
+        assert!(words(&m).is_empty(), "a message's words end at whitespace alone");
     }
 
     #[test]
