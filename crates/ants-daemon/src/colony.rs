@@ -65,7 +65,7 @@ pub async fn entry(config: &Config) -> ColonyEntry {
 
 /// Host name of this machine, as `hostname` prints it.
 pub async fn machine() -> String {
-    printed(tokio::process::Command::new("hostname").output().await)
+    printed(crate::process::output(tokio::process::Command::new("hostname")).await)
         .or_else(|| std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")).ok())
         .unwrap_or_else(|| "unknown".to_owned())
 }

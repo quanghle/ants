@@ -275,7 +275,8 @@ impl Claude {
         }
         let servers = mcp_servers_json(&open.mcp_servers);
         let cli = ENV.iter().fold(self.cli.clone(), |cli, (name, value)| cli.with_env_default(name, value));
-        let (process, stdin, stdout) = cli.spawn(self.args(&how, &servers, open.skills.as_ref()), Some(&open.cwd))?;
+        let (process, stdin, stdout) =
+            cli.spawn(self.args(&how, &servers, open.skills.as_ref()), Some(&open.cwd)).await?;
         let (events, received) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
             cli: self.cli.clone(),

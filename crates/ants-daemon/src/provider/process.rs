@@ -75,7 +75,7 @@ impl Process {
     /// Wait for it to exit; how it did, with the last line of its stderr.
     pub(super) async fn exited(&mut self) -> String {
         let Some(child) = self.child.as_mut() else { return std::future::pending().await };
-        let how = match child.wait().await {
+        let how = match crate::process::wait(child).await {
             Ok(status) => format!("exited with {status}"),
             Err(e) => format!("could not be waited for: {e}"),
         };
@@ -98,7 +98,7 @@ impl Drop for Process {
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
                 runtime.spawn(async move {
-                    if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_err() {
+                    if tokio::time::timeout(EXIT_GRACE, crate::process::wait(&mut child)).await.is_err() {
                         kill(pid, &mut child);
                     }
                 });

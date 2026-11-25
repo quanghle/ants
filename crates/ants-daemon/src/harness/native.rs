@@ -11,7 +11,11 @@
 //! Tool approval is the CLI's own, set by the definition: what the CLI would ask a human about is denied
 //! ([`deny_approval`]), unless the ant asks ants about its tools (`tools = "ask"`) and the protocol has a hook for it
 //! ([`Native::ASKS`]), when it goes to the client as an ACP permission request ([`Updates::ask`]).
+//!
+//! A harness speaking ACP itself runs here too ([`acp`]): its process started and released as a native CLI's, the
+//! daemon's ACP client speaking to it without a translator.
 
+mod acp;
 mod antigravity;
 mod claude;
 mod cli;
@@ -33,7 +37,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use agent_client_protocol::v1::schema::{ContentBlock, InitializeRequest, McpServer, PromptResponse};
-use agent_client_protocol::{AcpAgent, Agent, Client, DynConnectTo, Error};
+use agent_client_protocol::{Agent, Client, DynConnectTo, Error};
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -160,7 +164,8 @@ pub(crate) fn validate(harness: &Harness) -> anyhow::Result<()> {
 }
 
 /// What the daemon's ACP client connects to for `harness`, with the ant's `env` and `settings`: the harness process
-/// itself for ACP, else an in-process ACP agent that starts the CLI and translates its protocol.
+/// itself for ACP ([`acp`], started and released as a native CLI is), else an in-process ACP agent that starts the CLI
+/// and translates its protocol.
 /// The sessions of a native CLI report their sign-ins to MCP servers to `report`, if any.
 pub(crate) fn agent(
     harness: &Harness,
@@ -169,7 +174,7 @@ pub(crate) fn agent(
     report: Option<Report>,
 ) -> DynConnectTo<Client> {
     match registration(harness.protocol) {
-        Ok(None) => DynConnectTo::new(AcpAgent::new(harness.process(env, settings))),
+        Ok(None) => acp::connect(Cli::new(harness, env, settings)),
         Ok(Some(registration)) => (registration.connect)(Cli::new(harness, env, settings).reporting(report)),
         Err(e) => refusing(format!("harness {harness}: {e}")),
     }

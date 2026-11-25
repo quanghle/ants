@@ -430,13 +430,13 @@ async fn a_stopped_cli_has_its_grace_to_exit_then_is_killed() {
     script(&native, Some(1), &[vec![]]);
     script(&native, Some(2), &[vec!["!sleep 30".to_owned()]]);
     let cli = Cli::new(&native.harness, &[], &ModelSettings::default());
-    let (mut exits, stdin, _stdout) = cli.spawn(["--stub"], Some(&native.dir)).unwrap();
+    let (mut exits, stdin, _stdout) = cli.spawn(["--stub"], Some(&native.dir)).await.unwrap();
     drop(stdin);
     assert!(
         exits.stop(Duration::from_secs(10)).await.is_some_and(|status| status.success()),
         "at the end of its input"
     );
-    let (mut sleeps, stdin, _stdout) = cli.spawn(["--stub"], None).unwrap();
+    let (mut sleeps, stdin, _stdout) = cli.spawn(["--stub"], None).await.unwrap();
     drop(stdin);
     let started = std::time::Instant::now();
     assert_eq!(sleeps.stop(Duration::from_millis(200)).await, None, "killed");

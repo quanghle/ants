@@ -401,6 +401,8 @@ token_file = "~/.config/ants/github-token"    # the signer's GitHub token, mode 
 
 Built-in ACP stdio harnesses live in `crates/ants-daemon/src/harnesses.toml`. None is a default: an ant names its harness, or the file's top-level `harness` does.
 
+An ACP harness's command runs without a shell, in a process group of its own, speaking ACP on its stdin and stdout; its stderr goes to the daemon log at DEBUG. Once its connection ends, its stdin closes and it has 1 s to exit, then `SIGTERM` goes to its process group, and `SIGKILL` after 2 s more; one exiting with a failure on its own fails the connection with the last of its stderr (`<harness> exited with exit status: 1: …`). What it left running then ends as for a native CLI, such as commands it ran in the background in process groups of their own: it runs with `ANTS_SESSION` in its environment, its descendants are walked and recorded as each turn ends (its answer to `session/prompt`), and it is released alike ([Release](#harness-protocols)). A turn leaving commands running in the background keeps its idle harness past `idle_timeout` as a native CLI's does ([Background work](#harness-protocols)).
+
 | Name | Command | Install | Sign-in | Runs tools unasked through |
 |---|---|---|---|---|
 | `copilot` | `copilot --acp --allow-all` | `npm install -g @github/copilot` | `copilot login` | `--allow-all` (agent mode, not autopilot) |

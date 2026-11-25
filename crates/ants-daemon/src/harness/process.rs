@@ -3,18 +3,12 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use agent_client_protocol::{AcpAgentConfig, Client, DynConnectTo};
+use agent_client_protocol::{Client, DynConnectTo};
 use anyhow::{Result, bail};
 
 use super::{Harness, native};
 
 impl Harness {
-    /// The harness process: its arguments with those of the ant's `context`, its environment with the ant's `env`
-    /// over it.
-    pub(crate) fn process(&self, env: &[(String, String)], settings: &ModelSettings) -> AcpAgentConfig {
-        AcpAgentConfig::new(self.executable(env)).args(self.launch_args(settings)).envs(self.launch_env(env))
-    }
-
     /// Its arguments with those of the ant's `context`.
     pub(super) fn launch_args(&self, settings: &ModelSettings) -> Vec<String> {
         let context = settings.context.as_ref().and_then(|value| self.context.get(value));

@@ -9,7 +9,7 @@ publish.workspace = true
 description = "The ant daemon: JetStream inbox consumer and ACP harness pool"
 
 [dependencies]
-agent-client-protocol = { workspace = true, features = ["process", "unstable_end_turn_token_usage", "unstable_session_fork"] }
+agent-client-protocol = { workspace = true, features = ["unstable_end_turn_token_usage", "unstable_session_fork"] }
 ants-proto.workspace = true
 ants-client.workspace = true
 ants-sense.workspace = true
@@ -39,15 +39,15 @@ tower-service = "0.3.3"
 tracing.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
-# Stopping a native harness CLI with the processes it started (crate::harness::native), as agent-client-protocol does
-# for ACP harnesses.
+# Stopping a harness with the processes it started (crate::harness::native).
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.6", default-features = false, features = ["std", "process"] }
 
 # The keychain holding NKey seeds (crate::keystore), rustls-native-certs already bringing it in; sysctl for the memory
-# available (crate::pressure).
+# available (crate::pressure); kqueue for the exit of a child (crate::process::wait).
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
+rustix = { version = "1.1.6", default-features = false, features = ["event"] }
 security-framework = { version = "3.7.0", default-features = false }
 
 # The Windows Credential Manager holding NKey seeds (crate::keystore), the MCP pipe's access list (crate::ipc) and the

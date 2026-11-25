@@ -15,6 +15,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use super::Cli;
 use super::leftovers::{Leftovers, Runs};
+use crate::process::wait;
 use crate::sync::MutexExt as _;
 
 /// The last bytes of a process's stderr, and the task reading it.
@@ -39,7 +40,7 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) async fn probe_version(cli: &Cli) -> Result<std::process::Output, Error> {
     let bare = cli.with_args(Vec::new());
     let program = cli.program().display();
-    match tokio::time::timeout(VERSION_TIMEOUT, bare.command(["--version"]).output()).await {
+    match tokio::time::timeout(VERSION_TIMEOUT, crate::process::output(bare.command(["--version"]))).await {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(e)) => Err(super::failed(format!("{}: starting {program}: {e}", cli.name()))),
         Err(_) => {
@@ -109,9 +110,21 @@ pub(crate) struct Process {
 }
 
 impl Process {
-    /// Start `command`, the CLI of harness `name` whose executable is `program`: the process, and its stdin and stdout
-    /// to speak to it through.
-    pub(super) fn start(
+    /// Start `command`, the CLI of harness `name` whose executable is `program`, in the blocking pool, as
+    /// [`crate::process::spawn`] starts a program: the process, and its stdin and stdout to speak to it through.
+    pub(super) async fn start(
+        name: &str,
+        program: &Path,
+        command: Command,
+    ) -> Result<(Self, ChildStdin, ChildStdout), Error> {
+        let (name, program) = (name.to_owned(), program.to_owned());
+        let started = tokio::task::spawn_blocking(move || Self::start_here(&name, &program, command)).await;
+        started.unwrap_or_else(|e| Err(super::failed(format!("starting a harness: {e}"))))
+    }
+
+    /// [`Self::start`] on the calling thread, which the fork and exec of the program hold: for a caller in the
+    /// blocking pool already.
+    pub(super) fn start_here(
         name: &str,
         program: &Path,
         mut command: Command,
@@ -161,7 +174,7 @@ impl Process {
     /// recognizes.
     pub(crate) async fn exited(&mut self) -> Error {
         let status = match self.child.as_mut() {
-            Some(child) => tokio::time::timeout(EXIT_GRACE, child.wait()).await.ok().and_then(Result::ok),
+            Some(child) => tokio::time::timeout(EXIT_GRACE, wait(child)).await.ok().and_then(Result::ok),
             None => None,
         };
         if status.is_some() {
@@ -188,13 +201,27 @@ impl Process {
     pub(crate) async fn stop(&mut self, grace: Duration) -> Option<ExitStatus> {
         self.walk().await;
         let child = self.child.as_mut()?;
-        let status = tokio::time::timeout(grace, child.wait()).await.ok().and_then(Result::ok);
+        let status = tokio::time::timeout(grace, wait(child)).await.ok().and_then(Result::ok);
         if status.is_none() {
             kill(self.pid, child);
-            let _ = child.wait().await;
+            let _ = wait(child).await;
         }
         self.release().await;
         status
+    }
+
+    /// Wait for it to exit: its exit status, None when it cannot be waited for.
+    pub(crate) async fn wait(&mut self) -> Option<ExitStatus> {
+        wait(self.child.as_mut()?).await.ok()
+    }
+
+    /// Ask it to exit, with SIGTERM to the process group it leads; false where no signal can be sent, as on Windows.
+    pub(crate) fn terminate(&self) -> bool {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid.and_then(|pid| rustix::process::Pid::from_raw(pid.cast_signed())) {
+            return rustix::process::kill_process_group(pid, rustix::process::Signal::TERM).is_ok();
+        }
+        false
     }
 
     /// Walk its descendants while it still runs, to end those left running once it ended: before what makes it exit,
@@ -234,9 +261,9 @@ impl Drop for Process {
                         if let Some(leftovers) = leftovers.as_mut() {
                             leftovers.walk().await;
                         }
-                        if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_err() {
+                        if tokio::time::timeout(EXIT_GRACE, wait(&mut child)).await.is_err() {
                             kill(pid, &mut child);
-                            let _ = child.wait().await;
+                            let _ = wait(&mut child).await;
                         }
                     }
                     if let Some(leftovers) = leftovers {
