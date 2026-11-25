@@ -144,8 +144,10 @@ async fn a_run_whose_end_is_not_stored_at_first_stores_it_on_a_retry_and_tells_i
     assert!(told.text.contains(" is done ("), "{}", told.text);
     lead.invitation().await;
     assert_eq!(lead.ends_sent(&run, Duration::from_secs(3)).await, (0, 0), "each is sent once");
-    assert!(!listed(&lead.js).await.contains(&run));
-    assert!(lead.trails.unfinished().is_empty(), "the run is forgotten");
+    eventually("the run is unlisted and forgotten", async || {
+        !listed(&lead.js).await.contains(&run) && lead.trails.unfinished().is_empty()
+    })
+    .await;
 }
 
 #[tokio::test]

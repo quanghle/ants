@@ -87,7 +87,7 @@ async fn a_run_s_end_invites_its_conductor_to_rate_it_once_unless_a_waited_answe
     assert!(text.contains("Result:\n2\nArgs: {\"n\":1}\nrate_trail(run: "), "{text}");
     assert!(text.ends_with("\nAfter rating, end the turn with complete: nothing needs a reply."), "{text}");
     assert!(!text.contains("find_trails"), "a run that went well: {text}");
-    assert!(!listed(&lead.js).await.contains(&run), "unlisted once the invitation is sent");
+    eventually("the run is unlisted once its end is told", async || !listed(&lead.js).await.contains(&run)).await;
 
     let failing = lead.start("def f():\n    raise ValueError('bad')\nf()\n", TrailLimits::default()).await;
     assert!(matches!(lead.ended(&failing).await, RunState::Failed { .. }));
@@ -107,7 +107,7 @@ async fn a_run_s_end_invites_its_conductor_to_rate_it_once_unless_a_waited_answe
     assert!(ok && text.contains("is done. Result:\n5\nrate_trail(run: "), "the answer invites the rating: {text}");
     let waited = ended_run(&text);
     assert!(lead.invites_not(&waited, Duration::from_millis(500)).await, "the waited answer told the end");
-    assert!(!listed(&lead.js).await.contains(&waited));
+    eventually("the waited run is unlisted", async || !listed(&lead.js).await.contains(&waited)).await;
 
     let js = lead.js.clone();
     drop(lead);
