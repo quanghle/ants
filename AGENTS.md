@@ -28,7 +28,8 @@ keep TODO lists in markdown.
 
 - Rust 2024, one workspace: `ants-proto` (wire contract, no I/O), `ants-sense` (built-in identity, memory and work
   provider, no daemon dependency), `ants-trail` (trails: Monty runs, the one-shot `ants subprocess` worker and its
-  runner, no NATS), `ants-client` (what a human's client derives from what it reads, its requests and its reads and
+  runner, no NATS), `ants-process` (the wait for a child process the daemon and the trail runner share, on macOS by a
+  kqueue of its own rather than tokio's SIGCHLD, no other I/O), `ants-client` (what a human's client derives from what it reads, its requests and its reads and
   writes over a transport trait: no I/O, no runtime, built for wasm32 too, used by the daemon, the CLI, `ants chat`
   and the web client), `ants-daemon` (NATS + ACP), `ants` (binary), `ants-test-support` (dev-only test helpers: tools
   on PATH, throwaway nats-server, `ants-client`'s transport over async-nats).

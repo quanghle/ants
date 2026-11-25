@@ -100,7 +100,7 @@ impl Worker {
                 tail
             };
             let ((), read, err) = tokio::join!(write, read, tail);
-            let status = child.wait().await;
+            let status = ants_process::wait(&mut child).await;
             (status, read, err)
         };
         let Ok((status, out, err)) = tokio::time::timeout(deadline, exchange).await else {
@@ -220,6 +220,53 @@ pub(crate) mod tests {
         std::fs::write(&path, serde_json::to_vec(&largest).unwrap()).unwrap();
         let read = fake("largest", &format!("cat >/dev/null; cat '{}'", path.display()));
         assert!(matches!(call(&read, Duration::from_secs(30)).await, Ok(Response::Suspended { .. })));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn the_wait_for_a_worker_wakes_at_its_exit_alone() {
+        use std::future::Future as _;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pid_file = dir().join("waiting.pid");
+        let _ = std::fs::remove_file(&pid_file);
+        let waiting = fake(
+            "waiting",
+            &format!(
+                "cat >/dev/null; echo $$ > '{}.new'; mv '{0}.new' '{0}'; exec sleep 30 >&- 2>&-",
+                pid_file.display()
+            ),
+        );
+        let polls = Arc::new(AtomicUsize::new(0));
+        let polled = polls.clone();
+        let calling = tokio::spawn(async move {
+            let mut called = std::pin::pin!(call(&waiting, Duration::from_secs(60)));
+            std::future::poll_fn(|cx| {
+                polled.fetch_add(1, Ordering::Relaxed);
+                called.as_mut().poll(cx)
+            })
+            .await
+        });
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                break pid.trim().to_owned();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        // Its stdout and stderr closed, the worker's wait is all the call waits for.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let before = polls.load(Ordering::Relaxed);
+        for _ in 0..20 {
+            let mut other = Command::new("true").spawn().unwrap();
+            assert!(ants_process::wait(&mut other).await.unwrap().success());
+        }
+        let woken = polls.load(Ordering::Relaxed) - before;
+        assert!(woken <= 1, "the call was polled {woken} times as 20 other children exited");
+        let mut kill = Command::new("kill").args(["-KILL", &pid]).spawn().unwrap();
+        assert!(ants_process::wait(&mut kill).await.unwrap().success());
+        let called = tokio::time::timeout(Duration::from_secs(10), calling).await.unwrap().unwrap();
+        assert!(matches!(called, Err(WorkerError::Crashed { .. })), "{called:?}");
     }
 
     #[test]

@@ -2,13 +2,10 @@
 //! harnesses and trails. Each starts in the blocking pool ([`spawn`]), and every child of the daemon is waited for as
 //! [`wait`] does.
 
-#[cfg(target_os = "macos")]
-mod exit;
-
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
-use std::process::{ExitStatus, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -121,16 +118,9 @@ async fn output_of(command: Command) -> io::Result<Output> {
     Ok(Output { status, stdout, stderr })
 }
 
-/// Wait for `child` to exit, its stdin closed first, as tokio's `Child::wait` does. On macOS, where tokio learns of a
-/// child's exit by SIGCHLD alone and so wakes the wait of every child at each child's exit, a kqueue of its own tells
-/// of this child's ([`exit`]): each wait wakes once, as with Linux's pidfds.
-pub(crate) async fn wait(child: &mut Child) -> io::Result<ExitStatus> {
-    #[cfg(target_os = "macos")]
-    if let Some(status) = exit::wait(child).await? {
-        return Ok(status);
-    }
-    child.wait().await
-}
+/// Wait for `child` to exit, its stdin closed first, as tokio's `Child::wait` does, but on macOS by a kqueue of its own
+/// rather than by SIGCHLD, so that no other child's exit wakes it, as with Linux's pidfds.
+pub(crate) use ants_process::wait;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
