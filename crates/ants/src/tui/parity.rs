@@ -28,6 +28,7 @@ enum Chat {
     /// Why ants chat has none.
     Exempt(&'static str),
     /// A gap to close: the bd issue tracking it.
+    #[expect(dead_code, reason = "no gap is open now: drop this once a row names one")]
     Missing(&'static str),
 }
 
