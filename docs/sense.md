@@ -159,8 +159,10 @@ the log when the ant's items open. One that may hold writes not yet appended is 
 Disk writes stay off the daemon's runtime thread: the cache commits in the background, in order, and in SQLite's WAL
 mode (`cache.db-wal` and `cache.db-shm` beside it) syncs to disk only at checkpoints, so a power loss may lose its last
 commits but never leaves it inconsistent: those are read again from the log. A write waiting for the log is the
-exception, synced as it is kept. `.sense/chain.json` is written whole but unsynced, as often as an event is appended;
-one left empty or unreadable by a power loss counts as no status kept, and is written again at the next read.
+exception, synced as it is kept. `.sense/chain.json` is written whole but unsynced, in the background as often as an
+event is appended, one write at a time: the status kept while one is written replaces any other waiting, so only the
+latest is written next. One left empty or unreadable by a power loss counts as no status kept, and is written again at
+the next read.
 
 While the machine's host connection is down:
 

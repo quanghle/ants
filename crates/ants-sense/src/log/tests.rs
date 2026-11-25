@@ -252,6 +252,7 @@ async fn a_log_ending_before_or_differing_from_what_was_verified_is_broken() {
             assert_eq!((broken.index, broken.sequence), (3, None));
             assert!(broken.reason.contains("ends at event 2; event 3 was verified before"), "{}", broken.reason);
         }
+        status_written(&home).await;
         std::fs::remove_dir_all(&home).unwrap();
     }
     assert_eq!(read_status(Path::new("/nonexistent")).unwrap(), None);
@@ -277,11 +278,41 @@ async fn the_status_is_written_again_only_once_changed_or_stale() {
     assert_eq!(read_status(&home).unwrap().unwrap(), appended, "the status appended, read");
 
     let stale = ChainStatus { checked_at: appended.checked_at - STATUS_REFRESH, ..appended.clone() };
+    status_written(&home).await;
     write_status(&home, &stale).unwrap();
     let mut reader = ant_log(&log, Unsigned, team.verifier(), &sense, Some(&home));
     reader.catch_up().await.unwrap();
     let refreshed = read_status(&home).unwrap().unwrap();
     assert!(refreshed.checked_at > appended.checked_at, "a status kept {STATUS_REFRESH} ago is kept anew");
+    status_written(&home).await;
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_status_is_written_off_the_caller_s_thread_the_latest_only() {
+    let (team, log, sense) = (Team::new(), MemoryLog::default(), SenseId::new());
+    let home = ants_test_support::scratch_dir("sense-status-blocked");
+    let file = crate::home::Home::new(&home).status();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let mut beside = file.clone().into_os_string();
+    beside.push(".new");
+    // Opening a FIFO to write blocks until it is read, as a slow disk would block the write.
+    assert!(std::process::Command::new("mkfifo").arg(&beside).status().unwrap().success());
+    let mut writer = ant_log(&log, team.signer("dev-a"), team.verifier(), &sense, Some(&home));
+    let appending = async {
+        for n in 1..=3 {
+            writer.append("note", json!(n)).await.unwrap();
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), appending).await.expect("appended without waiting");
+    assert_eq!(read_status(&home).unwrap().unwrap().events, 3, "the latest, while unwritten");
+    let first = tokio::task::spawn_blocking(move || std::fs::read(beside).unwrap()).await.unwrap();
+    let first: ChainStatus = serde_json::from_slice(&first).unwrap();
+    status_written(&home).await;
+    assert!((1..=3).contains(&first.events), "{first:?}");
+    let written: ChainStatus = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(written.events, 3, "then the latest");
     std::fs::remove_dir_all(&home).unwrap();
 }
 
@@ -291,11 +322,13 @@ async fn an_unreadable_status_kept_is_taken_as_none_and_kept_anew() {
     let home = ants_test_support::scratch_dir("sense-status-unreadable");
     ant_log(&log, team.signer("dev-a"), team.verifier(), &sense, Some(&home)).append("note", json!(1)).await.unwrap();
     for unreadable in [&b""[..], b"{\"events\":"] {
+        status_written(&home).await;
         std::fs::write(crate::home::Home::new(&home).status(), unreadable).unwrap();
         let mut reader = ant_log(&log, Unsigned, team.verifier(), &sense, Some(&home));
         reader.catch_up().await.unwrap();
         assert_eq!(read_status(&home).unwrap().unwrap().events, 1);
     }
+    status_written(&home).await;
     std::fs::remove_dir_all(&home).unwrap();
 }
 
@@ -323,6 +356,7 @@ async fn the_log_s_size_counts_each_message_of_the_identity_read_or_appended() {
     assert_eq!(resumed.chain().bytes(), total + 12, "a message breaking the chain takes room too");
     resumed.resume(None);
     assert_eq!(resumed.chain().bytes(), 0);
+    status_written(&home).await;
     std::fs::remove_dir_all(&home).unwrap();
 }
 
