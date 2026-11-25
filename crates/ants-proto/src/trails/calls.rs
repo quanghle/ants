@@ -15,7 +15,7 @@ pub struct AgentArgs {
     pub ant: Option<String>,
     #[serde(default)]
     pub capability: Option<String>,
-    /// The team whose lead answers the step, given neither `ant` nor `capability`.
+    /// The team whose lead answers the step; `ant`, `capability` and `team` go one at a time.
     #[serde(default)]
     pub team: Option<String>,
     #[serde(default)]
@@ -28,12 +28,13 @@ pub struct AgentArgs {
 }
 
 impl AgentArgs {
-    /// The arguments in `args`, refused without a prompt, with a team beside an ant or a capability, or with a tips key
-    /// [`check_tip_key`] refuses.
+    /// The arguments in `args`, refused without a prompt, with more than one of an ant, a capability and a team, or
+    /// with a tips key [`check_tip_key`] refuses.
     pub fn of(args: &Value) -> Result<Self, String> {
         let args: Self = serde_json::from_value(args.clone()).map_err(|e| format!("agent() takes a prompt: {e}"))?;
-        if args.team.is_some() && (args.ant.is_some() || args.capability.is_some()) {
-            return Err("agent() takes team= alone, without ant= or capability=".to_owned());
+        let named = [args.ant.is_some(), args.capability.is_some(), args.team.is_some()];
+        if named.into_iter().filter(|&named| named).count() > 1 {
+            return Err("agent() takes at most one of ant=, capability= and team=".to_owned());
         }
         if let Some(key) = &args.tips {
             check_tip_key(key).map_err(|e| format!("agent() names no tip key as {key:?}: {e}"))?;
@@ -99,6 +100,25 @@ mod tests {
         for bad in ["", "two\nlines"] {
             let e = AgentArgs::of(&json!({"prompt": "fix it", "tips": bad})).expect_err("refused");
             assert!(e.starts_with("agent() names no tip key as "), "{e}");
+        }
+    }
+
+    #[test]
+    fn an_agent_call_names_at_most_one_of_an_ant_a_capability_and_a_team() {
+        for one in [json!({"ant": "dev"}), json!({"capability": "rust"}), json!({"team": "reviewers"}), json!({})] {
+            let mut args = one.clone();
+            args["prompt"] = json!("fix it");
+            assert!(AgentArgs::of(&args).is_ok(), "{one}");
+        }
+        for two in [
+            json!({"ant": "dev", "capability": "rust"}),
+            json!({"ant": "dev", "team": "reviewers"}),
+            json!({"capability": "rust", "team": "reviewers"}),
+        ] {
+            let mut args = two.clone();
+            args["prompt"] = json!("fix it");
+            let e = AgentArgs::of(&args).expect_err("refused");
+            assert_eq!(e, "agent() takes at most one of ant=, capability= and team=", "{two}");
         }
     }
 }

@@ -91,14 +91,14 @@ Nothing else of the host is reachable: these names are defined before the script
 
 - `await agent(prompt, ant=None, capability=None, schema=None, label=None, tips=None)`: one step. The conductor sends
   `prompt` on a fresh thread: to the ant `ant=` names, to an ant advertising `capability=` (picked as the `route` MCP
-  tool picks one), or with neither to the conductor itself. The step's thread keeps the run's owner and links to the
-  run's thread. Returns the reply's text; with `schema=`, a JSON Schema as a dict, returns the reply parsed as JSON. A
-  reply that does not match the schema is asked for again on the step's thread, naming the mismatch, at most twice;
-  then the call raises. `label=` names the step in the run's thread and status events, kept as one line of at most 200
-  characters, control characters left out. `tips=` is the step's tip key
-  (one line of 1-120 characters): the step carries the best [tips](#tips) left under it on earlier runs, and a tip
-  left answering it goes under it. A step's ant may ask the run's owner with the `ask_human` MCP tool: the step then
-  waits on the human, and the ant's answer once the human answered is the reply.
+  tool picks one), or with neither to the conductor itself; the call raises given both. The step's thread keeps the
+  run's owner and links to the run's thread. Returns the reply's text; with `schema=`, a JSON Schema as a dict,
+  returns the reply parsed as JSON. A reply that does not match the schema is asked for again on the step's thread,
+  naming the mismatch, at most twice; then the call raises. `label=` names the step in the run's thread and status
+  events, kept as one line of at most 200 characters, control characters left out. `tips=` is the step's tip key (one
+  line of 1-120 characters): the step carries the best [tips](#tips) left under it on earlier runs, and a tip left
+  answering it goes under it. A step's ant may ask the run's owner with the `ask_human` MCP tool: the step then waits
+  on the human, and the ant's answer once the human answered is the reply.
 - `await human(questions)`: asks the run's owner, as the `ask_human` MCP tool does. `questions` is a list of 1-4
   dicts, each with a `question` (1-500 characters) and 2-9 `options` (labels, or dicts with a `label` and a
   `description`), and optionally a `header`, `multi_select` (default False) and `free_text` (default True). Returns the

@@ -6,7 +6,7 @@ top-level `async def a(args)`, a run enters at a waypoint (the first unless a go
 the result; the top level then holds only meta, imports, definitions and constants.
 - `await agent(prompt, ant=None, capability=None, team=None, schema=None, label=None, tips=None)`: one step, a
   message on a fresh thread with no context, to the ant named, to an ant with the capability, to the lead of the team
-  named (team= alone), or else to the conductor itself.
+  named (at most one of ant=, capability= and team=), or else to the conductor itself.
   Returns the reply's text, or with `schema=` (a JSON Schema dict) the reply's JSON, asked for again at most twice on
   a mismatch. `tips=KEY` (one line) is the step's tip key: the step carries the best tips ants left answering steps
   under the key on earlier runs, and a tip left answering it goes under the key. Give each kind of step one stable
