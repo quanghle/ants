@@ -62,7 +62,7 @@ impl Steps {
     }
 
     /// Take the steps read of the runs reporting on `thread` at `now`: each replaces the one on its thread, but for a
-    /// stage heard ended that the records, read before, do not have yet.
+    /// stage heard further on, asked or ended, that the records, read before, do not have yet.
     pub fn read(&mut self, thread: &ThreadId, read: Vec<Step>, now: DateTime<Utc>) {
         let steps = self.on(thread, now);
         for step in read {
@@ -70,11 +70,20 @@ impl Steps {
                 insert(steps, step);
                 continue;
             };
-            let stage = if step.stage == StepStage::Started { had.stage } else { step.stage };
+            let stage = if progress(step.stage) < progress(had.stage) { had.stage } else { step.stage };
             let label = step.label.clone().or_else(|| had.label.take());
             *had = Step { stage, label, at: had.at.min(step.at), ..step };
         }
         steps.sort_by_key(|s| (s.at, s.call));
+    }
+}
+
+/// How far on a step at `stage` is: started, then asked, then ended.
+fn progress(stage: StepStage) -> u8 {
+    match stage {
+        StepStage::Started => 0,
+        StepStage::Asked => 1,
+        StepStage::Answered | StepStage::Failed | StepStage::Dropped => 2,
     }
 }
 
@@ -205,6 +214,24 @@ mod tests {
         assert_eq!(steps.of(&thread)[1].label.as_deref(), Some("review 2"), "the label heard stays");
         steps.read(&thread, vec![stored(&heard, 2, StepStage::Dropped, 5)], at(11));
         assert_eq!(steps.of(&thread)[1].stage, StepStage::Dropped, "an end read replaces another heard");
+        steps.read(&thread, vec![stored(&heard, 2, StepStage::Asked, 5)], at(12));
+        assert_eq!(steps.of(&thread)[1].stage, StepStage::Dropped, "nor does a human asked, read before, undo it");
+    }
+
+    #[test]
+    fn a_step_whose_ant_asked_a_human_waits_on_the_human_heard_or_read() {
+        let (thread, heard, read) = (ThreadId::generate(), ThreadId::generate(), ThreadId::generate());
+        let mut steps = Steps::default();
+        steps.status(&step(&thread, &heard, 1, StepStage::Started, 2));
+        steps.status(&step(&thread, &heard, 1, StepStage::Asked, 4));
+        let mut stored = Step { stage: StepStage::Started, ..steps.of(&thread)[0].clone() };
+        steps.read(&thread, vec![stored.clone()], at(5));
+        assert_eq!(steps.of(&thread)[0].stage, StepStage::Asked, "the records read before the ask do not undo it");
+        stored = Step { thread: read.clone(), call: 2, stage: StepStage::Asked, at: at(3), ..stored };
+        steps.read(&thread, vec![stored], at(6));
+        assert_eq!(steps.of(&thread)[1].stage, StepStage::Asked, "the records tell it too");
+        steps.status(&step(&thread, &read, 2, StepStage::Answered, 7));
+        assert_eq!(steps.of(&thread)[1].stage, StepStage::Answered);
     }
 
     #[tokio::test]

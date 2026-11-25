@@ -598,7 +598,8 @@ pub(crate) async fn steps_on(js: &jetstream::Context, conductor: &UserId, thread
 /// The steps of a run its conductor `conductor` recorded the threads of, `marked`, at the stage its records tell:
 /// answered or failed as `journal` has its call's answer; dropped for a call sent anew on a thread recorded since;
 /// else started while the run waits on the call on that thread, as `pending`, the calls its session waits on, has it
-/// (not known: started), and dropped otherwise, as for a run ended or stopped. Each is labelled as its marker is, or,
+/// (not known: started), asked once its recipient asked a human ([`PendingCall::asked`]), and dropped otherwise, as
+/// for a run ended or stopped. Each is labelled as its marker is, or,
 /// for a marker recorded without a label, as its call's arguments in `journal` or `pending` tell.
 pub(super) fn staged(
     conductor: &UserId,
@@ -616,6 +617,7 @@ pub(super) fn staged(
             (Some(entry), _) if matches!(entry.answer, CallAnswer::Error(_)) => StepStage::Failed,
             (Some(_), _) => StepStage::Answered,
             (None, None) => StepStage::Started,
+            (None, Some(Some(call))) if call.thread == *thread && call.asked => StepStage::Asked,
             (None, Some(Some(call))) if call.thread == *thread => StepStage::Started,
             (None, Some(_)) => StepStage::Dropped,
         };

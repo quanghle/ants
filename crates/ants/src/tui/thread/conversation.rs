@@ -522,10 +522,12 @@ impl Shown<'_> {
         spans
     }
 
-    /// A step of a trail run: its call and label, the ant it went to, its stage in its colour, and its own thread.
+    /// A step of a trail run: its call and label, the ant it went to, its stage in its colour (asked: waiting on a
+    /// human), and its own thread.
     fn step(&self, step: &Step) -> Vec<Span<'static>> {
         let tone = match step.stage {
             StepStage::Started => Style::new().fg(Color::Cyan),
+            StepStage::Asked => Style::new().fg(style::PENDING),
             StepStage::Answered => Style::new().fg(style::CONNECTED),
             StepStage::Failed => Style::new().fg(style::ERROR),
             StepStage::Dropped => style::dim(),
@@ -538,7 +540,11 @@ impl Shown<'_> {
             spans.push(Span::raw(format!(" {}", label.split_whitespace().collect::<Vec<_>>().join(" "))));
         }
         spans.push(Span::styled(format!(" → {}", step.to), Style::new().fg(Color::Magenta)));
-        spans.push(Span::styled(format!(" · {}", step.stage.as_str()), tone));
+        let stage = match step.stage {
+            StepStage::Asked => "waiting on a human",
+            stage => stage.as_str(),
+        };
+        spans.push(Span::styled(format!(" · {stage}"), tone));
         spans.push(Span::styled(format!(" · thread {}", step.thread), style::dim()));
         spans
     }

@@ -32,7 +32,7 @@ fn waited(call: u32, thread: &ThreadId) -> PendingCall {
 }
 
 #[test]
-fn a_step_is_started_until_answered_failed_or_dropped_as_the_records_tell() {
+fn a_step_is_started_or_asked_until_answered_failed_or_dropped_as_the_records_tell() {
     let (run, run_thread) = (RunId::generate(), ThreadId::generate());
     let threads: Vec<ThreadId> = (0..5).map(|_| ThreadId::generate()).collect();
     let now = Utc::now();
@@ -63,6 +63,8 @@ fn a_step_is_started_until_answered_failed_or_dropped_as_the_records_tell() {
         ],
         "a call sent anew drops its older thread, and one the run no longer waits on is dropped"
     );
+    let asked = [PendingCall { asked: true, ..waited(2, &threads[3]) }];
+    assert_eq!(stages(Some(&asked))[3], (2, label("review"), StepStage::Asked), "its ant asked a human");
     let ended = stages(Some(&[]));
     assert_eq!(ended[3], (2, None, StepStage::Dropped), "an ended or stopped run waits on none");
     let unknown = stages(None);

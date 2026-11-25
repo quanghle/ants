@@ -136,7 +136,7 @@ Live progress of an ant on a thread, from its daemon: `ant`, `thread_id`, `at`, 
 | `escalated` | `to`, `escalation` | An escalation was sent (below) |
 | `asked` | `to`, `message` (id), `question`: `{questions: [{text, header?, options: [{label, description?}], multi_select, free_text}]}` | Questions were asked of a human (below) |
 | `decided` | `request_id`, `verdict`, `by`, `decider`?, `via`? | A tool request was settled (below) |
-| `step` | `run`, `call`, `label`?, `to`, `step_thread`, `stage` (`started`, `answered`, `failed`, `dropped`) | A trail run's step, on the conductor's status of the run's thread |
+| `step` | `run`, `call`, `label`?, `to`, `step_thread`, `stage` (`started`, `asked`, `answered`, `failed`, `dropped`) | A trail run's step, on the conductor's status of the run's thread |
 | `leg` | `run`, `leg`, `trail`?, `waypoint`? | A trail run's leg starting (0-based `leg` in its route; the first at the run's start), on the conductor's status of the run's thread |
 | `run_ended` | `run`, `trail`?, `parent`?, `state` (`done`, `failed`, `stopped`), `error`?, `limit`?, `by`?, `steps`, `turns` | A trail run ended or stopped (below) |
 | `order_settled` | `order`, `machine`, `op`?, `admin`?, `on_behalf_of`?, `state` (`applied`, `refused`), `reason`? | An admin order to the ant was settled (below) |
