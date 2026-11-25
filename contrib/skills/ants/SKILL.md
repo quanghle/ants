@@ -125,7 +125,9 @@ puts a mention notice in each mentioned human member's inbox (a channel webhook 
 member); non-members get neither. A human or webhook post mentioning nobody goes to the channel's messenger (default
 `system-messenger`), which replies on the thread `@mention`ing relevant members. A team is no member: `@backend` in a
 post mentions the team's lead, which has to be a member, and a post mentioning a team without a lead, or whose lead is
-no member, is refused with nothing posted.
+no member, is refused with nothing posted. A final answer posted to a channel thread mentions team leads the same
+way, but is posted regardless: a team that cannot stand for its lead wakes nobody, and an `[ants]` line after the
+answer says why.
 
 The CLI's human owns threads started from the CLI (`--thread` keeps an existing thread's owner); a thread an ant starts
 (`post_channel` MCP tool, or `ants post` with ant credentials) has that ant as creator and no owner until a human posts
