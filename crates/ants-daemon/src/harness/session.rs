@@ -245,7 +245,8 @@ pub async fn prompt_once(launch: &Launch, text: &str) -> Result<String> {
 /// Fork `session` with ACP's session/fork into a new session working in the launch's directory, with no MCP servers
 /// (a later session/load offers them): the new session's id, or none when the harness does not advertise forking.
 pub async fn fork(launch: &Launch, session: &SessionId) -> Result<Option<SessionId>> {
-    let connect = Client.v1().name("ants").connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
+    let transport = launch.transport().await;
+    let connect = Client.v1().name("ants").connect_with(transport, async |cx: ConnectionTo<Agent>| {
         let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
         if init.agent_capabilities.session_capabilities.fork.is_none() {
             return Ok(None);

@@ -145,7 +145,8 @@ pub async fn handshake(launch: &Launch) -> Handshake {
     // as claude-agent-acp writes its commands right after answering session/new, dies of the broken pipe, which fails
     // the connection although the harness passed.
     let opened = Mutex::new(None);
-    let connect = Client.v1().name("ants").connect_with((launch.connect)(), async |cx: ConnectionTo<Agent>| {
+    let transport = launch.transport().await;
+    let connect = Client.v1().name("ants").connect_with(transport, async |cx: ConnectionTo<Agent>| {
         let init = cx.send_request(InitializeRequest::new(ProtocolVersion::V1)).block_task().await?;
         methods.locked().clone_from(&init.auth_methods);
         cx.send_request(NewSessionRequest::new(launch.cwd.clone())).block_task().await?;

@@ -1,5 +1,5 @@
 //! Running a program, git above all, for what it prints: every process the daemon starts and waits for outside its
-//! harnesses and trails.
+//! harnesses and trails. Each starts in the blocking pool ([`spawn`]).
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -46,13 +46,16 @@ where
         let words = std::iter::once(program).chain(args.iter().map(AsRef::as_ref));
         words.map(OsStr::to_string_lossy).collect::<Vec<_>>().join(" ")
     };
-    let output = tokio::process::Command::new(program)
+    let mut command = tokio::process::Command::new(program);
+    command
         .args(&args)
         .envs(env.iter().copied())
         .current_dir(dir)
         .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = async { spawn(command).await?.wait_with_output().await };
     let output = match timeout {
         Some(timeout) => tokio::time::timeout(timeout, output)
             .await
@@ -77,13 +80,14 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let status = tokio::process::Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
-    status.ok()?.code()
+    let mut command = tokio::process::Command::new(program);
+    command.args(args).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    spawn(command).await.ok()?.wait().await.ok()?.code()
+}
+
+/// Start `command` in the blocking pool rather than on the calling thread, which the fork and exec of the program
+/// would hold for the time of the system call: a burst of sessions, each starting git, would otherwise hold the
+/// runtime's one thread. The child is the runtime's, waited for and killed on drop as any other.
+pub(crate) async fn spawn(mut command: tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+    tokio::task::spawn_blocking(move || command.spawn()).await.map_err(std::io::Error::other)?
 }

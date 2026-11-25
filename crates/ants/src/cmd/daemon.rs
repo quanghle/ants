@@ -10,6 +10,7 @@ use crate::signing::manager;
 use crate::{reload, scheduler, serve};
 
 pub(crate) async fn run(conn: &Connection<'_>, args: serve::DaemonArgs) -> Result<()> {
+    crate::messages::progress::write_logs_apart();
     let args = &args;
     let domain = conn.js_domain;
     let default_path = ants_daemon::config::default_path()?;

@@ -45,7 +45,11 @@ async fn threads_run_concurrently_up_to_the_cap() {
         gate.add_permits(2);
     };
     let (a, b, ()) = tokio::join!(a, b, release);
-    assert_eq!((a.unwrap(), b.unwrap()), ("s1: hold a".to_owned(), "s2: hold b".to_owned()));
+    // Both harnesses start at once in the blocking pool, so either may open its session first.
+    let (a, b) = (a.unwrap(), b.unwrap());
+    let ((a_session, a), (b_session, b)) = (a.split_once(": ").unwrap(), b.split_once(": ").unwrap());
+    assert_eq!((a, b), ("hold a", "hold b"));
+    assert_ne!(a_session, b_session, "each thread has a session of its own");
 }
 
 #[tokio::test]
