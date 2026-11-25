@@ -1,5 +1,6 @@
 //! ACP client side: start harnesses over stdio, keep their sessions, and run prompts through them.
 
+mod background;
 mod catalog;
 mod configure;
 mod connection;
@@ -15,6 +16,7 @@ mod sign_in;
 mod skills;
 mod steer;
 
+pub use background::Background;
 pub use catalog::{BUILTIN_HARNESSES, Harnesses, Unset, parse_definitions};
 pub(crate) use definition::validate_env;
 pub use definition::{Harness, Reported, Tools, allows_all};

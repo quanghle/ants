@@ -108,6 +108,42 @@ impl StubHarness {
     }
 }
 
+/// The command, quoted for a shell, starting `program` in a session of its own (`setsid`), as Claude Code runs a
+/// command in the background.
+pub(super) fn setsid(program: &str) -> String {
+    format!("perl -MPOSIX -e 'POSIX::setsid() or die; exec @ARGV' {program}")
+}
+
+/// A process this test started, killed when dropped, should the test fail before it is gone.
+pub(super) struct Killed(pub rustix::process::Pid);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = rustix::process::kill_process(self.0, rustix::process::Signal::KILL);
+    }
+}
+
+/// The pid written to `file` in `dir`, once it is.
+pub(super) async fn written_pid(dir: &Path, file: &str) -> rustix::process::Pid {
+    let path = dir.join(file);
+    let mut pid = None;
+    ants_test_support::eventually_within(Duration::from_secs(10), file, async || {
+        pid = std::fs::read_to_string(&path).ok().and_then(|text| text.trim().parse().ok());
+        pid.is_some()
+    })
+    .await;
+    rustix::process::Pid::from_raw(pid.unwrap()).unwrap()
+}
+
+/// Wait for process `pid` to be gone, within the grace period of what a session left running and a second.
+pub(super) async fn gone(pid: rustix::process::Pid, what: &str) {
+    let limit = leftovers::GRACE + Duration::from_secs(1);
+    ants_test_support::eventually_every(Duration::from_millis(20), limit, what, async || {
+        rustix::process::test_kill_process(pid).is_err()
+    })
+    .await;
+}
+
 /// Run `prompt`, collecting its status updates and spend.
 pub(super) async fn run(session: &Session, prompt: Prompt) -> (anyhow::Result<String>, Vec<StatusUpdate>, Vec<Spend>) {
     let (progress, mut status) = mpsc::channel(64);
@@ -577,4 +613,85 @@ async fn a_prompt_dropped_mid_turn_no_longer_counts_as_running() {
         Ok(())
     };
     Agent.v1().name("test").connect_with(ours, dropped).await.unwrap();
+}
+
+/// The lines of a stub CLI's turn starting `program` in the background in a session of its own, as Claude Code runs a
+/// background command, its pid written to `file` once it is, and `program` again as a child of the CLI's own process
+/// group, as an MCP server runs; the turn ends once the first wrote its pid.
+fn in_the_background(file: &Path, program: &str) -> Vec<String> {
+    let file = file.display();
+    let own = format!(
+        "perl -MPOSIX -e 'POSIX::setsid() or die; open my $f, \">\", shift or die; print $f \"$$\\n\"; close $f; exec @ARGV' '{file}' {program}"
+    );
+    vec![
+        format!("!bg exec {own}"),
+        format!("!bg exec {program}"),
+        format!("!sh while [ ! -s '{file}' ]; do sleep 0.05; done"),
+        end_turn(3, 1),
+    ]
+}
+
+#[tokio::test]
+async fn an_idle_harness_is_kept_while_its_last_turn_left_a_command_running_in_the_background() {
+    if !ants_test_support::have("perl") {
+        return;
+    }
+    let native = Fixture::new("native-background", "");
+    let (first, second) = (native.dir.join("first.pid"), native.dir.join("second.pid"));
+    let started = |run, file: &Path| {
+        script(&native, Some(run), &[vec![], vec![hello()], vec![opened("n1")], in_the_background(file, "sleep 60")]);
+    };
+    started(1, &first);
+    started(2, &second);
+    let quiet = vec!["!bg exec sleep 60".to_owned(), end_turn(3, 1)];
+    script(&native, Some(3), &[vec![], vec![hello()], vec![opened("n1")], quiet]);
+    let launch = native.launch(ModelSettings::default());
+    let pool = crate::pool::Pool::new(launch, crate::pool::SessionStore::memory(), 1, Duration::ZERO)
+        .keeping_background_for(Some(Duration::from_mins(1)));
+    let thread: ThreadId = "t1".parse().unwrap();
+
+    pool.prompt(&thread, "check").await.unwrap();
+    let check = Killed(written_pid(&native.dir, "first.pid").await);
+    let now = std::time::Instant::now();
+    assert_eq!(pool.evict_idle(now), 0, "kept while its background command runs");
+    assert_eq!(pool.evict_idle(now + Duration::from_secs(50)), 0, "kept up to the limit");
+    rustix::process::kill_process(check.0, rustix::process::Signal::KILL).unwrap();
+    gone(check.0, "the background command").await;
+    assert_eq!(pool.evict_idle(std::time::Instant::now()), 1, "stopped once the command ended");
+
+    pool.prompt(&thread, "check again").await.unwrap();
+    let check = Killed(written_pid(&native.dir, "second.pid").await);
+    assert_eq!(pool.evict_idle(std::time::Instant::now()), 0, "kept while its background command runs");
+    assert_eq!(pool.evict_idle(std::time::Instant::now() + Duration::from_mins(1)), 1, "stopped past the limit");
+    gone(check.0, "the background command, ended with the harness").await;
+
+    pool.prompt(&thread, "nothing in the background").await.unwrap();
+    assert_eq!(native.cli.runs(), 3);
+    assert_eq!(pool.evict_idle(std::time::Instant::now()), 1, "what runs in the CLI's own process group keeps none");
+}
+
+#[tokio::test]
+async fn a_harness_working_in_the_background_is_the_last_stopped_to_stay_within_the_cap() {
+    if !ants_test_support::have("perl") {
+        return;
+    }
+    let native = Fixture::new("native-background-cap", "");
+    let file = native.dir.join("check.pid");
+    let checking = in_the_background(&file, "sleep 60");
+    script(&native, Some(1), &[vec![], vec![hello()], vec![opened("n1")], checking]);
+    script(&native, None, &[vec![], vec![hello()], vec![opened("n1")], vec![end_turn(3, 1)]]);
+    let launch = native.launch(ModelSettings::default());
+    let pool = crate::pool::Pool::new(launch, crate::pool::SessionStore::memory(), 2, Duration::from_hours(1));
+    let [older, newer, third] = ["t1", "t2", "t3"].map(|thread| thread.parse::<ThreadId>().unwrap());
+
+    pool.prompt(&older, "check").await.unwrap();
+    let check = Killed(written_pid(&native.dir, "check.pid").await);
+    pool.prompt(&newer, "quiet").await.unwrap();
+    pool.prompt(&third, "quiet too").await.unwrap();
+    ants_test_support::eventually_within(Duration::from_secs(10), "the newer harness stopped", async || {
+        native.cli.ended(2)
+    })
+    .await;
+    assert!(!native.cli.ended(1), "the harness working in the background goes on");
+    assert!(rustix::process::test_kill_process(check.0).is_ok(), "and its check with it");
 }

@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::failure::error;
 use super::*;
 use crate::harness::native::Protocol;
-use crate::harness::native::tests::{StubHarness, run};
+use crate::harness::native::tests::{Killed, StubHarness, gone, run, setsid, written_pid};
 use crate::harness::{
     Launch, ModelSettings, Prompt, Readiness, Session, SignedOut, Spend, Steer, Steering, fork, handshake,
 };
@@ -828,42 +828,6 @@ async fn a_bad_mcp_config_in_args_fails_the_start() {
         assert!(format!("{error:#}").contains("--mcp-config"), "{args:?}: {error:#}");
     }
     let _ = std::fs::remove_dir_all(scratch);
-}
-
-/// The command, quoted for a shell, starting `program` in a session of its own (`setsid`), as Claude Code runs a
-/// command in the background.
-fn setsid(program: &str) -> String {
-    format!("perl -MPOSIX -e 'POSIX::setsid() or die; exec @ARGV' {program}")
-}
-
-/// A process this test started, killed when dropped, should the test fail before it is gone.
-struct Killed(rustix::process::Pid);
-
-impl Drop for Killed {
-    fn drop(&mut self) {
-        let _ = rustix::process::kill_process(self.0, rustix::process::Signal::KILL);
-    }
-}
-
-/// The pid written to `file` in `dir`, once it is.
-async fn written_pid(dir: &std::path::Path, file: &str) -> rustix::process::Pid {
-    let path = dir.join(file);
-    let mut pid = None;
-    ants_test_support::eventually_within(Duration::from_secs(10), file, async || {
-        pid = std::fs::read_to_string(&path).ok().and_then(|text| text.trim().parse().ok());
-        pid.is_some()
-    })
-    .await;
-    rustix::process::Pid::from_raw(pid.unwrap()).unwrap()
-}
-
-/// Wait for process `pid` to be gone, within the grace period of what a session left running and a second.
-async fn gone(pid: rustix::process::Pid, what: &str) {
-    let limit = crate::harness::native::leftovers::GRACE + Duration::from_secs(1);
-    ants_test_support::eventually_every(Duration::from_millis(20), limit, what, async || {
-        rustix::process::test_kill_process(pid).is_err()
-    })
-    .await;
 }
 
 #[tokio::test]

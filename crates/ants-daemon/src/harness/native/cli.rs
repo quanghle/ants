@@ -10,6 +10,7 @@ use agent_client_protocol::Error;
 use tokio::process::{ChildStdin, ChildStdout, Command};
 
 use super::Process;
+use super::leftovers::Runs;
 use crate::harness::mcp_sign_in::Report;
 use crate::harness::{Harness, ModelSettings, Tools};
 
@@ -28,6 +29,8 @@ pub(crate) struct Cli {
     effort: Option<String>,
     /// Where its sessions serving a thread report their sign-ins to MCP servers.
     report: Option<Report>,
+    /// The runs of its processes, shared by its clones: walked at the end of each turn.
+    runs: Runs,
 }
 
 impl Cli {
@@ -40,6 +43,7 @@ impl Cli {
             model: settings.model_id(harness),
             effort: settings.reasoning_effort.clone(),
             report: None,
+            runs: Runs::default(),
         }
     }
 
@@ -57,6 +61,11 @@ impl Cli {
     /// The CLI with `args` for the definition's arguments and those of the ant's `context`.
     pub(crate) fn with_args(&self, args: Vec<String>) -> Self {
         Self { args, ..self.clone() }
+    }
+
+    /// The runs of the processes it started ([`Self::spawn`]), its clones' among them.
+    pub(super) fn runs(&self) -> &Runs {
+        &self.runs
     }
 
     /// Where its sessions serving a thread report their sign-ins to MCP servers, if anywhere.
@@ -148,7 +157,7 @@ impl Cli {
     }
 
     /// Start the CLI ([`Self::command`]) with `protocol_args`, working in `cwd`, else in the daemon's directory: the
-    /// process, and its stdin and stdout to speak to it through.
+    /// process, watched by its [`Self::runs`], and its stdin and stdout to speak to it through.
     pub(crate) fn spawn<I, S>(
         &self,
         protocol_args: I,
@@ -162,7 +171,9 @@ impl Cli {
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        Process::start(self.name(), &self.program, command)
+        let started = Process::start(self.name(), &self.program, command)?;
+        started.0.watched_by(&self.runs);
+        Ok(started)
     }
 }
 

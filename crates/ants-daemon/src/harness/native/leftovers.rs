@@ -1,15 +1,20 @@
 //! What a native CLI leaves running: the processes it started, Claude Code's background commands among them, which
 //! run in process groups of their own and outlive it, as a lease keeper's `bd heartbeat` loop would.
 //!
-//! On Unix the CLI's descendants are walked while it runs, last as it is released ([`Leftovers::walk`]), and each run
-//! of a CLI is tagged in its environment ([`TAG`]: the daemon's process and the run's serial), which what it starts
-//! inherits. Released ([`Leftovers::release`]: the session closed, the CLI exited or was killed), the descendants
-//! walked and every process of the daemon's user tagged with a run that is gone get SIGTERM, to their process group
-//! where they lead one, then SIGKILL after [`unix::GRACE`]. A run is gone once released, or once its daemon's process
-//! is: the daemon's start sweeps those too ([`sweep_at_start`]), so what was reparented when the CLI or the daemon died
-//! first ends there at the latest. A run of another daemon still running is never swept, nor the daemon itself and its
-//! ancestors. macOS hides the environment of its own programs (`sh`, `sleep`, `perl`) from other processes, so there
-//! only processes of other programs are found by their tag.
+//! On Unix the CLI's descendants are walked while it runs: at the end of each of its turns ([`Runs::turn_ended`]) and
+//! last as it is released ([`Leftovers::walk`]). Each run of a CLI is tagged in its environment ([`TAG`]: the daemon's
+//! process and the run's serial), which what it starts inherits. Released ([`Leftovers::release`]: the session closed,
+//! the CLI exited or was killed), the descendants walked and every process of the daemon's user tagged with a run that
+//! is gone get SIGTERM, to their process group where they lead one, then SIGKILL after [`unix::GRACE`]. A run is gone
+//! once released, or once its daemon's process is: the daemon's start sweeps those too ([`sweep_at_start`]), with the
+//! descendants a daemon gone walked, which it kept a record of ([`record`]), so what was reparented when the CLI or the
+//! daemon died first ends there at the latest. A run of another daemon still running is never swept, nor the daemon
+//! itself and its ancestors. macOS hides the environment of its own programs (`sh`, `sleep`, `perl`) from other
+//! processes, so there only processes of other programs are found by their tag, and the others by a walk made before
+//! the CLI died.
+//!
+//! The end of a turn also tells what the turn left running in the background ([`Background`]): the processes descended
+//! from the CLI, or tagged with its run, outside the CLI's process group, which its MCP servers stay in.
 //!
 //! On Windows each CLI runs in a job object that kills what is left in it once closed, at the release.
 
@@ -17,12 +22,21 @@
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(unix)]
+mod record;
 #[cfg(all(test, unix))]
 pub(super) mod tests;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(unix)]
+use std::sync::{Arc, Mutex, Weak};
+
 use tokio::process::{Child, Command};
+
+use crate::harness::background::Background;
+#[cfg(unix)]
+use crate::sync::MutexExt as _;
 
 #[cfg(all(test, unix))]
 pub(crate) use unix::GRACE;
@@ -40,8 +54,9 @@ pub(crate) struct Leftovers {
     /// None once released.
     #[cfg(unix)]
     run: Option<unix::Run>,
+    /// The CLI's process and the descendants walked, shared with the [`Runs`] it is watched by.
     #[cfg(unix)]
-    tree: Vec<unix::Proc>,
+    watch: Arc<Mutex<unix::Watch>>,
     #[cfg(windows)]
     job: Option<windows::Job>,
 }
@@ -50,10 +65,11 @@ impl Leftovers {
     /// Ready `command`, the CLI of harness `name`, to be released with what it starts: on Unix tagged with a new run.
     pub(crate) fn tag(name: &str, command: &mut Command) -> Self {
         #[cfg(unix)]
-        let run = {
+        let (run, watch) = {
             let run = unix::Run::new();
             command.env(TAG, run.tag());
-            run
+            let watch = unix::Watch::new(run.tag());
+            (run, watch)
         };
         #[cfg(not(unix))]
         let _ = command;
@@ -64,7 +80,7 @@ impl Leftovers {
             #[cfg(unix)]
             run: Some(run),
             #[cfg(unix)]
-            tree: Vec::new(),
+            watch,
             #[cfg(windows)]
             job: None,
         }
@@ -75,6 +91,7 @@ impl Leftovers {
         #[cfg(unix)]
         {
             self.pid = child.id();
+            self.watch.locked().follow(self.pid);
         }
         #[cfg(windows)]
         {
@@ -82,13 +99,21 @@ impl Leftovers {
         }
     }
 
+    /// Have `runs` walk the CLI's descendants at the end of each of its turns ([`Runs::turn_ended`]).
+    pub(crate) fn watched_by(&self, runs: &Runs) {
+        #[cfg(unix)]
+        runs.watches.locked().push(Arc::downgrade(&self.watch));
+        #[cfg(not(unix))]
+        let _ = runs;
+    }
+
     /// Walk the CLI's descendants while it still runs, adding them to those to end at the release.
     pub(crate) async fn walk(&mut self) {
         #[cfg(unix)]
-        if let Some(pid) = self.pid.and_then(|pid| i32::try_from(pid).ok())
-            && let Ok(walked) = tokio::task::spawn_blocking(move || unix::descendants(pid)).await
-        {
-            unix::merge(&mut self.tree, walked);
+        if let Some(pid) = self.pid.and_then(|pid| i32::try_from(pid).ok()) {
+            let watch = self.watch.clone();
+            let walking = move || unix::merge(&mut watch.locked().tree, unix::descendants(pid));
+            let _ = tokio::task::spawn_blocking(walking).await;
         }
     }
 
@@ -96,7 +121,7 @@ impl Leftovers {
     pub(crate) fn walk_blocking(&mut self) {
         #[cfg(unix)]
         if let Some(pid) = self.pid.and_then(|pid| i32::try_from(pid).ok()) {
-            unix::merge(&mut self.tree, unix::descendants(pid));
+            unix::merge(&mut self.watch.locked().tree, unix::descendants(pid));
         }
     }
 
@@ -107,9 +132,8 @@ impl Leftovers {
         {
             let mut leftovers = self;
             if let Some(run) = leftovers.run.take() {
-                drop(run);
-                let (name, tree) = (std::mem::take(&mut leftovers.name), std::mem::take(&mut leftovers.tree));
-                let _ = tokio::task::spawn_blocking(move || unix::end(&name, &tree)).await;
+                let (name, watch) = (std::mem::take(&mut leftovers.name), leftovers.watch.clone());
+                let _ = tokio::task::spawn_blocking(move || unix::release(&name, run, &watch)).await;
             }
         }
         #[cfg(not(unix))]
@@ -122,20 +146,74 @@ impl Drop for Leftovers {
         #[cfg(unix)]
         if let Some(run) = self.run.take() {
             self.walk_blocking();
-            drop(run);
-            unix::end(&self.name, &self.tree);
+            unix::release(&self.name, run, &self.watch);
         }
     }
 }
 
-/// End, in the background, what runs of native CLIs left running whose daemon is gone, as the daemon starts; once per
-/// process.
+/// The runs of the CLI processes started for one harness, shared by the clones of its [`super::Cli`]: what each
+/// started is walked at the end of each turn ([`Runs::turn_ended`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Runs {
+    #[cfg(unix)]
+    watches: Arc<Mutex<Vec<Weak<Mutex<unix::Watch>>>>>,
+}
+
+impl Runs {
+    /// As a turn ended: walk the descendants of each CLI still running, so that its release ends those it left running
+    /// even once it died first, and record them for a daemon started after this one died ([`record`]). Returns what
+    /// the turn left running in the background, outside the CLI's process group.
+    pub(crate) async fn turn_ended(&self) -> Vec<Background> {
+        #[cfg(unix)]
+        {
+            let watches: Vec<_> = {
+                let mut watches = self.watches.locked();
+                watches.retain(|watch| watch.strong_count() > 0);
+                watches.iter().filter_map(Weak::upgrade).collect()
+            };
+            if watches.is_empty() {
+                return Vec::new();
+            }
+            let walking = move || {
+                let background = unix::turn_ended(&watches);
+                drop(watches);
+                record::save();
+                background
+            };
+            tokio::task::spawn_blocking(walking).await.unwrap_or_default()
+        }
+        #[cfg(not(unix))]
+        Vec::new()
+    }
+}
+
+/// Whether process `pid`, started at `start` in the platform's unit, still runs; false where the process table is not
+/// read, as on Windows.
+pub(crate) fn runs(pid: i32, start: u64) -> bool {
+    #[cfg(unix)]
+    {
+        unix::os::process(pid).is_some_and(|process| process.start == start)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, start);
+        false
+    }
+}
+
+/// End, in the background, what runs of native CLIs left running whose daemon is gone, as the daemon starts: what is
+/// tagged with their runs and the descendants such a daemon recorded walking them ([`record`]); once per process.
 pub(crate) fn sweep_at_start() {
     #[cfg(unix)]
     {
         static SWEPT: std::sync::Once = std::sync::Once::new();
         SWEPT.call_once(|| {
-            tokio::task::spawn_blocking(|| unix::end("", &[]));
+            tokio::task::spawn_blocking(|| {
+                let Some(dir) = record::dir() else { return unix::end("", &[]) };
+                let (recorded, records) = record::of_daemons_gone(&dir);
+                unix::end("", &recorded);
+                record::remove(&records);
+            });
         });
     }
 }
@@ -144,7 +222,7 @@ pub(crate) fn sweep_at_start() {
 mod unix {
     use std::collections::{BTreeSet, HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex, Weak};
     use std::time::{Duration, Instant};
 
     use rustix::process::{Pid, Signal};
@@ -155,6 +233,7 @@ mod unix {
     pub(super) use super::linux as os;
     #[cfg(target_os = "macos")]
     pub(super) use super::macos as os;
+    use crate::harness::background::Background;
     use crate::sync::MutexExt as _;
 
     /// The environment variable tagging a run of a native CLI and what it starts: `<pid>.<start>.<serial>`, the
@@ -167,7 +246,7 @@ mod unix {
     /// How often the processes sent SIGTERM are looked for while they have their grace.
     const POLL: Duration = Duration::from_millis(50);
 
-    /// The most of a process's command line logged as it is ended.
+    /// The most of a process's command line logged as it is ended or told as left running in the background.
     const COMMAND_HEAD: usize = 120;
 
     /// A process as the process table lists it.
@@ -179,6 +258,13 @@ mod unix {
         pub uid: u32,
         /// When it started, in a unit of the platform's: with the pid, which process it is.
         pub start: u64,
+    }
+
+    impl Proc {
+        /// Whether it is `other`'s process, by pid and start.
+        pub(super) fn is(&self, other: &Proc) -> bool {
+            self.pid == other.pid && self.start == other.start
+        }
     }
 
     /// A daemon's process: its pid and start time.
@@ -220,6 +306,9 @@ mod unix {
     /// The serials of this daemon's runs not released.
     static LIVE: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
 
+    /// The runs of this daemon not released, for its record ([`super::record`]).
+    pub(super) static WATCHES: Mutex<Vec<Weak<Mutex<Watch>>>> = Mutex::new(Vec::new());
+
     /// A run of a native CLI, live until dropped.
     #[derive(Debug)]
     pub(super) struct Run(u64);
@@ -242,15 +331,53 @@ mod unix {
         }
     }
 
+    /// A run of a native CLI as walked: its tag, the CLI's process once listed, and its descendants walked, those to
+    /// end at the release.
+    #[derive(Debug)]
+    pub(super) struct Watch {
+        pub tag: String,
+        pub cli: Option<Proc>,
+        pub tree: Vec<Proc>,
+    }
+
+    impl Watch {
+        /// The run tagged `tag`, kept in this daemon's record while not released.
+        pub(super) fn new(tag: String) -> Arc<Mutex<Self>> {
+            let watch = Arc::new(Mutex::new(Self { tag, cli: None, tree: Vec::new() }));
+            let mut watches = WATCHES.locked();
+            watches.retain(|watch| watch.strong_count() > 0);
+            watches.push(Arc::downgrade(&watch));
+            watch
+        }
+
+        /// Follow the CLI, process `pid` once started, by pid and start: a walk of a pid since reused finds nothing.
+        pub(super) fn follow(&mut self, pid: Option<u32>) {
+            self.cli = pid.and_then(|pid| i32::try_from(pid).ok()).and_then(os::process);
+        }
+    }
+
+    /// End what the run `watch` of harness `name` left running, `run` released first ([`end`]), and drop it from this
+    /// daemon's record.
+    pub(super) fn release(name: &str, run: Run, watch: &Mutex<Watch>) {
+        let tree = {
+            let mut watch = watch.locked();
+            watch.cli = None;
+            std::mem::take(&mut watch.tree)
+        };
+        drop(run);
+        end(name, &tree);
+        super::record::save();
+    }
+
     /// Whether the run `tag` names is gone, its daemon running as one of `running`.
-    fn gone(tag: Tag, running: &HashSet<Daemon>) -> bool {
+    pub(super) fn gone(tag: Tag, running: &HashSet<Daemon>) -> bool {
         if tag.daemon == *DAEMON { !LIVE.locked().contains(&tag.serial) } else { !running.contains(&tag.daemon) }
     }
 
     /// Add the processes of `walked` to `tree`, unless already in it.
     pub(super) fn merge(tree: &mut Vec<Proc>, walked: Vec<Proc>) {
         for process in walked {
-            if !tree.iter().any(|known| known.pid == process.pid && known.start == process.start) {
+            if !tree.iter().any(|known| known.is(&process)) {
                 tree.push(process);
             }
         }
@@ -258,9 +385,13 @@ mod unix {
 
     /// The processes descended from `root`.
     pub(super) fn descendants(root: i32) -> Vec<Proc> {
-        let table = os::table();
+        descendants_in(&os::table(), root)
+    }
+
+    /// The processes of `table` descended from `root`.
+    fn descendants_in(table: &[Proc], root: i32) -> Vec<Proc> {
         let mut children: HashMap<i32, Vec<&Proc>> = HashMap::new();
-        for process in &table {
+        for process in table {
             children.entry(process.ppid).or_default().push(process);
         }
         let (mut found, mut seen) = (Vec::new(), HashSet::from([root]));
@@ -274,6 +405,50 @@ mod unix {
             }
         }
         found
+    }
+
+    /// At a turn's end: for each run of `watches` whose CLI still runs, its descendants walked, added to its tree in
+    /// place of those no longer running. Returns the processes of the daemon's user descended from such a CLI, or
+    /// tagged with its run, outside the CLI's process group: what the turn left running in the background.
+    pub(super) fn turn_ended(watches: &[Arc<Mutex<Watch>>]) -> Vec<Background> {
+        let table = os::table();
+        let uid = rustix::process::getuid().as_raw();
+        let listed = |process: &Proc| table.iter().any(|listed| listed.is(process));
+        let mut buffer = Vec::new();
+        let mut tags: Option<HashMap<i32, String>> = None;
+        let mut background = Vec::new();
+        for watch in watches {
+            let mut watch = watch.locked();
+            let Some(cli) = watch.cli.filter(|cli| listed(cli)) else { continue };
+            watch.tree.retain(|process| listed(process));
+            let walked = descendants_in(&table, cli.pid);
+            let tags = tags.get_or_insert_with(|| {
+                let ours = table.iter().filter(|process| process.uid == uid && process.pid > 1);
+                ours.filter_map(|process| Some((process.pid, os::tag(process.pid, &mut buffer)?))).collect()
+            });
+            for process in &table {
+                let started = walked.iter().any(|walked| walked.is(process))
+                    || tags.get(&process.pid).is_some_and(|tag| *tag == watch.tag);
+                if started && process.uid == uid && process.pid != cli.pid && process.pgid != cli.pgid {
+                    background.push(Background {
+                        pid: process.pid,
+                        start: process.start,
+                        command: command(process.pid, &mut buffer),
+                    });
+                }
+            }
+            merge(&mut watch.tree, walked);
+        }
+        background
+    }
+
+    /// The command line of process `pid`, at most [`COMMAND_HEAD`] characters of it.
+    fn command(pid: i32, buffer: &mut Vec<u8>) -> String {
+        let mut command = os::command(pid, buffer);
+        if let Some((end, _)) = command.char_indices().nth(COMMAND_HEAD) {
+            command.truncate(end);
+        }
+        command
     }
 
     /// The processes to end: those of `tree` still running and those of the daemon's user tagged with a run that is
@@ -294,7 +469,7 @@ mod unix {
             .iter()
             .filter(|process| process.uid == uid && process.pid > 1 && !spared.contains(&process.pid))
             .filter(|process| {
-                tree.iter().any(|walked| walked.pid == process.pid && walked.start == process.start)
+                tree.iter().any(|walked| walked.is(process))
                     || os::tag(process.pid, &mut buffer)
                         .and_then(|tag| Tag::parse(&tag))
                         .is_some_and(|tag| gone(tag, &running))
@@ -313,10 +488,7 @@ mod unix {
         }
         let mut buffer = Vec::new();
         for process in &ending {
-            let mut command = os::command(process.pid, &mut buffer);
-            if let Some((end, _)) = command.char_indices().nth(COMMAND_HEAD) {
-                command.truncate(end);
-            }
+            let command = command(process.pid, &mut buffer);
             if name.is_empty() {
                 tracing::info!(
                     pid = process.pid,

@@ -591,6 +591,7 @@ pub(super) async fn harness_pool(
     let checkouts = crate::checkouts::Checkouts::new(home);
     checkouts.clear();
     let mut pool = Pool::new(launch, sessions, pooling.max_harnesses, pooling.idle_timeout)
+        .keeping_background_for(config.harness.limits.timeout)
         .with_fallbacks(fallbacks)
         .with_checkouts(checkouts)
         .reporting_to(workload.clone())
