@@ -200,7 +200,7 @@ impl Launch {
     }
 
     /// The same launch, answering permission requests with `policy`.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_policy(self, policy: PermissionPolicy) -> Self {
         Self { policy, ..self }
