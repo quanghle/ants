@@ -228,6 +228,11 @@ fn tool_call(item: &Value) -> Option<ToolCall> {
 
 /// The kind, title and paths of a command, from the actions codex parsed it into: reads, listings and searches, else
 /// the command itself.
+/// The title of command item `item`: what it does, by its actions.
+pub(super) fn title(item: &Value) -> String {
+    command(item).1
+}
+
 fn command(item: &Value) -> (ToolKind, String, Vec<ToolCallLocation>) {
     let command = item["command"].as_str().unwrap_or_default();
     let cwd = item["cwd"].as_str();

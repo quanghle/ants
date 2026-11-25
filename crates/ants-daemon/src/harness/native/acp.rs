@@ -6,7 +6,10 @@
 //! SIGTERM to its process group and [`TERMINATE_GRACE`] more before it is killed with what it started.
 //!
 //! As it answers a prompt, its turn ended, its descendants are walked as a native CLI's are ([`Turns`]), and the answer
-//! lists what the turn left running in the background ([`crate::harness::background`]).
+//! lists what the turn left running in the background ([`crate::harness::background`]). The turns it runs of its own
+//! between prompts are reported and kept for the prompts taking them ([`own_turns`]).
+
+mod own_turns;
 
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -19,6 +22,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 
+use self::own_turns::OwnTurns;
 use super::leftovers::Runs;
 use super::{Cli, Process};
 use crate::harness::background;
@@ -69,8 +73,10 @@ impl ConnectTo<Client> for Acp {
         };
         process.watched_by(cli.runs());
         let turns = Turns::new(cli.runs());
+        let own = cli.own_turns().map(|report| Arc::new(OwnTurns::new(cli.name(), report)));
         let (settled, settling) = oneshot::channel();
-        let (channel, transport) = ConnectTo::<Client>::into_channel_and_future(lines(stdin, stdout, turns, settling));
+        let lines = lines(stdin, stdout, turns, own, settling);
+        let (channel, transport) = ConnectTo::<Client>::into_channel_and_future(lines);
         let Some(transport) = transport else { unreachable!("a line transport drives its own I/O") };
         let (finish, finishing) = oneshot::channel();
         let name = cli.name().to_owned();
@@ -82,21 +88,22 @@ impl ConnectTo<Client> for Acp {
     }
 }
 
-/// The JSON-RPC lines of a harness's stdio, its `turns` followed. The end of its output waits, up to [`SETTLE_LIMIT`],
-/// until `settling` tells that its exit, if it exited, was told: a harness failing at its start then fails its
-/// connection with why, before the client sees only its output closed.
+/// The JSON-RPC lines of a harness's stdio, its `turns` followed, and those of its `own`, if it reports them. The end
+/// of its output waits, up to [`SETTLE_LIMIT`], until `settling` tells that its exit, if it exited, was told: a harness
+/// failing at its start then fails its connection with why, before the client sees only its output closed.
 fn lines(
     stdin: ChildStdin,
     stdout: ChildStdout,
     turns: Turns,
+    own: Option<Arc<OwnTurns>>,
     settling: oneshot::Receiver<()>,
 ) -> Lines<
     impl futures::Sink<String, Error = io::Error> + Send + 'static,
     impl futures::Stream<Item = io::Result<String>> + Send + 'static,
 > {
-    let state = (BufReader::new(stdout).lines(), turns.clone(), settling);
-    let incoming = futures::stream::unfold(state, |(mut lines, turns, settling)| async move {
-        let line = match lines.next_line().await.transpose() {
+    let state = (BufReader::new(stdout).lines(), turns.clone(), own.clone(), settling);
+    let incoming = futures::stream::unfold(state, |(mut lines, turns, own, settling)| async move {
+        let line = match own_turns::next(own.as_deref(), &mut lines).await.transpose() {
             Some(Ok(line)) => Ok(turns.received(line).await),
             Some(Err(e)) => Err(e),
             None => {
@@ -104,15 +111,17 @@ fn lines(
                 return None;
             }
         };
-        Some((line, (lines, turns, settling)))
+        Some((line, (lines, turns, own, settling)))
     });
-    let outgoing = futures::sink::unfold((stdin, turns), |(mut stdin, turns), line: String| async move {
+    let outgoing = futures::sink::unfold((stdin, turns, own), |(mut stdin, turns, own), line: String| async move {
         turns.sent(&line);
-        let mut line = line.into_bytes();
-        line.push(b'\n');
-        stdin.write_all(&line).await?;
-        stdin.flush().await?;
-        Ok::<_, io::Error>((stdin, turns))
+        if own.as_ref().is_none_or(|own| own.sent(&line)) {
+            let mut line = line.into_bytes();
+            line.push(b'\n');
+            stdin.write_all(&line).await?;
+            stdin.flush().await?;
+        }
+        Ok::<_, io::Error>((stdin, turns, own))
     });
     Lines::new(Box::pin(outgoing), Box::pin(incoming))
 }
