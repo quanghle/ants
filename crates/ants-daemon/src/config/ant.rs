@@ -287,6 +287,7 @@ impl Ant {
         self.validate()?;
         let instructions = self.prompt_instructions();
         let caps = self.caps();
+        let turn_budget = self.effective_turn_budget();
         let sage = self.reviewed_by();
         let named = harnesses.named(self.harness.as_deref()).with_context(|| format!("ant {}", self.name))?;
         let harness = Arc::new(named.with_tools(self.tools).with_context(|| format!("ant {}", self.name))?);
@@ -352,7 +353,7 @@ impl Ant {
                 escalation: Chain {
                     escalate_to: self.escalate_to,
                     max_hops: self.max_escalation_hops,
-                    turn_budget: self.turn_budget.unwrap_or(ants_proto::DEFAULT_TURN_BUDGET),
+                    turn_budget,
                     after: Some(self.escalate_after).filter(|t| !t.is_zero()),
                     remind: Some(self.escalation_reminder).filter(|t| !t.is_zero()),
                     stand_in: self.stand_in,
@@ -368,6 +369,12 @@ impl Ant {
             drift: crate::profile::shared::Drift::default(),
             timezone: self.timezone,
         })
+    }
+
+    /// The turns a thread gets from a human's message to it ([`Chain::turn_budget`]): its own `turn_budget` or its
+    /// template's, else, once loaded with its config file, the top-level one, else [`ants_proto::DEFAULT_TURN_BUDGET`].
+    pub fn effective_turn_budget(&self) -> u32 {
+        self.turn_budget.unwrap_or(ants_proto::DEFAULT_TURN_BUDGET)
     }
 
     /// Its spend caps.

@@ -42,6 +42,7 @@ pub async fn entry(config: &Config) -> ColonyEntry {
         handling: 0,
         harnesses: 0,
         escalate_to: config.policy.escalation.escalate_to.clone(),
+        turn_budget: config.policy.escalation.turn_budget,
         sage: config.policy.sage.clone(),
         version: ANTS_VERSION.to_owned(),
         perms: PERMISSIONS_VERSION,

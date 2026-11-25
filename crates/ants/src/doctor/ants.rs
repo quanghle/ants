@@ -617,3 +617,18 @@ pub(super) fn check_bypassed(loaded: &config::Loaded, webhooks: &[webhook::Webho
     }
     checks
 }
+
+/// The turns a thread gets from a human's message to each of `ants`, as the daemon serving them gives it
+/// ([`Ant::effective_turn_budget`]): one line, the ants of one budget together; none without ants.
+pub(super) fn check_turn_budgets(ants: &[Ant]) -> Option<Check> {
+    let mut budgets: std::collections::BTreeMap<u32, Vec<&str>> = std::collections::BTreeMap::new();
+    for ant in ants {
+        budgets.entry(ant.effective_turn_budget()).or_default().push(ant.name.as_str());
+    }
+    if budgets.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> =
+        budgets.iter().map(|(turns, names)| format!("{turns} for {}", names.join(", "))).collect();
+    Some(Check::ok("turn budget", format!("turns a thread gets from a human's message: {}", listed.join("; "))))
+}

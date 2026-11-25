@@ -535,7 +535,7 @@ fn backoff(retry: Duration) -> Duration {
 
 /// What a poll does about the releases.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Decision {
+pub(crate) enum Decision {
     /// Nothing: off, or no newer release to act on.
     Nothing,
     /// Warn of the newer release (`check`).
@@ -548,7 +548,7 @@ enum Decision {
 
 /// What `mode` does once the latest stable release is `latest`, this executable `running` and the bus `bus`: nothing
 /// (off, or not newer), warn (check), or install the latest release, but none newer than the bus's (install).
-fn decide(mode: AutoUpdate, running: &Version, latest: &Version, bus: Option<&Version>) -> Decision {
+pub(crate) fn decide(mode: AutoUpdate, running: &Version, latest: &Version, bus: Option<&Version>) -> Decision {
     match (mode, bus) {
         (AutoUpdate::Off, _) => Decision::Nothing,
         _ if latest <= running => Decision::Nothing,

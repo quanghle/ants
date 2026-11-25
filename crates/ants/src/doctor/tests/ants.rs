@@ -539,3 +539,46 @@ fn a_sage_on_a_harness_that_cannot_hold_reviews_is_warned_of_declining_them() {
     assert!(reviews("claude").is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn each_ant_s_turn_budget_is_its_own_or_its_template_s_else_the_top_level_one_else_8() {
+    let dir = ants_test_support::scratch_dir("doctor-turn-budget");
+    let path = dir.join("ants.toml");
+    let budgets = |top: &str| {
+        let text = [
+            r#"harness = "copilot""#,
+            r#"human = "alice""#,
+            top,
+            r#"[[ant_template]]"#,
+            r#"name = "worker""#,
+            r#"managers = ["dev-a"]"#,
+            r#"max_ants = 1"#,
+            r#"workdirs = ["."]"#,
+            r#"turn_budget = 5"#,
+            r#"[[ant]]"#,
+            r#"name = "dev-a""#,
+            r#"workdir = ".""#,
+            r#"turn_budget = 20"#,
+            r#"[[ant]]"#,
+            r#"name = "dev-b""#,
+            r#"workdir = ".""#,
+            r#"[[ant]]"#,
+            r#"name = "dev-a-1""#,
+            r#"template = "worker""#,
+            r#"added_by = "dev-a""#,
+        ]
+        .join("\n");
+        let mut loaded = config::parse(&text, &path, &dir).unwrap();
+        loaded.ants.retain(|ant| ant.builtin.is_none());
+        check_turn_budgets(&loaded.ants).unwrap()
+    };
+    let check = budgets("turn_budget = 12");
+    assert_eq!(check.status, Status::Ok, "{check}");
+    assert_eq!(check.detail, "turns a thread gets from a human's message: 5 for dev-a-1; 12 for dev-b; 20 for dev-a");
+    assert_eq!(
+        budgets("").detail,
+        "turns a thread gets from a human's message: 5 for dev-a-1; 8 for dev-b; 20 for dev-a"
+    );
+    assert!(check_turn_budgets(&[]).is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

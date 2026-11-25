@@ -19,10 +19,12 @@ use serde::Serialize;
 
 use self::ants::{
     check_ants, check_bypassed, check_caps, check_host, check_machine_name, check_mcp_sockets, check_open_files,
-    check_reactions, check_sense_kept, check_sense_logs, check_shared_workdirs, check_trail_saves, check_watchers,
+    check_reactions, check_sense_kept, check_sense_logs, check_shared_workdirs, check_trail_saves, check_turn_budgets,
+    check_watchers,
 };
 use self::channels::check_channels;
 use self::credentials::{check_backup, check_cli_creds};
+use self::humans::check_config_humans;
 use self::leaf_node::{Leaf, check_leaf};
 use self::schedules::check_schedules;
 use self::server::{check_resolver, check_storage, check_store_account, reach};
@@ -32,10 +34,10 @@ use self::teams::{check_team_changes, check_teams};
 pub use self::trails::trail_worker;
 use self::trails::{check_runs, check_worker};
 use self::transports::{check_transports, installed_transports, same_address};
+use self::updates::{check_update, latest_release};
 use self::web::check_web_listeners;
 use crate::auth;
 use crate::people::humans::{Me, Rights};
-use crate::release::update;
 use crate::service::Services;
 use crate::webhook;
 
@@ -43,6 +45,7 @@ mod ants;
 mod channels;
 mod colony;
 mod credentials;
+mod humans;
 mod leaf_node;
 mod schedules;
 mod server;
@@ -51,6 +54,7 @@ mod summaries;
 mod teams;
 mod trails;
 mod transports;
+mod updates;
 mod web;
 
 /// How long a network check may take.
@@ -145,10 +149,11 @@ pub struct Setup {
 /// Run every check, in order: the config file, the CLI's credentials, the server, JetStream, the hub's stream and
 /// buckets, the versions of ants running across the colony, the JetStream storage, each ant's credentials, harness,
 /// workdir, reactions responder, trail saves and team changes, the trail worker and the runs of trails stuck, the team
-/// directory, the hub's account resolver and store account, the account keys' backup, the leaf node and outbox, the
-/// installed services, the WebSocket listeners' origins, the webhooks' config file and notification sinks, the config
-/// file's schedules (one firing no more or sending to an ant no daemon serves), the harnesses of the summary ant
-/// served here reporting the tokens `summaries = "ahead"` counts, and the Dev
+/// directory, the channels, the humans the config file names, the hub's account resolver and store account, the
+/// account keys' backup, the leaf node and outbox, the installed services, the WebSocket listeners' origins, the
+/// webhooks' config file and notification sinks, the config file's schedules (one firing no more or sending to an ant
+/// no daemon serves), the harnesses of the summary ant served here reporting the tokens `summaries = "ahead"` counts,
+/// and the Dev
 /// Tunnel and HTTPS bridge services installed.
 pub async fn run(setup: &Setup) -> Vec<Check> {
     let now = auth::now().unwrap_or_default();
@@ -172,7 +177,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let reactions = check_reactions(ants, setup, NETWORK_TIMEOUT);
     let trail_saves = check_trail_saves(ants, setup, NETWORK_TIMEOUT);
     let team_changes = check_team_changes(ants, setup, NETWORK_TIMEOUT);
-    let update = check_update(loaded.as_ref().map_or_default(|l| l.auto_update));
+    let auto_update = loaded.as_ref().map_or_default(|l| l.auto_update);
+    let latest = latest_release(auto_update);
     let worker = async {
         match (&loaded, &setup.worker) {
             (None, _) => Check::skip("trail worker", "no config file read: no daemon here conducts runs"),
@@ -183,9 +189,9 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
             (Some(_), Some(program)) => check_worker(program, ants_trail::GRACE).await,
         }
     };
-    let ((reached, connected), ants_checked, resolver, reactions, trail_saves, team_changes, update, worker) =
-        tokio::join!(reach, ants_checked, resolver, reactions, trail_saves, team_changes, update, worker);
-    checks.extend(update);
+    let ((reached, connected), ants_checked, resolver, reactions, trail_saves, team_changes, latest, worker) =
+        tokio::join!(reach, ants_checked, resolver, reactions, trail_saves, team_changes, latest, worker);
+    checks.extend(check_update(auto_update, latest, connected.as_ref()).await);
     checks.extend(reached);
     let settings = loaded.as_ref().map_or_default(|l| l.storage);
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
@@ -211,6 +217,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     checks.extend(check_open_files(ants, ants_daemon::limits::files::reachable()));
     checks.extend(check_sense_logs(ants));
     checks.extend(check_watchers(ants));
+    checks.extend(check_turn_budgets(ants));
     checks.extend(reactions);
     checks.extend(trail_saves);
     checks.extend(team_changes);
@@ -230,6 +237,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     }
     checks.extend(check_teams(connected.as_ref(), setup, chrono::Utc::now()).await);
     checks.extend(check_channels(connected.as_ref(), setup).await);
+    checks.extend(check_config_humans(connected.as_ref(), loaded.as_ref(), &setup.config).await);
     checks.push(resolver);
     // After the CLI's connection, which has the hub load the bus's account if no member connected yet.
     checks.push(check_store_account(setup, through_leaf).await);
@@ -329,28 +337,6 @@ fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> 
             None
         }
     }
-}
-
-/// Whether a release newer than this ants is out, asked of GitHub only when the config file's `auto_update` is on.
-async fn check_update(mode: config::AutoUpdate) -> Option<Check> {
-    if mode == config::AutoUpdate::Off {
-        return None;
-    }
-    let running = update::Version::running();
-    let latest = tokio::time::timeout(NETWORK_TIMEOUT * 2, update::resolve(None, false)).await;
-    let release = match latest {
-        Err(_) => return Some(Check::skip("update", "GitHub did not answer in time")),
-        Ok(Err(e)) => return Some(Check::skip("update", format!("finding the latest release: {e:#}"))),
-        Ok(Ok(release)) => release,
-    };
-    Some(match release.version().filter(|latest| *latest > running) {
-        Some(latest) => Check::warn(
-            "update",
-            format!("ants {latest} is available (running {running}; auto_update = \"{}\")", mode.as_str()),
-            vec!["ants update".to_owned()],
-        ),
-        None => Check::ok("update", format!("ants {running} is the latest release")),
-    })
 }
 
 #[cfg(test)]

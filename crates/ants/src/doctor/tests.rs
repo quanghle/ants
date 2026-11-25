@@ -1,10 +1,11 @@
 //! Tests of `ants doctor`: the hub, versions, harnesses, shared settings, sense, leaf, keys, tunnels, bridges, webhook,
-//! services, channels and config checks, and how a check renders.
+//! services, channels, config, config humans and update checks, and how a check renders.
 
 mod ants;
 mod channels;
 mod config_file;
 mod credentials;
+mod humans;
 mod leaf_node;
 mod server;
 mod services;
@@ -12,6 +13,7 @@ mod summaries;
 mod teams;
 mod trails;
 mod transports;
+mod updates;
 
 use ants_daemon::config::Ant;
 use ants_daemon::monitoring::storage;

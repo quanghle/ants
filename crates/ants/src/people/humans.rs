@@ -221,6 +221,11 @@ pub async fn load(js: &jetstream::Context, me: &Me) -> Humans {
 
 pub(crate) async fn read(js: &jetstream::Context) -> Result<Humans> {
     let Ok(kv) = js.get_key_value(HUMANS_BUCKET).await else { return Ok(Humans::default()) };
+    read_from(&kv).await
+}
+
+/// The humans the humans bucket `kv` lists.
+pub(crate) async fn read_from(kv: &kv::Store) -> Result<Humans> {
     let keys: Vec<String> = kv.keys().await.context("listing the humans")?.try_collect().await?;
     let mut entries = Vec::with_capacity(keys.len());
     for key in keys.into_iter().filter(|key| !key.contains('.')) {
