@@ -23,7 +23,7 @@ mod tool;
 mod trigger;
 pub mod watch;
 
-pub use condition::{Condition, FileEvent, IssueState, PrState, SenseEvent};
+pub use condition::{CommandDigest, Condition, FileEvent, IssueState, PrState, SenseEvent};
 pub use trigger::Trigger;
 pub use watch::{Watch, Watched};
 
@@ -125,7 +125,7 @@ pub struct Reminder {
     /// Whether postponed: its condition is not checked again before it fires.
     #[serde(default, with = "crate::items::flag")]
     pub snoozed: bool,
-    /// What the last check of its condition saw, never a command's output.
+    /// What the last check of its condition saw, of a command only the digest of its exit status and stdout.
     pub observation: Option<Value>,
     /// When the latest condition check was reserved.
     pub check_started: Option<DateTime<Utc>>,
@@ -558,7 +558,8 @@ pub async fn condition_checked(
 }
 
 /// Record a condition check and, when supplied, its next bounded baseline (for file changes, for example).
-/// Never pass command output: command observations are deliberately discarded.
+/// A command condition's observation is only `{"digest": hex}` of its exit status and stdout
+/// ([`CommandDigest`]): any other is discarded, so its output is never kept.
 pub async fn condition_observed(
     items: &dyn Items,
     id: &ItemId,
@@ -637,9 +638,11 @@ pub async fn complete_condition(
     }
     reminder.check_started = None;
     let mut unchanged = true;
-    if let Some(observation) = observation
-        && !matches!(check.condition, Condition::Command { .. })
-    {
+    let kept = match &check.condition {
+        Condition::Command { .. } => observation.filter(condition::digest_only),
+        _ => observation,
+    };
+    if let Some(observation) = kept {
         if observation.to_string().len() > 4096 {
             return Err(StoreError::Unavailable("condition observation exceeds 4096 bytes".into()));
         }

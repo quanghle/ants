@@ -159,8 +159,10 @@ the log when the ant's items open. One that may hold writes not yet appended is 
 Disk writes stay off the daemon's runtime thread: the cache commits in the background, in order, and in SQLite's WAL
 mode (`cache.db-wal` and `cache.db-shm` beside it) syncs to disk only at checkpoints, so a power loss may lose its last
 commits but never leaves it inconsistent: those are read again from the log. A write waiting for the log is the
-exception, synced as it is kept. `.sense/chain.json` is written whole but unsynced, as often as an event is appended;
-one left empty or unreadable by a power loss counts as no status kept, and is written again at the next read.
+exception, synced as it is kept. `.sense/chain.json` is written whole but unsynced, in the background as often as an
+event is appended, one write at a time: the status kept while one is written replaces any other waiting, so only the
+latest is written next. One left empty or unreadable by a power loss counts as no status kept, and is written again at
+the next read.
 
 While the machine's host connection is down:
 
@@ -580,12 +582,16 @@ Condition triggers use the following objects:
 | `sense` | `event` (`commitment_overdue`, `lease_expired`), optional `id` | A matching commitment becomes overdue or task lease expires. |
 
 Checks run no more than once a minute, or once every five minutes for `gh` and `bd`; ten unchanged checks increase the
-interval to thirty minutes. An ant holds at most fifty active triggers, including automatic promise reminders: a
+interval to thirty minutes, and the first check seeing a change brings it back. A command check is unchanged when the
+command's stdout and exit status are those of the last check; a failed check, such as a command not starting or past
+its timeout, counts as unchanged. An ant holds at most fifty active triggers, including automatic promise reminders: a
 `sense_remind` or `sense_promise` call that would make more active is refused with `too_many`.
 Ordinary reminders expire after thirty days unless renewed; automatic commitment reminders remain valid until thirty
 days after the later of creation or renewal and the commitment's due time, so a distant due date cannot expire before
 firing. A command condition runs as the ant's harness would run it, in its workdir and environment, with a
-thirty-second timeout; stdout and stderr are discarded. On a harness that runs its tools unasked (a built-in harness or
+thirty-second timeout; stderr is discarded, and of stdout and the exit status only a digest is kept, to tell an
+unchanged check. A command exiting non-zero is a check not yet matching, logged at debug level; a command that cannot
+start or runs past its timeout is logged as a warning. On a harness that runs its tools unasked (a built-in harness or
 one of a native protocol, unless `tools = "ask"`, see [config.md](config.md#harnesses)) it runs unasked too, but for a trigger made on a thread narrowed
 to other tool rules or otherwise untrusted, where the ant's tool allow rules decide as under `tools = "ask"`: a command
 outside them is refused, with no approval request raised. A `sense_remind` call creating a command trigger or watcher

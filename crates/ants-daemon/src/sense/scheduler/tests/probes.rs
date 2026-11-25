@@ -163,7 +163,8 @@ async fn command_checks_use_current_policy_and_environment_without_storing_outpu
     assert_eq!(host.requests.locked().len(), 1);
     assert_eq!(host.requests.locked()[0].id, format!("{id}:1"));
     let item = stores.items.get(&id).await.unwrap().unwrap();
-    assert!(remind::Reminder::of(&item).unwrap().observation.is_none());
+    let observation = remind::Reminder::of(&item).unwrap().observation.unwrap();
+    assert_eq!(observation.as_object().unwrap().keys().collect::<Vec<_>>(), ["digest"], "{observation}");
     assert!(!serde_json::to_string(&item).unwrap().contains("private command output"));
     let denied = reminder(&*stores.items, &denied).await;
     assert_eq!(denied.unchanged_checks, Some(1));

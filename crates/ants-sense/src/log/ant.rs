@@ -105,7 +105,7 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
         let read = self.log.read_after(self.chain.sense(), self.chain.last_sequence(), READ_BATCH).await?;
         if read.is_empty() {
             self.chain.end();
-            self.keep_status()?;
+            self.keep_status();
             return Ok(None);
         }
         let mut checked = Vec::new();
@@ -225,7 +225,7 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
             Ok(sequence) => {
                 let stored = Stored { sequence, stored_at: Utc::now(), payload };
                 self.chain.appended(&stored, &event);
-                self.keep_status()?;
+                self.keep_status();
                 Ok(Ok(Checked { stored, event }))
             }
             Err(AppendError::Conflict { .. }) => Ok(Err(self.catch_up().await?)),
@@ -237,21 +237,19 @@ impl<L: EventLog, S: Signer, V: Verifier> AntLog<L, S, V> {
         LogError::refused(format!("other writers kept appending to sense identity {}", self.chain.sense()))
     }
 
-    /// Keep the status in the home, unless only its time changed since it was kept, less than [`STATUS_REFRESH`]
-    /// ago: each write is synced to disk, and every call to sense reads the log to its end.
-    fn keep_status(&mut self) -> Result<(), LogError> {
-        let Some(home) = &self.home else { return Ok(()) };
+    /// Keep the status in the home, written in the background, unless only its time changed since it was kept, less
+    /// than [`STATUS_REFRESH`] ago: every call to sense reads the log to its end.
+    fn keep_status(&mut self) {
+        let Some(home) = &self.home else { return };
         let status = self.status();
         if let Some(kept) = &self.kept
             && (ChainStatus { checked_at: status.checked_at, ..kept.clone() }) == status
             && status.checked_at - kept.checked_at < STATUS_REFRESH
         {
-            return Ok(());
+            return;
         }
-        super::write_status(home, &status)
-            .map_err(|e| LogError::integrity(format!("keeping the chain status: {e}")))?;
+        super::status::keep_status(home, status.clone());
         self.kept = Some(status);
-        Ok(())
     }
 }
 

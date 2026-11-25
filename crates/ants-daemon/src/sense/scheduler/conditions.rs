@@ -117,8 +117,11 @@ async fn probe(condition: &Condition, previous: Option<&Value>, context: &Contex
                 bail!("command trigger is outside the ant's tool allow rules");
             }
             let (program, args) = shell(command);
-            let fired = status(program, &args, context).await?;
-            (fired, json!(fired), "command exited successfully")
+            let (status, digest) = digested(program, &args, context).await?;
+            if status != Some(0) {
+                tracing::debug!(command, ?status, "a condition's command did not exit 0");
+            }
+            (status == Some(0), digest, "command exited successfully")
         }
         Condition::Sense { event, id } => {
             let fired = remind::sense_condition(context.items, *event, id.as_ref(), context.now).await?;
@@ -195,6 +198,24 @@ async fn status(program: &str, args: &[&str], context: &Context<'_>) -> Result<b
     Ok(child.0.wait().await.context("waiting for a condition check")?.success())
 }
 
+/// The exit status of `program` run with `args`, none when a signal ended it, and the observation of a command
+/// condition: the digest of its stdout, read whatever its length, and that status.
+async fn digested(program: &str, args: &[&str], context: &Context<'_>) -> Result<(Option<i32>, Value)> {
+    let mut child = Running(command(program, args, context, true).spawn().context("starting a condition check")?);
+    let mut stdout = child.0.stdout.take().context("condition stdout missing")?;
+    let mut digest = remind::CommandDigest::default();
+    let mut buffer = [0; 8192];
+    loop {
+        let read = stdout.read(&mut buffer).await.context("reading a condition check's stdout")?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let status = child.0.wait().await.context("waiting for a condition check")?.code();
+    Ok((status, digest.finish(status)))
+}
+
 /// The exit status of `program` run with `args` and its stdout, failing past [`MAX_OUTPUT`]; no status when a signal
 /// ended it. Takes at most 30 seconds.
 pub(super) async fn captured(program: &str, args: &[&str], context: &Context<'_>) -> Result<(Option<i32>, Vec<u8>)> {
@@ -225,8 +246,9 @@ async fn output(program: &str, args: &[&str], context: &Context<'_>) -> Result<V
     if bytes.len() as u64 > MAX_OUTPUT {
         bail!("condition response exceeds 64 KiB");
     }
-    if !child.0.wait().await?.success() {
-        bail!("condition command did not succeed");
+    let status = child.0.wait().await?;
+    if !status.success() {
+        bail!("{program} answering the condition failed ({status})");
     }
     Ok(bytes)
 }
