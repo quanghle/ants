@@ -1,4 +1,4 @@
-//! The team's humans as a daemon sees them.
+//! The bus's humans as a daemon sees them.
 //!
 //! A human is a user listed in the [`HUMANS_BUCKET`], which only humans write; the daemon's default human (config
 //! `human`) is a human without an entry. The daemon keeps the bucket's humans in a [`Registry`], kept current by a
@@ -98,7 +98,7 @@ impl Registry {
         registry
     }
 
-    /// The registry, honouring the assistant grants that devices of the team of `account` (`A...`, the issuer of the
+    /// The registry, honouring the assistant grants that devices of the bus of `account` (`A...`, the issuer of the
     /// reader's credentials) signed; without an account, none.
     #[must_use]
     pub fn verifying_grants(mut self, account: Option<String>) -> Self {
@@ -381,7 +381,7 @@ impl Registry {
     }
 }
 
-/// A device of a human of a team of its own, signing records as the human's devices do.
+/// A device of a human of a bus of its own, signing records as the human's devices do.
 #[cfg(test)]
 pub struct TestDevice {
     account: nkeys::KeyPair,

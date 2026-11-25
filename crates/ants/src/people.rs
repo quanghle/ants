@@ -1,4 +1,4 @@
-//! The team's humans as the CLI sees them: their registry and the CLI's own human, their devices' encryption keys and
+//! The bus's humans as the CLI sees them: their registry and the CLI's own human, their devices' encryption keys and
 //! the messages sealed for them, their assistants and the acts done on their behalf, where they read and what they
 //! hold back of their notifications.
 

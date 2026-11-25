@@ -18,7 +18,7 @@ pub(crate) fn jwt(signer: &KeyPair, body: &Value) -> String {
     format!("{signed}.{}", BASE64URL_NOPAD.encode(&signer.sign(signed.as_bytes()).unwrap()))
 }
 
-/// A team account and credentials of its ants, each signing with its own key.
+/// A bus's account and credentials of its ants, each signing with its own key.
 pub(crate) struct Team {
     pub(crate) account: KeyPair,
 }

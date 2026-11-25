@@ -38,7 +38,7 @@ pub use dedicated::{DisableArgs, EnableArgs};
 const CONFLICTS: usize = 5;
 
 /// What the machine the CLI runs on knows of an ant: its `[[ant]]` in the config file, and its credentials in the
-/// team's registry, where the account key is.
+/// bus's registry, where the account key is.
 #[derive(Debug, Default)]
 struct Local {
     entry: Option<AntEntry>,
@@ -62,7 +62,7 @@ struct AntEntry {
 }
 
 impl Local {
-    /// What the config file at `config` and the team's registry in `team` say of `ant`, either missing or unreadable
+    /// What the config file at `config` and the bus's registry in `team` say of `ant`, either missing or unreadable
     /// telling nothing.
     fn read(ant: &UserId, config: &Path, team: Option<&Path>) -> Self {
         #[derive(Deserialize)]
@@ -382,7 +382,7 @@ pub async fn show(nats: &Nats<'_>, human: Option<UserId>, json: bool) -> Result<
     Ok(())
 }
 
-/// The ant the grant of `human` designates, read and verified now for the team of `account` (the issuer of the CLI's
+/// The ant the grant of `human` designates, read and verified now for the bus of `account` (the issuer of the CLI's
 /// credentials): none without an account or a grant that verifies, and none after a withdrawal. Whether the ant's own
 /// credentials name `human` is for the readers of what the ant does for `human` to check, not for whoever writes to it.
 pub(crate) async fn designated(js: &jetstream::Context, account: Option<&str>, human: &UserId) -> Option<UserId> {

@@ -12,7 +12,7 @@ use crate::UserId;
 #[cfg(doc)]
 use crate::{DEVICES_BUCKET, HUMANS_BUCKET, Permissions};
 
-/// The user JWT tag of a human who may administer every ant of the team ([`AdminRole`]).
+/// The user JWT tag of a human who may administer every ant of the bus ([`AdminRole`]).
 pub const ADMIN_TAG: &str = "ants-admin";
 
 /// The role of a human whose user JWT carries [`ADMIN_TAG`], put there by `ants auth user NAME --human --admin`: it may
@@ -158,7 +158,7 @@ impl VerifiedUser {
     }
 }
 
-/// Verify `jwt` as the user JWT of a member of the team: signed by one of `accounts`, the team account's public keys
+/// Verify `jwt` as the user JWT of a member of the bus: signed by one of `accounts`, the bus's account's public keys
 /// (`A...`), a user JWT for a user NKey, named for a valid user id, and unexpired at `now` (seconds since the epoch).
 /// Whether its key is revoked the caller checks.
 pub fn verify_user_jwt<'a>(
@@ -191,7 +191,7 @@ pub fn verify_user_jwt<'a>(
     })
 }
 
-/// Verify an act of an admin: `jwt` is the user JWT of a member of the team ([`verify_user_jwt`]) carrying
+/// Verify an act of an admin: `jwt` is the user JWT of a member of the bus ([`verify_user_jwt`]) carrying
 /// [`ADMIN_TAG`], and `signature` (base64url without padding) the signature of `payload`, such as an admin order's
 /// bytes, by its key. Returns the admin's verified user, whose key the caller checks is not revoked.
 pub fn verify_admin<'a>(
@@ -209,7 +209,7 @@ pub fn verify_admin<'a>(
     Ok(user)
 }
 
-/// Verify that `jwt` is the user JWT of a member of the team ([`verify_user_jwt`]) that the account made the
+/// Verify that `jwt` is the user JWT of a member of the bus ([`verify_user_jwt`]) that the account made the
 /// assistant of `human` ([`AssistantOf`]). Whether the human's grant stands ([`HUMANS_BUCKET`]), and that an act was
 /// signed by the assistant's key ([`VerifiedUser::check_signature`]), the caller checks.
 pub fn verify_assistant_of<'a>(

@@ -4,7 +4,7 @@
 //! - As services: the JetStream API, plain and in any domain's form (`$JS.<domain>.API`, which the store account
 //!   maps to its own when the domain is its server's), acks and flow control replies, and every subject a stream
 //!   stores: the KV buckets', the object stores', those of the ants stream, of sense's event logs and of a leaf's
-//!   outbox. Their answers come back through the service import, so a reply subject always names one of the team's
+//!   outbox. Their answers come back through the service import, so a reply subject always names one of the bus's
 //!   account, never a stored one.
 //! - As streams: the reply inboxes push consumers deliver to and the ants stream republishes stored inbox messages
 //!   on, and the advisories dead letters come from.

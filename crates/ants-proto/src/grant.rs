@@ -109,7 +109,7 @@ impl AssistantGrant {
         lines.join("\n").into_bytes()
     }
 
-    /// Check the grant, read from `key`, for a reader of the team whose account is `account` (`A...`, the issuer of
+    /// Check the grant, read from `key`, for a reader on the bus whose account is `account` (`A...`, the issuer of
     /// the reader's own credentials), at `now`: under its human's key, naming another ant than the human, issued no
     /// further ahead than [`GRANT_CLOCK_SKEW`], and signed by credentials of a device of the human that the account
     /// signed and that had not expired when it was issued.
@@ -313,7 +313,7 @@ impl Applied {
 
 impl Grants {
     /// Apply `value`, what the key `key` of [`HUMANS_BUCKET`] holds now (none: deleted or purged), checked for the
-    /// team of the account `account` at `now` ([`AssistantGrant::verify`]); None when `key` is no grant's key.
+    /// bus of the account `account` at `now` ([`AssistantGrant::verify`]); None when `key` is no grant's key.
     pub fn apply(&mut self, key: &str, value: Option<&[u8]>, account: &str, now: DateTime<Utc>) -> Option<Applied> {
         let human = assistant_grant_of(key)?;
         let standing = self.humans.remove(&human);

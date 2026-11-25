@@ -58,7 +58,7 @@ pub fn is_shared_field(key: &str) -> bool {
 /// additions, not errors.
 ///
 /// As any machine's host credentials may write any ant's record, its writer signs it with credentials of the ant
-/// itself, which only the machines serving the ant hold ([`SharedSettings::credentials`]); a daemon of a team with
+/// itself, which only the machines serving the ant hold ([`SharedSettings::credentials`]); a daemon of a bus with
 /// credentials applies only a record it verifies ([`SharedSettings::verify`]).
 ///
 /// A record the ant once signed stays signed, so a host may put back one replaced since (a replay). The bucket keeps
@@ -169,7 +169,7 @@ impl SharedSettings {
     }
 
     /// Check that the record, which the stream stored at `stored_at` as its message `stored` (the stream sequence), is
-    /// signed by the key of credentials of the ant that one of `accounts` (the team account's public keys) signed,
+    /// signed by the key of credentials of the ant that one of `accounts` (the bus's account's public keys) signed,
     /// that had not expired when it was stored and whose key `revoked` (looked up in the revocation records) does not
     /// say is revoked: the credentials of a machine serving the ant. It must be stored at the sequence it was signed
     /// for, so that a record replaced since is not put back, in `incarnation`, the bucket's ([`incarnation`]; none

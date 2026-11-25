@@ -1,4 +1,4 @@
-//! Tests of team credentials against nats-server: the fixtures connecting as each user and watching for permission
+//! Tests of the bus's credentials against nats-server: the fixtures connecting as each user and watching for permission
 //! violations, and the rights of each, one submodule per area.
 
 use std::assert_matches;

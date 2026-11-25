@@ -66,7 +66,7 @@ impl Revocations for NoRevocations {
     }
 }
 
-/// A [`Verifier`] taking events signed by the key of credentials of the event's ant that one of the team account's
+/// A [`Verifier`] taking events signed by the key of credentials of the event's ant that one of the bus's account's
 /// keys signed, unexpired when the event was stored and not revoked before then. Without accounts, a server without
 /// authentication, it takes every event.
 pub struct AccountVerifier<R> {
@@ -75,7 +75,7 @@ pub struct AccountVerifier<R> {
 }
 
 impl<R: Revocations> AccountVerifier<R> {
-    /// Checking against `accounts`, the team account's public keys (`A...`), and `revocations`.
+    /// Checking against `accounts`, the bus's account's public keys (`A...`), and `revocations`.
     pub fn new(accounts: Vec<String>, revocations: R) -> Self {
         Self { accounts, revocations }
     }

@@ -24,7 +24,7 @@ pub struct Break {
 }
 
 /// What an event of kind [`super::IMPORTED`] tells: the log's events up to `through` came from another bus, where
-/// credentials of `accounts`, its team account's keys, signed them. Signed on this bus, it lets a reader verify those
+/// credentials of `accounts`, its bus's account's keys, signed them. Signed on this bus, it lets a reader verify those
 /// events against `accounts` ([`Chain::anchored`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Anchor {

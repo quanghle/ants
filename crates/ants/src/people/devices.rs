@@ -105,7 +105,7 @@ pub async fn publish_or_warn(js: &jetstream::Context, own: &Own) {
     }
 }
 
-/// The revocations of the team in `dir` that the devices bucket keeps a record of: those of every key of a human's
+/// The revocations of the bus in `dir` that the devices bucket keeps a record of: those of every key of a human's
 /// credentials (an admin's among them) and of an assistant's, whose roles readers honour only from a key without one,
 /// of an ant's, whose shared settings readers take only signed with a key without one, and of every key the registry
 /// does not know, which may be one.

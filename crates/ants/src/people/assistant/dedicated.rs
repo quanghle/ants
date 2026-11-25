@@ -317,7 +317,7 @@ enum Held {
 }
 
 /// What the credentials at `out` are, checked as those of `ant` as the assistant of `human`, signed with the account
-/// of the team in `dir`; credentials of anything else there are refused, so nothing overwrites them.
+/// of the bus in `dir`; credentials of anything else there are refused, so nothing overwrites them.
 fn held(out: &Path, dir: &Path, ant: &UserId, human: &UserId) -> Result<Held> {
     let text = match std::fs::read_to_string(out) {
         Ok(text) => text,
