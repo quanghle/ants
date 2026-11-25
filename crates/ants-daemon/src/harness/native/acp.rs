@@ -130,7 +130,7 @@ impl Turns {
         Self { prompts: Arc::default(), runs: runs.clone() }
     }
 
-    /// Note `line`, sent to the harness, should it prompt it.
+    /// Note `line`, sent to the harness, should it prompt it: a turn starts.
     fn sent(&self, line: &str) {
         if !line.contains("\"session/prompt\"") {
             return;
@@ -140,6 +140,7 @@ impl Turns {
             && let Some(id) = message.get("id")
         {
             self.prompts.locked().push(id.clone());
+            self.runs.turn_started();
         }
     }
 

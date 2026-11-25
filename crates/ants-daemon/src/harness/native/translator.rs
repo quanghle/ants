@@ -246,6 +246,7 @@ impl<N: Native> Translator<N> {
         let live = self.live(&request.session_id)?;
         let updates = Updates::new(cx, request.session_id);
         let prompting = Prompting::new(&live.prompts);
+        self.cli.runs().turn_started();
         let done = live.session.prompt(request.prompt, updates).await;
         drop(prompting);
         if let Err(e) = &done
