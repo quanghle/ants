@@ -104,6 +104,7 @@ struct Registration {
     connect: fn(Cli) -> DynConnectTo<Client>,
     mcp: Option<OpenHost>,
     asks: bool,
+    cost_with: Option<&'static str>,
 }
 
 impl Registration {
@@ -113,6 +114,7 @@ impl Registration {
             connect: translator::connect::<N>,
             mcp: N::MCP.then_some(open_host::<N> as OpenHost),
             asks: N::ASKS,
+            cost_with: N::COST_WITH,
         }
     }
 }
@@ -139,6 +141,12 @@ pub(crate) fn reports_mcp(protocol: Protocol) -> bool {
 /// protocol with the hook ([`Native::ASKS`]).
 pub(crate) fn asks(protocol: Protocol) -> bool {
     registration(protocol).ok().is_some_and(|registration| registration.is_none_or(|registration| registration.asks))
+}
+
+/// The sign-in a CLI speaking `protocol` reports a cost with, when it reports one only with that sign-in
+/// ([`Native::COST_WITH`]).
+pub(crate) fn cost_with(protocol: Protocol) -> Option<&'static str> {
+    registration(protocol).ok().flatten().and_then(|registration| registration.cost_with)
 }
 
 /// Check the keys of `harness` its protocol reads, such as the native permission mode `mode` names.
@@ -329,6 +337,10 @@ pub(crate) trait Native: Sized + Send + Sync + 'static {
     /// Whether it can send what the CLI would ask a human about its tools to the client ([`Cli::asks`]), so an ant
     /// may set `tools = "ask"` on it.
     const ASKS: bool = false;
+
+    /// The sign-in its CLI reports a prompt's cost with, when it reports one with that sign-in only, such as
+    /// `"ChatGPT"`: a cap of cost on a definition reporting no cost is then warned of as tripping only with it.
+    const COST_WITH: Option<&'static str> = None;
 }
 
 /// The credentials a native CLI signs in with ([`Native::credentials`]).

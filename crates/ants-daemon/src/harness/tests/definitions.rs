@@ -207,3 +207,41 @@ fn reviews_run_on_a_variant_asking_before_running_tools() {
     let replaced = define(replaced).unwrap();
     assert_eq!(replaced.get("copilot").unwrap().reviewing(), None, "a definition replacing a built-in sets its own");
 }
+
+#[test]
+fn a_cost_cap_on_protocol_codex_is_warned_of_as_tripping_only_signed_in_with_chatgpt() {
+    let cost = [("max_daily_cost", Reported::Cost)];
+    let native = custom("command = \"codex\"\nprotocol = \"codex\"");
+    assert_eq!(
+        native.uncounted(&cost).as_deref(),
+        Some(
+            "harness custom reports cost only signed in with ChatGPT, so max_daily_cost never trips on it signed in \
+             otherwise"
+        )
+    );
+    let fix = native.uncounted_fix();
+    assert!(
+        fix.starts_with(
+            "signed in with ChatGPT, set reports = [\"tokens\", \"cost\"] in [harnesses.custom]; otherwise set caps"
+        ),
+        "{fix}"
+    );
+    let both = [("max_daily_tokens", Reported::Tokens), ("max_daily_cost", Reported::Cost)];
+    let none = custom("command = \"codex\"\nprotocol = \"codex\"\nreports = []");
+    assert_eq!(
+        none.uncounted(&both).as_deref(),
+        Some(
+            "harness custom reports no tokens and cost only signed in with ChatGPT, so max_daily_tokens never trips \
+             on it and max_daily_cost never trips on it signed in otherwise"
+        )
+    );
+    assert!(none.uncounted_fix().starts_with("signed in with ChatGPT, set reports = [\"cost\"]"));
+    let chatgpt = custom("command = \"codex\"\nprotocol = \"codex\"\nreports = [\"tokens\", \"cost\"]");
+    assert_eq!(chatgpt.uncounted(&both), None, "a definition saying it reports a cost is taken at its word");
+    assert!(chatgpt.uncounted_fix().starts_with("set caps of what harness custom reports"));
+    assert_eq!(
+        builtin("codex").uncounted(&cost).as_deref(),
+        Some("harness codex reports no cost, so max_daily_cost never trips on it"),
+        "codex-acp reports no cost with any sign-in"
+    );
+}
