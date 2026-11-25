@@ -537,7 +537,7 @@ async fn the_buckets_ants_init_made_open_under_every_role_that_creates_them() {
     crate::people::humans::ensure(&ant_js).await.unwrap();
     let team = server.dir().join("auth");
     crate::credentials::revoke::revoke(&team, None, &[nkeys::KeyPair::new_user().public_key()]).unwrap();
-    assert_eq!(crate::people::devices::record_revocations(&server.url, None, &team).await.unwrap().len(), 1);
+    assert_eq!(crate::people::devices::record_revocations(&server.url, None, &team).await.unwrap().keys.len(), 1);
 
     for bucket in [ants_proto::NOTIFY_BUCKET, ants_proto::HUMANS_BUCKET, ants_proto::DEVICES_BUCKET] {
         let stream = js.get_stream(format!("KV_{bucket}")).await.unwrap();
@@ -586,5 +586,5 @@ async fn buckets_made_on_first_use_are_made_as_ants_init_makes_them() {
         assert!(!config.allow_rollup, "{object} denies rollups");
         assert_eq!(config.max_consumers == MAX_CONSUMERS, object.watched(), "{object}: {}", config.max_consumers);
     }
-    assert_eq!(crate::people::devices::record_revocations(&server.url, None, &team).await.unwrap().len(), 1);
+    assert_eq!(crate::people::devices::record_revocations(&server.url, None, &team).await.unwrap().keys.len(), 1);
 }

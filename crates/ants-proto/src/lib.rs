@@ -329,8 +329,9 @@ pub const PRESENCE_BUCKET: &str = "ants_presence";
 /// when it differs, and a [`DeviceRevocation`] for each revoked key of a human's credentials, keyed by
 /// [`revoked_device_key`]. Each human reads all of it and writes only its own keys; only the short-lived credentials
 /// `ants auth revoke` and `ants auth push` issue from the account key put the revocation records
-/// ([`Permissions::for_device_revoker`]). A reader takes a device's key only from a JWT it verifies itself. Entries
-/// never expire.
+/// ([`Permissions::for_device_revoker`]), and they alone delete a device's entry once its key is revoked
+/// ([`Permissions::for_device_entry_remover`]). A reader takes a device's key only from a JWT it verifies itself.
+/// Entries never expire.
 pub const DEVICES_BUCKET: &str = "ants_devices";
 /// KV bucket of what each human holds back of its notifications for a while ([`NotifyPrefs`]), keyed by its user id: a
 /// snooze and the muted threads, set with `ants notify` and `ants thread mute` on any of its devices and read by `ants

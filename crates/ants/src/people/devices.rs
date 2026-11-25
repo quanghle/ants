@@ -120,48 +120,122 @@ fn device_revocations(dir: &Path) -> Result<Vec<DeviceRevocation>> {
     Ok(revoked.map(|r| DeviceRevocation { key: r.key, revoked_at: r.revoked_at }).collect())
 }
 
+/// What [`record_revocations`] did: the revoked keys it recorded now, and the device entries of revoked keys it
+/// deleted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recorded {
+    pub keys: Vec<String>,
+    /// `<human>.<device>`.
+    pub cleared: Vec<String>,
+}
+
+/// How many device entries one set of short-lived credentials deletes, keeping its user JWT short.
+const ENTRIES_A_REMOVER: usize = 16;
+
 /// Put in the devices bucket on the hub at `url`, with credentials signed by the account key in `dir`
 /// ([`auth::revoker_creds`]), a record of each revoked key of a human's or an ant's credentials it lacks, so senders
-/// stop sealing for the devices they are for and readers refuse the shared settings they signed. Returns the keys
-/// recorded now. Fails if the hub is out of reach, or has no devices bucket, which these credentials cannot create as
-/// `ants init` does: the next `ants auth push` records them.
-pub async fn record_revocations(url: &str, js_domain: Option<&JsDomain>, dir: &Path) -> Result<Vec<String>> {
+/// stop sealing for the devices they are for and readers refuse the shared settings they signed; then delete each
+/// human's device entry still holding the user JWT of a revoked key the registry knows, recorded now or earlier, with
+/// credentials allowed only those entries ([`auth::device_entry_remover_creds`]), so no reader is left skipping it. An
+/// entry a renewal replaced in between is kept. Fails if the hub is out of reach, or has no devices bucket, which these
+/// credentials cannot create as `ants init` does: the next `ants auth push` records them.
+pub async fn record_revocations(url: &str, js_domain: Option<&JsDomain>, dir: &Path) -> Result<Recorded> {
     let revocations = device_revocations(dir)?;
     if revocations.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Recorded::default());
     }
-    let js = revoker(url, js_domain, dir).await?;
+    let js = connect(url, js_domain, &auth::revoker_creds(dir, js_domain)?).await?;
     let kv = js
         .get_key_value(DEVICES_BUCKET)
         .await
         .with_context(|| format!("opening the bucket {DEVICES_BUCKET} (`ants init` as a human creates it)"))?;
-    let mut recorded = Vec::new();
-    for revocation in revocations {
+    let mut recorded = Recorded::default();
+    for revocation in &revocations {
         let key = revoked_device_key(&revocation.key);
         if kv.guarded_get(&key).await.with_context(|| format!("reading {key} in {DEVICES_BUCKET}"))?.is_some() {
             continue;
         }
-        let record = serde_json::to_vec(&revocation)?;
+        let record = serde_json::to_vec(revocation)?;
         kv.put(&key, record.into()).await.with_context(|| format!("putting {key} in {DEVICES_BUCKET}"))?;
-        recorded.push(revocation.key);
+        recorded.keys.push(revocation.key.clone());
     }
+    recorded.cleared = Box::pin(clear(url, js_domain, dir, &kv, &revocations)).await?;
     Ok(recorded)
+}
+
+/// Delete the device entries [`stale_entries`] finds, returning those deleted.
+async fn clear(
+    url: &str,
+    js_domain: Option<&JsDomain>,
+    dir: &Path,
+    kv: &kv::Store,
+    revocations: &[DeviceRevocation],
+) -> Result<Vec<String>> {
+    let stale = stale_entries(kv, dir, revocations).await?;
+    let mut cleared = Vec::new();
+    for chunk in stale.chunks(ENTRIES_A_REMOVER) {
+        let entries: Vec<String> = chunk.iter().map(|(entry, _)| entry.clone()).collect();
+        let creds = auth::device_entry_remover_creds(dir, js_domain, &entries)?;
+        let kv = connect(url, js_domain, &creds)
+            .await?
+            .get_key_value(DEVICES_BUCKET)
+            .await
+            .with_context(|| format!("opening the bucket {DEVICES_BUCKET}"))?;
+        for (entry, revision) in chunk {
+            match kv.delete_expect_revision(entry, Some(*revision)).await {
+                Ok(()) => cleared.push(entry.clone()),
+                // Put again since read, by a renewal of the device: its key is no longer the revoked one.
+                Err(e) if e.kind() == kv::DeleteErrorKind::WrongLastRevision => {}
+                Err(e) => return Err(e).with_context(|| format!("deleting {entry} in {DEVICES_BUCKET}")),
+            }
+        }
+    }
+    Ok(cleared)
+}
+
+/// The device entries of humans' devices in `kv`, with their revisions, still holding the user JWT of a key of
+/// `revocations` that the registry of `dir` knows as a device's.
+async fn stale_entries(kv: &kv::Store, dir: &Path, revocations: &[DeviceRevocation]) -> Result<Vec<(String, u64)>> {
+    let issued = issued::issued(dir)?;
+    let mut entries: Vec<(String, &str)> = issued
+        .iter()
+        .filter(|i| i.kind == issued::Kind::Human && revocations.iter().any(|r| r.key == i.key))
+        .filter_map(|i| Some((device_entry_key(&i.name.parse().ok()?, &i.device?), i.key.as_str())))
+        .collect();
+    entries.sort_unstable();
+    entries.dedup();
+    let mut stale = Vec::new();
+    for (entry, key) in entries {
+        let Some(found) =
+            kv.guarded_entry(&entry).await.with_context(|| format!("reading {entry} in {DEVICES_BUCKET}"))?
+        else {
+            continue;
+        };
+        let holds = found.operation == kv::Operation::Put
+            && std::str::from_utf8(&found.value)
+                .ok()
+                .and_then(|jwt| auth::verified(jwt).ok())
+                .is_some_and(|c| c.sub == key);
+        if holds {
+            stale.push((entry, found.revision));
+        }
+    }
+    Ok(stale)
 }
 
 /// Delete `ant`'s identity record and shared settings from the hub at `url`, keeping its sense identity's growth.
 pub async fn forget_identity(url: &str, js_domain: Option<&JsDomain>, dir: &Path, ant: &UserId) -> Result<()> {
-    let js = revoker(url, js_domain, dir).await?;
+    let js = connect(url, js_domain, &auth::revoker_creds(dir, js_domain)?).await?;
     identity::forget(&js, js_domain, ant).await.with_context(|| {
         format!("the credentials were revoked, but clearing {ant}'s identity and settings in {IDENTITIES_BUCKET} did not finish: revoke them again by name")
     })
 }
 
-/// A JetStream context, in domain `js_domain` if the hub has one, of short-lived credentials signed with the account
-/// key in `dir` ([`auth::revoker_creds`]), connected to the server at `url`.
-pub(crate) async fn revoker(url: &str, js_domain: Option<&JsDomain>, dir: &Path) -> Result<jetstream::Context> {
+/// A JetStream context, in domain `js_domain` if the hub has one, of the short-lived credentials `creds` signed with
+/// the account key, connected to the server at `url`.
+async fn connect(url: &str, js_domain: Option<&JsDomain>, creds: &str) -> Result<jetstream::Context> {
     bus::check_url(url)?;
-    let creds = auth::revoker_creds(dir, js_domain)?;
-    let connect = async_nats::ConnectOptions::with_credentials(&creds)?
+    let connect = async_nats::ConnectOptions::with_credentials(creds)?
         .name("ants-auth")
         .custom_inbox_prefix(ENROLL_INBOX)
         .connection_timeout(REVOKER_TIMEOUT)

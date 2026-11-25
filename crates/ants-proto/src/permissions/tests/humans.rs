@@ -241,4 +241,11 @@ fn humans_read_every_device_key_put_only_their_own_and_only_the_revoker_records_
     assert!(!revoker.publish.iter().any(|s| s.contains("STREAM.CREATE") || s.contains("STREAM.UPDATE")));
     assert!(!revoker.publish.iter().any(|s| s.starts_with("ants.") || s.contains("CONSUMER")));
     assert_eq!(revoker.subscribe, [format!("{ENROLL_INBOX}.>")]);
+
+    // The device entries of revoked keys are deleted with credentials allowed those entries alone.
+    let remover = Permissions::for_device_entry_remover(&["bob.dev1".to_owned(), "carol.dev2".to_owned()]);
+    let puts: Vec<&String> = remover.publish.iter().filter(|s| s.starts_with("$KV.")).collect();
+    assert_eq!(puts, ["$KV.ants_devices.bob.dev1", "$KV.ants_devices.carol.dev2"]);
+    assert!(!remover.publish.iter().any(|s| s.contains("DIRECT.GET") || s.contains("STREAM.CREATE")));
+    assert_eq!(remover.subscribe, [format!("{ENROLL_INBOX}.>")]);
 }

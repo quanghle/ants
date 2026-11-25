@@ -178,26 +178,53 @@ async fn humans_publish_their_devices_and_readers_take_only_verified_unrevoked_k
     assert!(ant_js.get_key_value(DEVICES_BUCKET).await.is_err());
     assert!(Directory::open(&ant_js, &account).await.is_err());
 
-    // Revoking bob's credentials and pushing records the revocation, once; readers then skip his device.
+    // Revoking bob's credentials and pushing records the revocation, once, and deletes his device's entry.
     revoke::revoke(&team, Some("bob"), &[]).unwrap();
     crate::credentials::push::push_and_report(&server.url, None, &team, &mut crate::text::Say::Print).await.unwrap();
-    assert_eq!(record_revocations(&server.url, None, &team).await.unwrap(), Vec::<String>::new(), "recorded already");
+    assert_eq!(record_revocations(&server.url, None, &team).await.unwrap(), Recorded::default(), "recorded already");
     let record: DeviceRevocation =
         serde_json::from_slice(&kv.get(revoked_device_key(&bob_key)).await.unwrap().unwrap()).unwrap();
     assert_eq!(record.key, bob_key);
+    assert_eq!(kv.get(&bob_entry).await.unwrap(), None, "the revoked device's entry is deleted");
     let devices = directory.devices(&[alice.clone(), bob.clone()]).await.unwrap();
     assert_eq!(devices.of(&bob).count(), 0);
+    assert!(devices.skipped.iter().all(|s| !s.entry.starts_with("bob.")), "{:?}", devices.skipped);
+    assert_eq!(directory.device(&bob, &bob_own.device).await.unwrap(), Lookup::Missing);
+
+    // An entry of a revoked key left from before is skipped as revoked, not warned of, and the next push deletes it.
+    let (_, bob_raw) = server.connect_as(&bob, Role::Human).await;
+    let bob_kv = bob_raw.get_key_value(DEVICES_BUCKET).await.unwrap();
+    bob_kv.put(&bob_entry, bob_own.jwt.clone().into()).await.unwrap();
     let revoked = format!("{DEVICES_BUCKET} entry {bob_entry}: its credentials {bob_key} are revoked");
-    assert!(devices.skipped.iter().any(|s| s.to_string() == revoked), "{:?}", devices.skipped);
+    let devices = directory.devices(&[alice.clone(), bob.clone()]).await.unwrap();
+    let skipped = devices.skipped.iter().find(|s| s.entry == bob_entry).expect("bob's entry skipped");
+    assert_eq!((skipped.to_string(), skipped.revoked), (revoked.clone(), true));
     let Lookup::Skipped(skipped) = directory.device(&bob, &bob_own.device).await.unwrap() else { panic!() };
-    assert_eq!(skipped.to_string(), revoked);
+    assert_eq!((skipped.to_string(), skipped.revoked), (revoked, true));
+    let recorded = record_revocations(&server.url, None, &team).await.unwrap();
+    assert_eq!(recorded, Recorded { keys: Vec::new(), cleared: vec![bob_entry.clone()] });
+    assert_eq!(kv.get(&bob_entry).await.unwrap(), None);
+
+    // An entry holding another key than the revoked one, as a renewal puts, is kept.
+    let renewed = Own::from_creds(Some(&server.creds_as(&bob, Role::Human))).unwrap().unwrap();
+    bob_kv.put(&bob_entry, renewed.jwt.clone().into()).await.unwrap();
+    assert_eq!(record_revocations(&server.url, None, &team).await.unwrap(), Recorded::default());
+    assert_eq!(kv.get(&bob_entry).await.unwrap().as_deref(), Some(renewed.jwt.as_bytes()));
+    let skipped = directory.devices(std::slice::from_ref(&bob)).await.unwrap().skipped;
+    assert!(skipped.iter().all(|s| !s.revoked), "{skipped:?}");
+
+    // Readers of the directory still warn of an entry whose key is neither known nor revoked.
+    assert!(
+        directory.devices(std::slice::from_ref(&alice)).await.unwrap().skipped.iter().any(|s| !s.revoked),
+        "alice's decoy entries are skipped and not taken as revoked"
+    );
 
     // A hub out of reach leaves the records to the next push.
     let port = ants_test_support::free_port();
     let unreachable = format!("nats://127.0.0.1:{port}");
     revoke::revoke(&team, None, &[KeyPair::new_user().public_key()]).unwrap();
     assert!(record_revocations(&unreachable, None, &team).await.is_err());
-    assert_eq!(record_revocations(&server.url, None, &team).await.unwrap().len(), 1);
+    assert_eq!(record_revocations(&server.url, None, &team).await.unwrap().keys.len(), 1);
 }
 
 /// Before any human put a key, the directory is empty, not an error.

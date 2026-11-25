@@ -62,6 +62,20 @@ pub struct Skipped {
     /// Its key in the bucket.
     pub entry: String,
     pub reason: String,
+    /// Whether it is skipped only as its key has a revocation record, which `ants auth push` clears it for.
+    pub revoked: bool,
+}
+
+impl Skipped {
+    /// Log that its key is not used: a revoked device's entry at debug, as its revocation is recorded, any other as a
+    /// warning.
+    fn log(&self) {
+        if self.revoked {
+            tracing::debug!("{self}; its key is not used");
+        } else {
+            tracing::warn!("{self}; its key is not used");
+        }
+    }
 }
 
 impl fmt::Display for Skipped {
@@ -199,7 +213,7 @@ impl Directory {
             match self.check(entry, &jwt, now, |user_key| revoked.contains(user_key)) {
                 Ok(device) => devices.verified.push(device),
                 Err(skipped) => {
-                    tracing::warn!("{skipped}; its key is not used");
+                    skipped.log();
                     devices.skipped.push(skipped);
                 }
             }
@@ -266,7 +280,7 @@ impl Directory {
     }
 
     fn skipped(&self, skipped: Skipped) -> Lookup {
-        tracing::warn!("{skipped}; its key is not used");
+        skipped.log();
         Lookup::Skipped(skipped)
     }
 
@@ -277,7 +291,7 @@ impl Directory {
         now: u64,
         revoked: impl Fn(&str) -> bool,
     ) -> Result<VerifiedDevice, Skipped> {
-        let skip = |reason: String| Skipped { entry: entry.to_owned(), reason };
+        let skip = |reason: String| Skipped { entry: entry.to_owned(), reason, revoked: false };
         let (human, device) =
             device_entry_of(entry).ok_or_else(|| skip("not the key of a device's entry".to_owned()))?;
         let jwt = std::str::from_utf8(jwt).map_err(|_| skip("not a user JWT".to_owned()))?;
@@ -290,7 +304,7 @@ impl Directory {
 }
 
 fn revoked_entry(entry: &str, user_key: &str) -> Skipped {
-    Skipped { entry: entry.to_owned(), reason: format!("its credentials {user_key} are revoked") }
+    Skipped { entry: entry.to_owned(), reason: format!("its credentials {user_key} are revoked"), revoked: true }
 }
 
 /// Seconds since the epoch.

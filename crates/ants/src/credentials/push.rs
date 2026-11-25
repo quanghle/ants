@@ -190,10 +190,16 @@ pub(crate) async fn push_and_report(url: &str, domain: Option<&JsDomain>, dir: &
     pushed?;
     match devices::record_revocations(url, domain, dir).await {
         Ok(recorded) => {
-            if !recorded.is_empty() {
+            if !recorded.keys.is_empty() {
                 say.line(format!(
                     "recorded in {DEVICES_BUCKET} as revoked, so no message is sealed for their devices any more: {}",
-                    recorded.join(", ")
+                    recorded.keys.join(", ")
+                ));
+            }
+            if !recorded.cleared.is_empty() {
+                say.line(format!(
+                    "deleted from {DEVICES_BUCKET} the entries of devices whose keys are revoked: {}",
+                    recorded.cleared.join(", ")
                 ));
             }
             Ok(())

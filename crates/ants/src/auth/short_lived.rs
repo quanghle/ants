@@ -94,6 +94,16 @@ pub fn revoker_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String>
     short_lived_creds(dir, js_domain, Permissions::for_device_revoker())
 }
 
+/// Short-lived credentials deleting the device entries `entries` of revoked keys from the directory of encryption keys
+/// ([`Permissions::for_device_entry_remover`]).
+pub(crate) fn device_entry_remover_creds(
+    dir: &Path,
+    js_domain: Option<&JsDomain>,
+    entries: &[String],
+) -> Result<String> {
+    short_lived_creds(dir, js_domain, Permissions::for_device_entry_remover(entries))
+}
+
 /// Short-lived credentials that read and write the team directory ([`Permissions::for_team_keeper`]): `ants auth
 /// revoke` takes a revoked ant off its team with them, and `ants auth user` reads which names teams hold.
 pub(crate) fn team_keeper_creds(dir: &Path, js_domain: Option<&JsDomain>) -> Result<String> {

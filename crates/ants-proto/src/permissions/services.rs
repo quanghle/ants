@@ -153,10 +153,11 @@ impl Permissions {
 
     /// What the short-lived credentials `ants auth revoke` and `ants auth push` issue themselves from the account key
     /// allow, to say in [`DEVICES_BUCKET`] (which `ants init` creates) which keys of humans' credentials are revoked:
-    /// reading and putting the revocation records ([`subject::revoked_devices`]) and nothing else of it, with the
-    /// replies of its JetStream requests under [`ENROLL_INBOX`]. No other credentials put a revocation record. They also delete
-    /// the identity record and shared settings of an ant revoked whole ([`IDENTITIES_BUCKET`]), first reading the
-    /// identity record and preserving its growth by sense id.
+    /// reading its entries, which every human reads too, and putting the revocation records
+    /// ([`subject::revoked_devices`]) and nothing else of it, with the replies of its JetStream requests under
+    /// [`ENROLL_INBOX`]. No other credentials put a revocation record. They also delete the identity record and shared
+    /// settings of an ant revoked whole ([`IDENTITIES_BUCKET`]), first reading the identity record and preserving its
+    /// growth by sense id.
     pub fn for_device_revoker() -> Self {
         let devices = kv_stream(DEVICES_BUCKET);
         let revoked = subject::revoked_devices();
@@ -167,7 +168,7 @@ impl Permissions {
             publish: vec![
                 "$JS.API.INFO".to_owned(),
                 format!("$JS.API.STREAM.INFO.{devices}"),
-                format!("$JS.API.DIRECT.GET.{devices}.{revoked}"),
+                format!("$JS.API.DIRECT.GET.{devices}.{}", subject::kv(DEVICES_BUCKET, "*.*")),
                 revoked,
                 format!("$JS.API.DIRECT.GET.{identities}.{records}"),
                 format!("$JS.API.DIRECT.GET.{identities}.{growth}"),
@@ -177,6 +178,16 @@ impl Permissions {
             ],
             subscribe: vec![format!("{ENROLL_INBOX}.>")],
         }
+    }
+
+    /// What the short-lived credentials `ants auth revoke` and `ants auth push` issue themselves from the account key
+    /// allow, once [`Permissions::for_device_revoker`] read that the device entries `entries` (`<human>.<device>`, as
+    /// [`crate::device_entry_key`] makes them) of [`DEVICES_BUCKET`] still hold the user JWTs of revoked keys: deleting
+    /// those entries and no other, with the replies of its JetStream requests under [`ENROLL_INBOX`].
+    pub fn for_device_entry_remover(entries: &[String]) -> Self {
+        let mut publish = vec!["$JS.API.INFO".to_owned(), format!("$JS.API.STREAM.INFO.{}", kv_stream(DEVICES_BUCKET))];
+        publish.extend(entries.iter().map(|entry| subject::kv(DEVICES_BUCKET, entry)));
+        Self { publish, subscribe: vec![format!("{ENROLL_INBOX}.>")] }
     }
 
     /// What the short-lived credentials `ants auth revoke` and the membership sweep issue themselves from the account
