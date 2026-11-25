@@ -829,3 +829,87 @@ async fn a_bad_mcp_config_in_args_fails_the_start() {
     }
     let _ = std::fs::remove_dir_all(scratch);
 }
+
+/// The command, quoted for a shell, starting `program` in a session of its own (`setsid`), as Claude Code runs a
+/// command in the background.
+fn setsid(program: &str) -> String {
+    format!("perl -MPOSIX -e 'POSIX::setsid() or die; exec @ARGV' {program}")
+}
+
+/// A process this test started, killed when dropped, should the test fail before it is gone.
+struct Killed(rustix::process::Pid);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = rustix::process::kill_process(self.0, rustix::process::Signal::KILL);
+    }
+}
+
+/// The pid written to `file` in `dir`, once it is.
+async fn written_pid(dir: &std::path::Path, file: &str) -> rustix::process::Pid {
+    let path = dir.join(file);
+    let mut pid = None;
+    ants_test_support::eventually_within(Duration::from_secs(10), file, async || {
+        pid = std::fs::read_to_string(&path).ok().and_then(|text| text.trim().parse().ok());
+        pid.is_some()
+    })
+    .await;
+    rustix::process::Pid::from_raw(pid.unwrap()).unwrap()
+}
+
+/// Wait for process `pid` to be gone, within the grace period of what a session left running and a second.
+async fn gone(pid: rustix::process::Pid, what: &str) {
+    let limit = crate::harness::native::leftovers::GRACE + Duration::from_secs(1);
+    ants_test_support::eventually_every(Duration::from_millis(20), limit, what, async || {
+        rustix::process::test_kill_process(pid).is_err()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_closed_claude_session_ends_what_it_ran_in_the_background() {
+    if !ants_test_support::have("perl") {
+        return;
+    }
+    let native = Fixture::new("claude-leftovers", "");
+    let pid = native.dir.join("child.pid");
+    let background = format!("!bg echo $$ > '{}'; exec {}", pid.display(), setsid("sh -c 'while :; do sleep 1; done'"));
+    native.script(None, &[vec![background, signed_in()]]);
+    let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
+    let child = Killed(written_pid(&native.dir, "child.pid").await);
+    assert!(native.cli.env(2, crate::harness::native::leftovers::TAG).is_some(), "the CLI's run is tagged");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(rustix::process::test_kill_process(child.0).is_ok(), "the loop runs while the session does");
+    session.close().await;
+    gone(child.0, "the loop run in the background").await;
+}
+
+#[tokio::test]
+async fn what_a_killed_claude_left_running_ends_once_its_session_is_released() {
+    if !ants_test_support::have("perl") {
+        return;
+    }
+    let native = Fixture::new("claude-killed-leftovers", "");
+    let looping = crate::harness::native::leftovers::tests::looping();
+    let program = std::iter::once(looping.get_program())
+        .chain(looping.get_args())
+        .map(|arg| format!("'{}'", arg.to_str().unwrap()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (cli, child) = (native.dir.join("cli.pid"), native.dir.join("child.pid"));
+    let orphan = format!(
+        "!sh echo $PPID > '{}'; ANTS_TEST_LOOP=1 {} > /dev/null 2>&1 & echo $! > '{}'",
+        cli.display(),
+        setsid(&program),
+        child.display()
+    );
+    native.script(None, &[vec![orphan, signed_in()]]);
+    let session = Session::start(&native.launch(ModelSettings::default()), None).await.unwrap();
+    let cli = written_pid(&native.dir, "cli.pid").await;
+    let child = Killed(written_pid(&native.dir, "child.pid").await);
+    rustix::process::kill_process(cli, rustix::process::Signal::KILL).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(rustix::process::test_kill_process(child.0).is_ok(), "the loop outlives the CLI, reparented");
+    session.close().await;
+    gone(child.0, "the loop left running").await;
+}

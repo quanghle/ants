@@ -134,8 +134,10 @@ impl Stop {
 /// 1 s up to 60 s while it keeps failing; only an error of the ant's configuration
 /// ([`Misconfigured`]) ends it. While it waits, the ant's colony entry says why and when it is tried again
 /// ([`ants_proto::ColonyEntry::unserved`]), but for a built-in ant, whose entry would keep the other daemons serving it
-/// from taking over.
+/// from taking over. The first call of a process ends, in the background, what native harness CLIs of a daemon gone
+/// left running (`harness::native::sweep_at_start`).
 pub async fn run_until(config: Config, stop: &Stop, restarts: &Restarts, providers: &Providers) -> Result<()> {
+    crate::harness::native::sweep_at_start();
     let _serving = crate::monitoring::metrics::ant(&config.ant).serving();
     let _served = restarts.serve(&config.ant);
     let harness = &config.harness.harness;

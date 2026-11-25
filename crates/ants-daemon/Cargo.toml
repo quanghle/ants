@@ -53,7 +53,7 @@ security-framework = { version = "3.7.0", default-features = false }
 # The Windows Credential Manager holding NKey seeds (crate::keystore), the MCP pipe's access list (crate::ipc) and the
 # memory available (crate::pressure).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 ants-sense = { workspace = true, features = ["test-support"] }

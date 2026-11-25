@@ -19,6 +19,7 @@ mod codex;
 mod copilot;
 mod failure;
 mod io;
+mod leftovers;
 mod rpc;
 #[cfg(test)]
 mod stub;
@@ -41,6 +42,7 @@ pub(crate) use cli::{Cli, is_flag};
 pub(crate) use failure::{context_overflow, failed, quota_exhausted, rate_limited, signed_out, unsupported};
 pub(crate) use io::is_loopback;
 pub(crate) use io::{JsonLines, JsonWriter, Process};
+pub(crate) use leftovers::sweep_at_start;
 #[cfg(test)]
 pub(crate) use rpc::RpcError;
 pub(crate) use rpc::{Incoming, Rpc};

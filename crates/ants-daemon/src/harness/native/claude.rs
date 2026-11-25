@@ -440,8 +440,12 @@ impl Drop for ClaudeSession {
                 let interrupt = control_request("ants-close", &interrupt(cancel_queued));
                 let _ = shared.writer.send(&interrupt).await;
             }
+            let mut process = shared.process.lock().await.take();
+            // What Claude Code runs in the background is reparented once it exits, which closing its stdin makes it do.
+            if let Some(process) = process.as_mut() {
+                process.walk().await;
+            }
             let _ = shared.writer.close().await;
-            let process = shared.process.lock().await.take();
             if let Some(mut process) = process {
                 process.stop(STOP_GRACE).await;
             }

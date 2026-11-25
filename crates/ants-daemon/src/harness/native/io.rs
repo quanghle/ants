@@ -14,6 +14,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, 
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use super::Cli;
+use super::leftovers::Leftovers;
 use crate::sync::MutexExt as _;
 
 /// The last bytes of a process's stderr, and the task reading it.
@@ -97,12 +98,14 @@ async fn drain(stderr: impl AsyncRead + Unpin, name: String, tail: Arc<Mutex<Vec
 }
 
 /// A running native CLI. Dropped while it runs, it is killed with what it started unless it exits within a second, as
-/// one does whose stdin closed.
+/// one does whose stdin closed. Once it ended, what it left running ends too ([`Leftovers`]).
 pub(crate) struct Process {
     name: String,
     pid: Option<u32>,
     child: Option<Child>,
     stderr: Option<Stderr>,
+    /// None once released.
+    leftovers: Option<Leftovers>,
 }
 
 impl Process {
@@ -113,8 +116,10 @@ impl Process {
         program: &Path,
         mut command: Command,
     ) -> Result<(Self, ChildStdin, ChildStdout), Error> {
+        let mut leftovers = Leftovers::tag(name, &mut command);
         let mut child =
             command.spawn().map_err(|e| super::failed(format!("{name}: starting {}: {e}", program.display())))?;
+        leftovers.follow(&child);
         let stderr = child.stderr.take().map(|stderr| {
             let tail = Arc::new(Mutex::new(VecDeque::new()));
             let task = tokio::spawn(drain(stderr, name.to_owned(), tail.clone()));
@@ -123,7 +128,9 @@ impl Process {
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(super::failed("no stdio"));
         };
-        Ok((Self { name: name.to_owned(), pid: child.id(), child: Some(child), stderr }, stdin, stdout))
+        let process =
+            Self { name: name.to_owned(), pid: child.id(), child: Some(child), stderr, leftovers: Some(leftovers) };
+        Ok((process, stdin, stdout))
     }
 
     /// The last of what it wrote to stderr.
@@ -150,6 +157,9 @@ impl Process {
             Some(child) => tokio::time::timeout(EXIT_GRACE, child.wait()).await.ok().and_then(Result::ok),
             None => None,
         };
+        if status.is_some() {
+            self.release().await;
+        }
         if let Some((_, task)) = self.stderr.as_mut() {
             // What the stderr reader kept so far serves when it does not finish in time.
             let _ = tokio::time::timeout(EXIT_GRACE, task).await;
@@ -169,32 +179,74 @@ impl Process {
     /// Wait up to `grace` for it to exit, as one does whose stdin closed, then kill it and what it started. Its exit
     /// status, if it exited on its own.
     pub(crate) async fn stop(&mut self, grace: Duration) -> Option<ExitStatus> {
+        self.walk().await;
         let child = self.child.as_mut()?;
         let status = tokio::time::timeout(grace, child.wait()).await.ok().and_then(Result::ok);
         if status.is_none() {
             kill(self.pid, child);
             let _ = child.wait().await;
         }
+        self.release().await;
         status
+    }
+
+    /// Walk its descendants while it still runs, to end those left running once it ended: before what makes it exit,
+    /// as closing its stdin.
+    pub(crate) async fn walk(&mut self) {
+        if let Some(leftovers) = self.leftovers.as_mut()
+            && self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        {
+            leftovers.walk().await;
+        }
+    }
+
+    /// End what it left running, once it ended.
+    async fn release(&mut self) {
+        if let Some(leftovers) = self.leftovers.take() {
+            leftovers.release().await;
+        }
     }
 }
 
 impl Drop for Process {
     fn drop(&mut self) {
         let Some(mut child) = self.child.take() else { return };
-        if matches!(child.try_wait(), Ok(Some(_))) {
+        let leftovers = self.leftovers.take();
+        let exited = matches!(child.try_wait(), Ok(Some(_)));
+        if exited && leftovers.is_none() {
             return;
         }
         let pid = self.pid;
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
+                // Dropped unpolled, as on the runtime's shutdown, the leftovers go first, walked while the CLI runs.
+                let held = (leftovers, child);
                 runtime.spawn(async move {
-                    if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_err() {
-                        kill(pid, &mut child);
+                    let (mut leftovers, mut child) = held;
+                    if !exited {
+                        if let Some(leftovers) = leftovers.as_mut() {
+                            leftovers.walk().await;
+                        }
+                        if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_err() {
+                            kill(pid, &mut child);
+                            let _ = child.wait().await;
+                        }
+                    }
+                    if let Some(leftovers) = leftovers {
+                        leftovers.release().await;
                     }
                 });
             }
-            Err(_) => kill(pid, &mut child),
+            Err(_) => {
+                let mut leftovers = leftovers;
+                if !exited {
+                    if let Some(leftovers) = leftovers.as_mut() {
+                        leftovers.walk_blocking();
+                    }
+                    kill(pid, &mut child);
+                }
+                drop(leftovers);
+            }
         }
     }
 }
