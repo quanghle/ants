@@ -65,6 +65,7 @@ async fn the_channel_jobs_create_change_and_delete_as_ants_channel_does() {
         account: None,
         keyring: None,
         admin: Err("unused".into()),
+        reach: nats.reach(),
     };
     let mut exec = Exec::new(ctx);
     let mut m = model();

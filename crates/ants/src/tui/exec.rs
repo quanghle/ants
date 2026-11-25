@@ -1,8 +1,8 @@
 //! What the command bar's sends and slash commands do over the CLI's connection, in the background while the UI goes
 //! on: the same library code as `ants ask`, `ants post`, `ants notes`, `ants answer`, `ants react`, `ants cancel`,
 //! `ants thread done|title|pin|mute...`, `ants channel create|set|add|remove|delete`, `ants dead replay|drop`, `ants
-//! notify` ([`super::notify`]), `ants remind list`
-//! ([`super::remind`]) and `ants trail` ([`super::trail`]) run, each returning the line those print and the warnings
+//! notify` ([`super::notify`]), `ants remind list` ([`super::remind`]), `ants trail` ([`super::trail`]) and `ants
+//! assistant enable|show|disable|set|clear|allow` ([`super::assistant`]) run, each returning the line those print and the warnings
 //! they log. The sends are in [`send`].
 
 use std::path::PathBuf;
@@ -23,6 +23,8 @@ use super::work::entries::{latest, waiting};
 use super::{attach, notify, remind, trail};
 use crate::admin::orders;
 use crate::admin::pause;
+use crate::cmd::assistant::AssistantCommand;
+use crate::connection::Reach;
 use crate::messages::attachments::File;
 use crate::messages::forward;
 use crate::messages::send as cli;
@@ -52,6 +54,8 @@ pub struct Ctx {
     pub keyring: Option<Arc<Keyring>>,
     /// The human's admin credentials, which sign admin orders, or why there are none.
     pub admin: Result<orders::Admin, String>,
+    /// What the CLI's connection is made of, for the commands that connect as the CLI does (`ants assistant`).
+    pub reach: Reach,
 }
 
 impl Ctx {
@@ -140,6 +144,8 @@ pub enum Job {
         channel: ChannelId,
         manage: crate::channel::Manage,
     },
+    /// What `ants assistant enable|show|disable|set|clear|allow` does, never asking.
+    Assistant(AssistantCommand),
     /// Change `team` as `ants team add|remove|set` does, refused as it refuses it.
     Team {
         team: UserId,
@@ -402,6 +408,7 @@ impl Job {
                 let managed = manage.run(&ctx.js, &ctx.me, ctx.domain.as_ref(), &channel).await?;
                 Ok(Done { line: managed.line, warnings: managed.warnings, channel: Some(channel), ..Done::default() })
             }
+            Self::Assistant(command) => super::assistant::run(ctx, command).await,
             Self::Team { team, change } => change_team(ctx, &team, &change).await,
             Self::ChannelNotify { channel, level } => {
                 Ok(Done::line(quiet::channel_notify(&ctx.js, me, &channel, level).await?))
@@ -647,7 +654,8 @@ mod tests {
         let meta = thread_meta::open(&nats[0], &js).await.map_err(|e| format!("{e:#}"));
         let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
         let admin = Err("unused".into());
-        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let reach = nats[0].reach();
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin, reach };
         let source = server.dir().join("menu.txt");
         std::fs::write(&source, b"soup").unwrap();
         let files: Rc<[File]> = attachments::read_all(std::slice::from_ref(&source)).unwrap().into();
@@ -742,7 +750,9 @@ mod tests {
 
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
         let (meta, admin) = (Err("unused".into()), Err("unused".into()));
-        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let reach = nats.reach();
+        let ctx =
+            Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin, reach };
         let done = job.clone().run(&ctx).await.unwrap();
         assert_eq!(done.line, format!("answered dev-a on thread {thread}"));
         let entries = thread::history(&js, &thread, None, thread::Activity::None, None).await.unwrap();
@@ -772,7 +782,9 @@ mod tests {
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
         let meta = Err("unused".into());
         let admin = Err("unused".into());
-        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let reach = nats.reach();
+        let ctx =
+            Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin, reach };
         let ask = Job::Ask { to: user("dev-a"), thread: None, text: "see the plan".into(), quote: None, team: None };
         let done = Job::Attached { job: Box::new(ask), files: Rc::clone(&files) }.run(&ctx).await.unwrap();
         assert!(
@@ -828,7 +840,9 @@ mod tests {
         };
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
         let (meta, admin) = (Err("unused".into()), Err("unused".into()));
-        let ctx = Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let reach = nats.reach();
+        let ctx =
+            Ctx { client, js: js.clone(), me, domain: None, meta, sealing, account: None, keyring: None, admin, reach };
 
         let seq = bury().await;
         let done = Job::DeadReplay(seq).run(&ctx).await.unwrap();
@@ -884,7 +898,8 @@ mod tests {
         let (ants, task) = host_of_m1(&server, &js, true, Some(ConfigFile::new(path.clone(), triggers.edits()))).await;
         let (me, sealing) = (nats.me.clone(), Sealing::of(&nats));
         let (meta, admin) = (Err("unused".into()), orders::Admin::of(&nats).map_err(|e| format!("{e:#}")));
-        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let reach = nats.reach();
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin, reach };
         let mut m = crate::tui::test_support::model();
         let mut job = |text: String| match m.submit(text.clone(), chrono::Utc::now()) {
             Some(Action::Run(job, _)) => job,
@@ -935,7 +950,8 @@ mod tests {
             .unwrap();
         let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
         let (meta, admin) = (Err("unused".into()), Err("unused".into()));
-        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let reach = nats[0].reach();
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin, reach };
         let run = |change: Change| Job::Channel { channel: ops.clone(), change }.run(&ctx);
 
         let add = Change { add: vec![user("dev-b"), bob.clone()], ..Change::default() };
@@ -1006,7 +1022,8 @@ mod tests {
         ants_daemon::teams::modify(&kv, |d| d.create(team.clone(), None)).await.unwrap();
         let (me, sealing) = (nats[0].me.clone(), Sealing::of(&nats[0]));
         let (meta, admin) = (Err("unused".into()), Err("unused".into()));
-        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin };
+        let reach = nats[0].reach();
+        let ctx = Ctx { client, js, me, domain: None, meta, sealing, account: None, keyring: None, admin, reach };
         let run = |change: Change| Job::Team { team: backend.clone(), change }.run(&ctx);
 
         let done = run(Change { add: vec![user("dev-b")], ..Change::default() }).await.unwrap();

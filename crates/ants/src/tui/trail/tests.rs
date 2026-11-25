@@ -231,6 +231,7 @@ async fn human(server: &crate::test_support::Server, me: &UserId) -> Ctx {
         account: None,
         keyring: None,
         admin: Err("unused".into()),
+        reach: nats.reach(),
     }
 }
 

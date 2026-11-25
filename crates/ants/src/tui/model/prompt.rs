@@ -10,7 +10,7 @@ use super::{Action, Data, Key, Model};
 use crate::tui::approvals::{self, Asking};
 use crate::tui::help::Help;
 use crate::tui::react::{self, Pick, Picker};
-use crate::tui::{catchup, clipboard, dead, interrupt, notices, snooze, trail};
+use crate::tui::{assistant, catchup, clipboard, dead, interrupt, notices, snooze, trail};
 
 /// A prompt in the footer taking the keys, at most one at a time.
 #[derive(Debug)]
@@ -21,6 +21,8 @@ pub enum Prompt {
     Interrupt(interrupt::Confirm),
     /// The dead letter `/dead drop` picked, waiting for y.
     Drop(dead::Letter),
+    /// `/assistant disable` without --retire, waiting for y to retire the dedicated assistant too or n not to.
+    Disable(assistant::Disabling),
     /// The run of a trail `/trail run` planned, waiting for y to start, its summary in a box over the view.
     Start(trail::Planned),
     /// How long to snooze a thread from home, or when to be reminded of it, being asked.
@@ -34,6 +36,7 @@ impl Prompt {
             Self::React(picker) => picker.line(),
             Self::Interrupt(confirm) => confirm.line(),
             Self::Drop(letter) => letter.line(),
+            Self::Disable(disabling) => disabling.line(),
             Self::Start(planned) => planned.line(),
             Self::Snooze(prompt) => prompt.line(data),
         }
@@ -64,6 +67,7 @@ impl Prompt {
             },
             Self::Interrupt(confirm) => (None, confirm.key(key, model)),
             Self::Drop(letter) => (None, letter.key(key, model)),
+            Self::Disable(disabling) => (None, disabling.key(key, model)),
             Self::Start(planned) => {
                 let (planned, action) = planned.key(key, model);
                 (planned.map(Self::Start), action)
@@ -201,7 +205,10 @@ impl Model {
     /// Whether text pasted is dropped: an overlay shows, or a prompt only answered by keys asks.
     pub(super) fn drops_paste(&self) -> bool {
         !self.overlays.is_empty()
-            || matches!(self.prompt, Some(Prompt::Interrupt(_) | Prompt::Drop(_) | Prompt::Start(_)))
+            || matches!(
+                self.prompt,
+                Some(Prompt::Interrupt(_) | Prompt::Drop(_) | Prompt::Disable(_) | Prompt::Start(_))
+            )
     }
 
     /// Take `line` pasted in the prompt, if one asks for text: whether it took it.

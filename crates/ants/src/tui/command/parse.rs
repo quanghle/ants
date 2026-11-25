@@ -8,6 +8,7 @@ use chrono::TimeDelta;
 
 use crate::admin::orders::{add, clone};
 use crate::channel::Manage;
+use crate::cmd::assistant::AssistantCommand;
 use crate::cmd::channel::ChannelCommand;
 use crate::threads::thread_meta::Marking;
 use crate::tui::exec::{AddAnt, CloneAnt};
@@ -126,6 +127,14 @@ pub const COMMANDS: &[Row] = &[
         Needs::Nothing,
     ),
     row(
+        "assistant",
+        "enable [--name NAME] [--harness HARNESS] [--model MODEL] [--on MACHINE] | show [HUMAN] | disable [--retire] \
+         [--name NAME] | set ANT | clear | allow [RULE...] | allow --remove RULE... | allow --clear",
+        "enable, show or disable the human's assistant, designate or withdraw it, or sign its pre-allow rules, as ants \
+         assistant does, with its flags; disable asks y before retiring the dedicated one",
+        Needs::Nothing,
+    ),
+    row(
         "dead",
         "replay [SEQ] | drop [SEQ]",
         "send a dead letter (the one selected, else the thread's latest) to its ant again, or drop it once y confirms",
@@ -220,6 +229,9 @@ pub enum Slash {
         channel: ChannelId,
         manage: Manage,
     },
+    /// Enable, show, disable, designate or withdraw the human's assistant, or sign its pre-allow rules, as `ants
+    /// assistant` does.
+    Assistant(AssistantCommand),
     Dead(Dead),
     Trail(Trail),
     Quit,
@@ -394,6 +406,7 @@ fn slash(text: &str) -> Result<Slash, String> {
             ant.strip_prefix('@').unwrap_or(&ant).parse().map(Slash::Retire).map_err(|e| format!("{e}"))
         }
         "channel" => channel(args).map_err(|why| why.unwrap_or_else(usage)),
+        "assistant" => assistant(args).map(Slash::Assistant).map_err(|why| why.unwrap_or_else(usage)),
         "dead" => dead(args).map(Slash::Dead).map_err(|why| why.unwrap_or_else(usage)),
         "trail" => trail::read(args).map(Slash::Trail).map_err(|why| why.unwrap_or_else(usage)),
         "quit" => bare(Slash::Quit),
@@ -479,6 +492,15 @@ fn channel(args: &str) -> Result<Slash, Option<String>> {
     let command: ChannelCommand = subcommand("/channel", args)?;
     let (channel, manage) = command.managed().ok_or(None)?.map_err(|e| Some(format!("{e:#}")))?;
     Ok(Slash::Channel { channel, manage })
+}
+
+/// What `/assistant`'s `args` ask, read as `ants assistant enable|show|disable|set|clear|allow` reads its words, or
+/// why not: None for its usage.
+fn assistant(args: &str) -> Result<AssistantCommand, Option<String>> {
+    if !matches!(first_word(args).0, "enable" | "show" | "disable" | "set" | "clear" | "allow") {
+        return Err(None);
+    }
+    subcommand("/assistant", args)
 }
 
 fn goto(to: &str) -> Result<Goto, String> {
@@ -699,6 +721,10 @@ pub(super) mod tests {
             "USER,..." => "dev-a,@bob",
             "USER..." => "dev-a @bob",
             "CHANGES" => "--member dev-a,bob --no-owner --description 'Deploys and incidents'",
+            "HARNESS" => "claude",
+            "MODEL" => "gpt-5",
+            "HUMAN" => "@bob",
+            "RULE..." => "'dev-a/execute:cargo test*' '*/read:/work/*'",
             literal if literal.starts_with("--") || literal.chars().all(|c| c.is_ascii_lowercase()) => literal,
             other => panic!("no sample for {other}"),
         }

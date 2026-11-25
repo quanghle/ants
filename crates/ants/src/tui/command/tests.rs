@@ -13,6 +13,7 @@ use crate::tui::reads::Read;
 use crate::tui::test_support::{model, typed};
 use crate::tui::{nav, thread};
 
+mod assistant;
 mod attach;
 mod channel;
 mod notes;

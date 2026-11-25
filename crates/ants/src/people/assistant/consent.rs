@@ -23,6 +23,7 @@ use super::{CONFLICTS, after, designated, device_creds, signing_creds};
 use crate::cas;
 use crate::connection::Nats;
 use crate::people::humans;
+use crate::text::Say;
 use crate::tools::HeldAct;
 use crate::{auth, tools};
 
@@ -226,7 +227,14 @@ fn waiting_json(orders: &[AdminOrder], held: &[(ApprovalRequest, Vec<HeldAct>)])
 }
 
 /// `ants assistant allow [RULE...] [--remove] [--clear] [--json]`.
-pub async fn allow(nats: &Nats<'_>, rules: Vec<String>, remove: bool, clear: bool, json: bool) -> Result<()> {
+pub async fn allow(
+    nats: &Nats<'_>,
+    rules: Vec<String>,
+    remove: bool,
+    clear: bool,
+    json: bool,
+    say: &mut Say,
+) -> Result<()> {
     let human = &nats.me.id;
     let rules: Vec<String> = rules.iter().map(|r| r.trim().to_owned()).collect();
     for rule in &rules {
@@ -248,21 +256,18 @@ pub async fn allow(nats: &Nats<'_>, rules: Vec<String>, remove: bool, clear: boo
             let stored = stored.filter(|p| !p.rules.is_empty());
             let stand = stored.as_ref().is_some_and(|p| Some(&p.assistant) == assistant.as_ref());
             let (assistant, rules) = stored.map_or((None, Vec::new()), |p| (Some(p.assistant), p.rules));
-            println!(
-                "{}",
-                serde_json::json!({ "human": human, "assistant": assistant, "stand": stand, "rules": rules })
-            );
+            say.line(serde_json::json!({ "human": human, "assistant": assistant, "stand": stand, "rules": rules }));
             return Ok(());
         }
         match stored.filter(|p| !p.rules.is_empty()) {
             Some(p) if Some(&p.assistant) == assistant.as_ref() => {
-                println!("decisions of {} for {human} take effect unconfirmed on:", p.assistant);
+                say.line(format!("decisions of {} for {human} take effect unconfirmed on:", p.assistant));
                 for rule in &p.rules {
-                    println!("  {rule}");
+                    say.line(format!("  {rule}"));
                 }
             }
-            Some(p) => println!("{human} has rules for {}, no longer its assistant: none stand", p.assistant),
-            None => println!("{human} has no pre-allow rules"),
+            Some(p) => say.line(format!("{human} has rules for {}, no longer its assistant: none stand", p.assistant)),
+            None => say.line(format!("{human} has no pre-allow rules")),
         }
         return Ok(());
     }
@@ -297,11 +302,11 @@ pub async fn allow(nats: &Nats<'_>, rules: Vec<String>, remove: bool, clear: boo
     })
     .await?;
     if stored.rules.is_empty() {
-        println!("every decision of {assistant} for {human} waits for {human} to confirm it");
+        say.line(format!("every decision of {assistant} for {human} waits for {human} to confirm it"));
     } else {
-        println!("decisions of {assistant} for {human} take effect unconfirmed on:");
+        say.line(format!("decisions of {assistant} for {human} take effect unconfirmed on:"));
         for rule in &stored.rules {
-            println!("  {rule}");
+            say.line(format!("  {rule}"));
         }
     }
     Ok(())

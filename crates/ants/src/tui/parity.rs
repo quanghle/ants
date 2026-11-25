@@ -35,7 +35,6 @@ const SERVICE: &str = "a service, run on its own";
 const CREDENTIALS: &str = "the credentials files and keys of the machine running it";
 const MACHINE: &str = "sets up or checks the machine running it";
 const MOVING: &str = "moves an ant between machines: files, config file and provider data of the machine running it";
-const ASSISTANT: &str = "ants-waemb";
 const SEND: &str = "the command bar: `@user TEXT` starts a thread, a text alone replies on the open one";
 const POST: &str = "the command bar: `#channel TEXT` posts to a channel";
 
@@ -117,12 +116,12 @@ const CLI: &[(&str, Chat)] = &[
     ("remind list", Slash("reminders")),
     ("remind clear", Slash("unremind")),
     ("schedule list", Slash("schedules")),
-    ("assistant enable", Missing("ants-waemb")),
-    ("assistant disable", Missing("ants-waemb")),
-    ("assistant show", Missing("ants-waemb")),
-    ("assistant set", Missing(ASSISTANT)),
-    ("assistant clear", Missing(ASSISTANT)),
-    ("assistant allow", Missing(ASSISTANT)),
+    ("assistant enable", Slash("assistant")),
+    ("assistant disable", Slash("assistant")),
+    ("assistant show", Slash("assistant")),
+    ("assistant set", Slash("assistant")),
+    ("assistant clear", Slash("assistant")),
+    ("assistant allow", Slash("assistant")),
     ("assistant confirm", Press(View::Held, Key::Char('a'), "confirm")),
     ("assistant seal", Exempt("the assistant's enrollment as a device of the human, with a key of this machine")),
     ("assistant key", Exempt("prints or makes the encryption key of an ant of this machine's config file")),

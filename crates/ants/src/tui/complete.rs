@@ -1,6 +1,6 @@
 //! Completion in the command bar: `@` lists users and teams and `#` channels, narrowed by what follows them up to the cursor;
-//! after `/attach`, the paths of the directory typed; after `/channel`, `@` lists every ant and human,
-//! after a comma too. `/` at the start lists the palette ([`super::palette`]).
+//! after `/attach`, the paths of the directory typed; after `/channel` and `/assistant`, `@` lists every ant and
+//! human, after a comma too. `/` at the start lists the palette ([`super::palette`]).
 
 use std::collections::BTreeSet;
 
@@ -18,7 +18,7 @@ use super::style;
 const ROWS: usize = 8;
 
 /// The slash commands whose arguments name users, with the space after them.
-const MANAGING: [&str; 1] = ["/channel "];
+const MANAGING: [&str; 2] = ["/channel ", "/assistant "];
 
 /// A completion of the word at the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +96,7 @@ impl Model {
         if before == "/attach " {
             return super::attach::paths(&typed);
         }
-        // The arguments of `/channel` name users, `--member` a list of them, whatever the view.
+        // The arguments of `/channel` and `/assistant` name users, `--member` a list of them, whatever the view.
         let managing = MANAGING.iter().any(|command| before.to_lowercase().starts_with(command));
         let (lead, typed) = match typed.rfind(',') {
             Some(at) if managing => typed.split_at(at + 1),

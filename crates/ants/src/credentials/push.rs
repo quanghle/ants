@@ -13,6 +13,7 @@ use futures::StreamExt as _;
 use super::revoke::apply;
 use crate::auth;
 use crate::people::devices;
+use crate::text::Say;
 
 /// The inbox prefix of [`push`], where the leaf nodes' system account uplinks may answer it.
 pub const PUSH_INBOX: &str = "_INBOX.ants-push";
@@ -129,53 +130,54 @@ fn answer(payload: &[u8]) -> (String, Option<String>) {
     (server, error)
 }
 
-/// Push the bus's account to the server at `url` ([`push`]), saying how to apply it otherwise on failure;
+/// Push the bus's account to the server at `url` ([`push`]), telling `say` where it applied, or how to apply it
+/// otherwise on failure;
 /// once it is applied, record in the hub's directory of encryption keys, in JetStream domain `domain` if it has one,
 /// the revoked keys of humans' credentials not recorded yet ([`devices::record_revocations`]).
-pub(crate) async fn push_and_report(url: &str, domain: Option<&JsDomain>, dir: &Path) -> Result<()> {
+pub(crate) async fn push_and_report(url: &str, domain: Option<&JsDomain>, dir: &Path, say: &mut Say) -> Result<()> {
     let pushed = match push(url, dir).await {
         Ok(pushed) => {
-            println!(
+            say.line(format!(
                 "account pushed to server {} ({url}); connections of revoked credentials are closed",
                 pushed.server
-            );
+            ));
             let applied: Vec<&str> =
                 pushed.others.iter().filter(|(_, error)| error.is_none()).map(|(name, _)| name.as_str()).collect();
             if !applied.is_empty() {
-                println!("also applied by: {}", applied.join(", "));
+                say.line(format!("also applied by: {}", applied.join(", ")));
             }
             for (name, error) in &pushed.others {
                 if let Some(error) = error {
-                    println!("not applied by {name}: {error}");
+                    say.line(format!("not applied by {name}: {error}"));
                 }
             }
             let conf = dir.join(auth::SERVER_CONF);
             match pushed.kept {
-                Some(true) => println!(
+                Some(true) => say.line(format!(
                     "server {} keeps it across restarts (full resolver): copy {} to it only for changes besides the \
                      account's (operator, system account, max_control_line)",
                     pushed.server,
                     conf.display()
-                ),
-                Some(false) => println!(
+                )),
+                Some(false) => say.line(format!(
                     "server {0} keeps it in memory only: a restart brings back the account of its server.conf, so \
                      copy {1} to it and reload it (SIGHUP); for it to keep pushed accounts, add `resolver {{ type: \
                      full, dir: \"/ABSOLUTE/DIR\" }}` after its `include \"{2}\"` and restart it",
                     pushed.server,
                     conf.display(),
                     auth::SERVER_CONF
-                ),
-                None => println!(
+                )),
+                None => say.line(format!(
                     "server {} did not tell whether it keeps pushed accounts across restarts (`ants doctor` on this \
                      machine checks it); without a full resolver, copy {} to it and reload it (SIGHUP)",
                     pushed.server,
                     conf.display()
-                ),
+                )),
             }
-            println!(
+            say.line(
                 "leaf nodes not listed (offline, or with no system account uplink) did not apply it: run `ants auth \
                  push` again once they are connected, unless the hub keeps it (they then catch up within 10 s of \
-                 reconnecting)"
+                 reconnecting)",
             );
             Ok(())
         }
@@ -189,10 +191,10 @@ pub(crate) async fn push_and_report(url: &str, domain: Option<&JsDomain>, dir: &
     match devices::record_revocations(url, domain, dir).await {
         Ok(recorded) => {
             if !recorded.is_empty() {
-                println!(
+                say.line(format!(
                     "recorded in {DEVICES_BUCKET} as revoked, so no message is sealed for their devices any more: {}",
                     recorded.join(", ")
-                );
+                ));
             }
             Ok(())
         }
