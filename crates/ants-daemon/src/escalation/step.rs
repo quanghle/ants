@@ -88,12 +88,13 @@ pub(super) fn waits_for_turns(reason: EscalationReason) -> bool {
 /// Whether `stuck`, going to the members of the thread's `pending` escalation again, would only repeat it: stuck for
 /// want of turns ([`waits_for_turns`]) on another message than the one the escalation went out for at this level. In
 /// a channel every member woken by every post meets the spent budget, and each would send the same escalation once
-/// per post; a retry of the same message sends it again, so a failed send is not lost. Out of allowance on `today`
-/// (`YYYY-MM-DD`), a later UTC day than the one the escalation went out on, it is no repeat: the daily allowance came
-/// back at 00:00 UTC and was spent again, so a cap's escalation goes out once a UTC day until answered.
+/// per post; a retry of the same message sends it again, so a failed send is not lost. Out of a daily or pool cap's
+/// allowance ([`Stuck::daily`]) on `today` (`YYYY-MM-DD`), a later UTC day than the one the escalation went out on,
+/// it is no repeat: the allowance came back at 00:00 UTC and was spent again, so such a cap's escalation goes out once
+/// a UTC day until answered. A thread cap, which midnight does not renew, waits as a spent turn budget does.
 pub(super) fn repeats(pending: &Pending, stuck: &Stuck, today: &str) -> bool {
     let Some(sent) = pending.sent.as_ref().filter(|_| waits_for_turns(stuck.reason)) else { return false };
-    sent.id != stuck.id && (stuck.reason != EscalationReason::Cap || sent.day == today)
+    sent.id != stuck.id && (!(stuck.reason == EscalationReason::Cap && stuck.daily) || sent.day == today)
 }
 
 /// Whether `envelope` passes the escalation `carried` of the ant's thread on to a human: from the assistant leading the

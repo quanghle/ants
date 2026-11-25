@@ -12,7 +12,7 @@ use crate::bus;
 use crate::channel::{Context, Earlier, Threads};
 use crate::delivery::attempts::{GivenFiles, Reply, StoredFiles};
 use crate::escalation::{self, Route};
-use crate::limits::caps::AskedStep;
+use crate::limits::caps::{AskedStep, Limit};
 use crate::monitoring::status;
 use crate::people::humans::Registry;
 use crate::stream::notes;
@@ -75,7 +75,7 @@ impl Inbox<'_> {
         Handling { incoming, msg, seq }: Handling<'_>,
         (why, reason): (NoReplyWhy, Option<String>),
         text: String,
-        limit: Option<&String>,
+        limit: Option<&Limit>,
     ) -> Result<()> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
@@ -84,7 +84,7 @@ impl Inbox<'_> {
         let record = Timeline::new(self.ant.clone(), thread.clone(), envelope.id, vec![entry], 0);
         crate::monitoring::timeline::publish(self.js, &record).await;
         if let Some(limit) = limit {
-            self.escalate(incoming, limit, EscalationReason::Cap, seq, None).await?;
+            self.escalate_cap(incoming, limit, seq).await?;
         }
         if incoming.post.is_some()
             && let Err(e) = self.threads.seen(thread, seq).await
@@ -150,7 +150,7 @@ impl Inbox<'_> {
         read: Option<Context>,
         (text, title): (String, Option<String>),
         files: &mut Option<GivenFiles>,
-        limit: Option<&String>,
+        limit: Option<&Limit>,
     ) -> Result<Option<Reply>> {
         let envelope = &incoming.envelope;
         let thread = &envelope.thread_id;
@@ -186,7 +186,7 @@ impl Inbox<'_> {
                 let owner = owner.or_else(|| (!envelope.webhook).then(|| self.humans.default_human().clone()));
                 let Some(owner) = owner else {
                     if let Some(limit) = limit {
-                        self.escalate(incoming, limit, EscalationReason::Cap, seq, None).await?;
+                        self.escalate_cap(incoming, limit, seq).await?;
                     }
                     tracing::info!(%thread, webhook = %envelope.from, answer = text, "answered a webhook with no owner");
                     self.done(msg, seq).await?;

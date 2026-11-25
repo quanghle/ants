@@ -205,11 +205,39 @@ impl Warned {
     }
 }
 
+/// A limit or cap a prompt reached, and whether 00:00 UTC renews it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Limit {
+    /// What was reached, as the `[ants]` notice tells it.
+    pub why: String,
+    /// A daily or pool cap, renewed at 00:00 UTC: not a thread cap, which only a human's or the leader's message
+    /// renews, nor a limit of the prompt's own, such as its timeout.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub daily: bool,
+}
+
+impl Limit {
+    /// A limit no day renews: the prompt's own, such as its timeout or tool calls, or a thread cap.
+    pub fn of_prompt(why: String) -> Self {
+        Self { why, daily: false }
+    }
+
+    fn daily(why: String) -> Self {
+        Self { why, daily: true }
+    }
+}
+
+impl std::fmt::Display for Limit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
 /// What counting a harness's report found: the cap reached, if any, the warnings due, and the cost in US dollars the
 /// report added.
 #[derive(Debug, Default, PartialEq)]
 pub struct Recorded {
-    pub reached: Option<String>,
+    pub reached: Option<Limit>,
     pub warnings: Vec<Warning>,
     pub cost: f64,
 }
@@ -438,7 +466,7 @@ impl Ledger {
     }
 
     /// The cap the thread or the ant has reached, if any.
-    pub async fn reached(&self, thread: &ThreadId) -> Result<Option<String>> {
+    pub async fn reached(&self, thread: &ThreadId) -> Result<Option<Limit>> {
         self.reached_on(thread, &today()).await
     }
 
@@ -447,7 +475,7 @@ impl Ledger {
         self.record_on(thread, spend, &today()).await
     }
 
-    async fn reached_on(&self, thread: &ThreadId, today: &str) -> Result<Option<String>> {
+    async fn reached_on(&self, thread: &ThreadId, today: &str) -> Result<Option<Limit>> {
         if !self.caps.any() && self.pool.is_none() {
             return Ok(None);
         }
@@ -583,48 +611,57 @@ impl Ledger {
     }
 
     /// The thread cap `thread` reached, if any.
-    fn thread_check(&self, thread: &ThreadSpend) -> Option<String> {
+    fn thread_check(&self, thread: &ThreadSpend) -> Option<Limit> {
         let caps = &self.caps;
         let since = "since a human's last message";
         if let Some(cap) = caps.thread_tokens.filter(|cap| thread.tokens >= *cap) {
-            return Some(format!("Thread token cap reached ({} of {cap} tokens {since})", thread.tokens));
+            return Some(Limit::of_prompt(format!(
+                "Thread token cap reached ({} of {cap} tokens {since})",
+                thread.tokens
+            )));
         }
         if let Some(cap) = caps.thread_cost.filter(|cap| thread.cost >= *cap) {
-            return Some(format!("Thread cost cap reached ({:.2} of {cap:.2} {since})", thread.cost));
+            return Some(Limit::of_prompt(format!("Thread cost cap reached ({:.2} of {cap:.2} {since})", thread.cost)));
         }
         None
     }
 
     /// The daily cap of the ant `day` reached, if any, holding all its threads.
-    fn day_check(&self, day: &DaySpend) -> Option<String> {
+    fn day_check(&self, day: &DaySpend) -> Option<Limit> {
         let caps = &self.caps;
         let resets = "today; resets at 00:00 UTC";
         let ant = &self.ant;
         if let Some(cap) = caps.daily_tokens.filter(|cap| day.tokens >= *cap) {
-            return Some(format!("Daily token cap of {ant} reached ({} of {cap} tokens {resets})", day.tokens));
+            return Some(Limit::daily(format!(
+                "Daily token cap of {ant} reached ({} of {cap} tokens {resets})",
+                day.tokens
+            )));
         }
         if let Some(cap) = caps.daily_cost.filter(|cap| day.cost >= *cap) {
-            return Some(format!("Daily cost cap of {ant} reached ({:.2} of {cap:.2} {resets})", day.cost));
+            return Some(Limit::daily(format!(
+                "Daily cost cap of {ant} reached ({:.2} of {cap:.2} {resets})",
+                day.cost
+            )));
         }
         None
     }
 }
 
 /// The pool cap `spent` reached, if any.
-fn check_pool(pool: &Pool, spent: Spent) -> Option<String> {
+fn check_pool(pool: &Pool, spent: Spent) -> Option<Limit> {
     let template = &pool.template;
     let by = "spent by its ants today; resets at 00:00 UTC";
     if let Some(cap) = pool.daily_tokens.filter(|cap| spent.tokens >= *cap) {
-        return Some(format!(
+        return Some(Limit::daily(format!(
             "Pool daily token cap of template {template} reached ({} of {cap} tokens {by})",
             spent.tokens
-        ));
+        )));
     }
     if let Some(cap) = pool.daily_cost.filter(|cap| spent.cost >= *cap) {
-        return Some(format!(
+        return Some(Limit::daily(format!(
             "Pool daily cost cap of template {template} reached ({:.2} of {cap:.2} {by})",
             spent.cost
-        ));
+        )));
     }
     None
 }
@@ -680,7 +717,7 @@ mod tests {
         assert_eq!(ledger.record_on(&t, &cost("s1", 0.25), DAY).await.unwrap().reached, None);
         let reached =
             ledger.record_on(&t, &cost("s2", 0.3), DAY).await.unwrap().reached.expect("a new session adds it all");
-        assert!(reached.starts_with("Thread cost cap reached (1.05 of 1.00"), "{reached}");
+        assert!(reached.why.starts_with("Thread cost cap reached (1.05 of 1.00") && !reached.daily, "{reached:?}");
         assert_eq!(ledger.reached_on(&thread(2), DAY).await.unwrap(), None, "other threads have their own");
     }
 
@@ -755,12 +792,15 @@ mod tests {
         let ledger = Ledger::memory(ant(), caps);
         let (t1, t2) = (thread(1), thread(2));
         let reached = ledger.record_on(&t1, &Spend::Tokens(120), DAY).await.unwrap().reached.unwrap();
-        assert!(reached.starts_with("Thread token cap reached (120 of 100"), "{reached}");
+        assert!(reached.why.starts_with("Thread token cap reached (120 of 100") && !reached.daily, "{reached:?}");
         ledger.fresh_allowance(&t1).await.unwrap();
         assert_eq!(ledger.reached_on(&t1, DAY).await.unwrap(), None);
         assert_eq!(ledger.record_on(&t2, &Spend::Tokens(90), DAY).await.unwrap().reached, None);
         let reached = ledger.record_on(&t1, &Spend::Tokens(50), DAY).await.unwrap().reached.unwrap();
-        assert!(reached.starts_with("Daily token cap of dev-a reached (260 of 250"), "{reached}");
+        assert!(
+            reached.why.starts_with("Daily token cap of dev-a reached (260 of 250") && reached.daily,
+            "{reached:?}"
+        );
         ledger.fresh_allowance(&t1).await.unwrap();
         assert!(ledger.reached_on(&t1, DAY).await.unwrap().is_some(), "the daily cap holds until the day ends");
     }
@@ -793,7 +833,10 @@ mod tests {
         let reached = ledger.record_on(&thread(1), &cost("s1", 1.0), DAY).await.unwrap().reached;
         assert_eq!(reached, None, "only the 0.25 added since the stored reading counts");
         let reached = ledger.record_on(&thread(2), &cost("s2", 0.5), DAY).await.unwrap().reached.unwrap();
-        assert!(reached.starts_with("Daily cost cap of dev-a reached (1.50 of 1.20"), "{reached}");
+        assert!(
+            reached.why.starts_with("Daily cost cap of dev-a reached (1.50 of 1.20") && reached.daily,
+            "{reached:?}"
+        );
         assert_eq!(ledger.reached_on(&thread(2), "2026-11-14").await.unwrap(), None);
     }
 
@@ -870,9 +913,10 @@ mod tests {
 
         let reached = lb.record_on(&thread(2), &Spend::Tokens(10), DAY).await.unwrap().reached.unwrap();
         assert_eq!(
-            reached,
+            reached.why,
             "Pool daily token cap of template worker reached (100 of 100 tokens spent by its ants today; resets at 00:00 UTC)"
         );
+        assert!(reached.daily, "renewed at 00:00 UTC");
         assert!(la.reached_on(&thread(3), DAY).await.unwrap().is_some(), "every member is held back");
         assert_eq!(la.reached_on(&thread(3), "2026-11-14").await.unwrap(), None, "until the next day");
         let restarted = ledger(&a);

@@ -184,6 +184,8 @@ pub struct Stuck {
     pub carried: Option<Escalation>,
     /// The channel of the post the ant got stuck on, if it was one; else that of the thread's escalation.
     pub channel: Option<ChannelId>,
+    /// Stuck on a cap 00:00 UTC renews, a daily or pool one (the `daily` of [`crate::limits::caps::Limit`]).
+    pub daily: bool,
 }
 
 impl Stuck {
@@ -191,7 +193,7 @@ impl Stuck {
     /// escalation.
     pub fn new(reason: EscalationReason, notice: Envelope, id: String, about: Option<&Envelope>) -> Self {
         let carried = about.and_then(|e| e.escalation.as_deref().cloned());
-        Self { reason, request_id: None, notice, id, carried, channel: None }
+        Self { reason, request_id: None, notice, id, carried, channel: None, daily: false }
     }
 
     /// Where the thread's escalation stands once `escalation` went out for it to `to`, about `summary`, under its
@@ -527,6 +529,7 @@ impl Escalator {
             id,
             carried: None,
             channel: pending.channel.clone(),
+            daily: false,
         }
     }
 

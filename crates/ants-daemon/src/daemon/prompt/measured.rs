@@ -8,7 +8,7 @@ use ants_proto::{CallCount, Envelope, PromptEnd, ThreadId, Timeline, TimelineEnd
 use crate::bus;
 use crate::harness::{SignedOut, Spend};
 use crate::limits::breaker::StartFailed;
-use crate::limits::caps::{Recorded, Warning};
+use crate::limits::caps::{Limit, Recorded, Warning};
 use crate::limits::ratelimit::Limited;
 use crate::worktrees::WorktreeFailed;
 
@@ -96,7 +96,7 @@ impl Inbox<'_> {
         &self,
         envelope: &Envelope,
         mut spend: tokio::sync::mpsc::UnboundedReceiver<Spend>,
-        reached: &mut Option<String>,
+        reached: &mut Option<Limit>,
         measured: &mut Measured,
     ) {
         while let Ok(spent) = spend.try_recv() {
@@ -108,7 +108,7 @@ impl Inbox<'_> {
 
     /// Count what the harness spent on the thread of `envelope`, warning a human of each cap nearly reached, and add
     /// its tokens and cost to `measured`. Returns the cap reached, if any.
-    pub(super) async fn record(&self, envelope: &Envelope, spent: &Spend, measured: &mut Measured) -> Option<String> {
+    pub(super) async fn record(&self, envelope: &Envelope, spent: &Spend, measured: &mut Measured) -> Option<Limit> {
         let thread = &envelope.thread_id;
         let recorded = self.ledger.record(thread, spent).await.unwrap_or_else(|e| {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing what the thread spent");

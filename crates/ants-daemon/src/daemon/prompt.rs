@@ -18,7 +18,7 @@ use crate::escalation::Stuck;
 use crate::files::Attached;
 use crate::harness::{Prompt, SignedOut, Spend, Steering};
 use crate::limits::breaker::StartFailed;
-use crate::limits::caps::AskedStep;
+use crate::limits::caps::{AskedStep, Limit};
 use crate::limits::fallback::OnFallback;
 use crate::limits::files;
 use crate::limits::overflow::ContextOverflow;
@@ -79,7 +79,7 @@ pub(super) struct Ran {
     /// Whether a tool call started, so tools may have run.
     pub(super) worked: bool,
     /// The cap the prompt's spend reached.
-    pub(super) reached: Option<String>,
+    pub(super) reached: Option<Limit>,
     /// The spend still to record.
     pub(super) spend: tokio::sync::mpsc::UnboundedReceiver<Spend>,
     /// The fallback the prompt ran on, `None` for the ant's own harness.
@@ -269,7 +269,7 @@ impl Inbox<'_> {
 
         // A human's cancel is no limit: the reply tells of it, and nothing is escalated for it.
         let cut = reply.cut.is_some() && !cut_by_cancel;
-        let limit = reply.cut.filter(|_| !cut_by_cancel).or(reached);
+        let limit = limit_of(reply.cut.filter(|_| !cut_by_cancel), reached);
         let unanswered = unanswered(completed, asked, own, self.unowned_wake(incoming));
         self.note_end(thread, &measured, end_of(cancelled_by.as_ref(), &limit, &unanswered), reply.rebuilt).await;
         let limit_notice =
@@ -367,7 +367,7 @@ impl Inbox<'_> {
         if let Some(limit) = limit
             && !self.humans.sender_role(envelope).is_human()
         {
-            self.escalate(incoming, &limit, EscalationReason::Cap, seq, None).await?;
+            self.escalate_cap(incoming, &limit, seq).await?;
         }
         Ok(Some(reply))
     }
@@ -510,12 +510,12 @@ impl Inbox<'_> {
         }
         match self.ledger.reached(thread).await {
             Ok(Some(cap)) if step => {
-                self.step_unanswered(h, &cap).await?;
+                self.step_unanswered(h, &cap.why).await?;
                 Ok(true)
             }
             Ok(Some(cap)) => {
-                // Out of allowance: the same, until a human or the escalation's leader answers, or the day ends.
-                self.escalate(incoming, &cap, EscalationReason::Cap, seq, None).await?;
+                // Out of allowance: the same, until a human or the escalation's leader answers, or a daily cap's day ends.
+                self.escalate_cap(incoming, &cap, seq).await?;
                 bus::double_ack(self.client, msg).await?;
                 self.marks.attempts.forget(seq).await;
                 Ok(true)
@@ -678,7 +678,7 @@ impl Inbox<'_> {
                 Some(spent) = spend.recv() => {
                     if let Some(cap) = self.record(envelope, &spent, &mut measured).await {
                         if let Some(stop) = stop_tx.take() {
-                            let _ = stop.send(cap.clone());
+                            let _ = stop.send(cap.why.clone());
                         }
                         reached = Some(cap);
                     }
@@ -725,6 +725,32 @@ impl Inbox<'_> {
         seq: u64,
         unposted: Option<&str>,
     ) -> Result<()> {
+        let stuck = self.stuck(incoming, why, reason, seq, unposted);
+        self.escalate_stuck(incoming, why, stuck).await
+    }
+
+    /// [`Self::escalate`] for `cap`, the limit or cap the thread reached ([`EscalationReason::Cap`]), telling the
+    /// escalation whether 00:00 UTC renews it.
+    pub(super) async fn escalate_cap(&self, incoming: &Incoming, cap: &Limit, seq: u64) -> Result<()> {
+        let stuck = self.stuck(incoming, &cap.why, EscalationReason::Cap, seq, None);
+        self.escalate_stuck(incoming, &cap.why, Stuck { daily: cap.daily, ..stuck }).await
+    }
+
+    async fn escalate_stuck(&self, incoming: &Incoming, why: &str, stuck: Stuck) -> Result<()> {
+        let escalated = self.escalator.escalate(stuck).await?;
+        tracing::info!(thread = %incoming.envelope.thread_id, why, %escalated, "escalated");
+        Ok(())
+    }
+
+    /// What the ant stuck on `incoming` for `reason` escalates ([`Self::escalate`]).
+    fn stuck(
+        &self,
+        incoming: &Incoming,
+        why: &str,
+        reason: EscalationReason,
+        seq: u64,
+        unposted: Option<&str>,
+    ) -> Stuck {
         let envelope = &incoming.envelope;
         let human = self.humans.owner_of(envelope);
         let last = match &incoming.post {
@@ -740,9 +766,7 @@ impl Inbox<'_> {
         let id = format!("escalation-{}-{seq}", self.ant);
         let stuck = Stuck::new(reason, notice, id, Some(envelope));
         let channel = incoming.post.as_ref().map(|posted| posted.post.channel.clone());
-        let escalated = self.escalator.escalate(Stuck { channel, ..stuck }).await?;
-        tracing::info!(thread = %envelope.thread_id, why, %escalated, "escalated");
-        Ok(())
+        Stuck { channel, ..stuck }
     }
 }
 
@@ -774,5 +798,30 @@ fn end_of<T, U>(cancelled_by: Option<&Cancel>, limit: &Option<T>, unanswered: &O
         PromptEnd::NoReply
     } else {
         PromptEnd::Replied
+    }
+}
+
+/// The limit a prompt was `cut` short for, if any, else the cap its spend `reached`: the cap it was cut for keeps
+/// whether 00:00 UTC renews it.
+fn limit_of(cut: Option<String>, reached: Option<Limit>) -> Option<Limit> {
+    match (cut, reached) {
+        (Some(cut), Some(cap)) if cut == cap.why => Some(cap),
+        (cut, reached) => cut.map(Limit::of_prompt).or(reached),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_prompt_cut_for_a_daily_cap_escalates_a_cap_midnight_renews() {
+        let daily = Limit { why: "Daily token cap of dev-a reached".to_owned(), daily: true };
+        assert_eq!(limit_of(Some(daily.why.clone()), Some(daily.clone())), Some(daily.clone()));
+        assert_eq!(limit_of(None, Some(daily.clone())), Some(daily.clone()), "reached as the prompt ended");
+        let timeout = "Prompt time limit reached (1800s)".to_owned();
+        let cut = limit_of(Some(timeout.clone()), Some(daily)).unwrap();
+        assert_eq!((cut.why, cut.daily), (timeout, false), "the prompt's own limit cut it first");
+        assert_eq!(limit_of(None, None), None);
     }
 }
