@@ -305,6 +305,7 @@ impl Page {
             nav::Item::Activity => Self::Work(work::Page::new(Filter { activity: true, ..Filter::default() })),
             nav::Item::Channel(channel) => Self::Channel(channel::Page::new(channel.clone())),
             nav::Item::Team(team) => Self::Team(team::Page::new(team.clone())),
+            nav::Item::NewTeam => Self::Team(team::Page::creating()),
             nav::Item::Ant(user) => Self::Ant(ant::Page::new(user.clone())),
             nav::Item::Person(user) => Self::Dm(dm::Page::new(user.clone())),
         }

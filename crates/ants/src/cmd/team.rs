@@ -1,10 +1,7 @@
 //! `ants team`: create, change, list, show and delete teams, as a human writing the team directory by
 //! compare-and-set, and telling observers what it changed on the human's status ([`ants_daemon::teams::tell`]).
 
-use std::collections::BTreeSet;
-
-use ants_daemon::teams::modify;
-use ants_proto::{Team, TeamChange, TeamDirectory, TeamRefusal, UserId};
+use ants_proto::{TeamChange, TeamDirectory, TeamRefusal, UserId};
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
@@ -13,6 +10,7 @@ use crate::ants::colony;
 use crate::completions;
 use crate::connection::Nats;
 use crate::people::humans;
+use crate::teams::change::{Change, Create};
 use crate::teams::{self, parse_name};
 
 #[derive(Subcommand, Debug)]
@@ -121,12 +119,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TeamCommand) -> Result<()> {
             }
             let changes = command.changes();
             change(nats, &js, &kv, command).await?;
-            if let Some(directory) = ants_daemon::teams::read_quickly(&kv).await {
-                ants_daemon::teams::tell(&client, &nats.me.id, &directory, &changes);
-                if let Err(e) = client.flush().await {
-                    tracing::debug!(error = %e, "telling the team change");
-                }
-            }
+            teams::change::tell(&client, &nats.me.id, &kv, &changes).await;
             Ok(())
         }
     }
@@ -202,103 +195,57 @@ async fn show(
     Ok(())
 }
 
-/// What a change of a team names, checked before writing: the ants among them, and the humans of the bus.
-struct Named {
-    known: BTreeSet<UserId>,
-    humans: ants_proto::Humans,
-}
-
-impl Named {
-    /// Read which of `names` are ants of the bus, refusing the humans among them.
-    async fn read(nats: &Nats<'_>, js: &async_nats::jetstream::Context, names: &[&UserId]) -> Result<Self> {
-        let humans = humans::load(js, &nats.me).await;
-        for name in names {
-            teams::check_not_human(name, &humans)?;
-        }
-        let known = teams::known_ants(js, nats.domain, names).await?;
-        Ok(Self { known, humans })
-    }
-}
-
-/// Every `ants team` subcommand that changes the directory, as the CLI's human.
+/// Every `ants team` subcommand that changes the directory, as the CLI's human, written as `ants chat` writes it
+/// ([`teams::change`]).
 async fn change(
     nats: &Nats<'_>,
     js: &async_nats::jetstream::Context,
     kv: &ants_daemon::records::direct_kv::DirectKv,
     command: TeamCommand,
 ) -> Result<()> {
-    let me = nats.me.id.clone();
+    let humans = humans::load(js, &nats.me).await;
+    let write = async |team: &UserId, change: Change| change.write(js, nats.domain, kv, team, &humans).await;
     let (id, warnings, added) = match command {
         TeamCommand::Create { team, lead, members, owner, description } => {
-            let mut created = match &lead {
-                Some(lead) => Team::new(team.clone(), lead.clone(), me),
-                None => Team::unled(team.clone(), me),
-            };
-            created.set_description(description.as_deref())?;
-            let members: Vec<UserId> = members.into_iter().filter(|m| Some(m) != lead.as_ref()).collect();
-            let named: Vec<&UserId> = lead.iter().chain(&members).collect();
-            let checked = Named::read(nats, js, &named).await?;
-            teams::check_team_name(js, nats.domain, &checked.humans, &team).await?;
-            if let Some(owner) = &owner {
-                teams::check_owner(owner, &checked.humans)?;
-            }
-            created.owner = owner;
-            created.members.extend(members.iter().cloned());
-            let all: Vec<UserId> = created.members.clone();
-            modify(kv, |directory| {
-                teams::check_known(directory, &checked.known, &all)?;
-                if let Some(lead) = lead.as_ref().filter(|l| directory.is_team(l)) {
-                    return Err(TeamRefusal::NotLeadable { ant: lead.clone(), team: team.clone() });
-                }
-                directory.create(created.clone(), None)
-            })
-            .await?;
-            (team, Vec::new(), all)
+            let create = Create { team, lead, members, owner, description };
+            let (created, _) = create.write(js, nats.domain, kv, &nats.me.id, &humans).await?;
+            (created.team, Vec::new(), created.members)
         }
         TeamCommand::Set { team, lead, no_lead, owner, no_owner, description, no_description } => {
-            set(nats, js, kv, &team, (lead, no_lead), (owner, no_owner), (description, no_description)).await?;
+            if lead.is_none() && !no_lead && owner.is_none() && !no_owner && description.is_none() && !no_description {
+                bail!(
+                    "nothing to change: give --lead, --no-lead, --owner, --no-owner, --description or --no-description"
+                );
+            }
+            let change = Change {
+                lead: (lead.is_some() || no_lead).then_some(lead),
+                owner: (owner.is_some() || no_owner).then_some(owner),
+                description: (description.is_some() || no_description).then_some(description),
+                ..Change::default()
+            };
+            write(&team, change).await?;
             (team, Vec::new(), Vec::new())
         }
         TeamCommand::Add { team, names } => {
-            let checked = Named::read(nats, js, &names.iter().collect::<Vec<_>>()).await?;
-            let added = modify(kv, |directory| {
-                teams::check_known(directory, &checked.known, &names)?;
-                let mut added = Vec::new();
-                for name in &names {
-                    if directory.add(&team, name)? {
-                        added.push(name.clone());
-                    }
-                }
-                Ok(added)
-            })
-            .await?;
+            let changed = write(&team, Change { add: names.clone(), ..Change::default() }).await?;
             let warnings = names
                 .iter()
-                .filter(|n| !added.contains(n))
+                .filter(|n| !changed.added.contains(n))
                 .map(|n| format!("{n} is already a member of team {team}"))
                 .collect();
-            (team, warnings, added)
+            (team, warnings, changed.added)
         }
         TeamCommand::Remove { team, names } => {
-            let removed = modify(kv, |directory| {
-                let mut removed = Vec::new();
-                for name in &names {
-                    if directory.remove(&team, name)? {
-                        removed.push(name.clone());
-                    }
-                }
-                Ok(removed)
-            })
-            .await?;
+            let changed = write(&team, Change { remove: names.clone(), ..Change::default() }).await?;
             let warnings = names
                 .iter()
-                .filter(|n| !removed.contains(n))
+                .filter(|n| !changed.removed.contains(n))
                 .map(|n| format!("{n} is no member of team {team}"))
                 .collect();
             (team, warnings, Vec::new())
         }
         TeamCommand::Delete { team } => {
-            for line in modify(kv, |directory| directory.delete(&team)).await? {
+            for line in teams::change::delete(kv, &team).await? {
                 println!("{line}");
             }
             return Ok(());
@@ -318,46 +265,4 @@ async fn change(
         None => println!("no team {id}"),
     }
     Ok(())
-}
-
-/// `ants team set`: change what is given of `team`.
-async fn set(
-    nats: &Nats<'_>,
-    js: &async_nats::jetstream::Context,
-    kv: &ants_daemon::records::direct_kv::DirectKv,
-    team: &UserId,
-    (lead, no_lead): (Option<UserId>, bool),
-    (owner, no_owner): (Option<UserId>, bool),
-    (description, no_description): (Option<String>, bool),
-) -> Result<()> {
-    if lead.is_none() && !no_lead && owner.is_none() && !no_owner && description.is_none() && !no_description {
-        bail!("nothing to change: give --lead, --no-lead, --owner, --no-owner, --description or --no-description");
-    }
-    if let Some(description) = &description {
-        Team::new(team.clone(), team.clone(), team.clone()).set_description(Some(description))?;
-    }
-    if let Some(owner) = &owner {
-        teams::check_owner(owner, &humans::load(js, &nats.me).await)?;
-    }
-    let owner = (owner.is_some() || no_owner).then_some(owner);
-    let description = (description.is_some() || no_description).then_some(description);
-    modify(kv, |directory| {
-        if let Some(lead) = &lead {
-            directory.set_lead(team, lead)?;
-        }
-        if no_lead {
-            directory.clear_lead(team)?;
-        }
-        let Some(entry) = directory.teams.iter_mut().find(|t| t.team == *team) else {
-            return Err(TeamRefusal::NoSuchTeam { team: team.clone() });
-        };
-        if let Some(owner) = &owner {
-            entry.owner.clone_from(owner);
-        }
-        if let Some(description) = &description {
-            entry.set_description(description.as_deref()).map_err(|e| TeamRefusal::Invalid { why: e.to_string() })?;
-        }
-        Ok(())
-    })
-    .await
 }

@@ -1,7 +1,8 @@
 //! The nav: home, the assistant's activity once there is any, work with a count per state (shown while work or a state
 //! is selected), the human's channels with their unread posts and @mentions, the teams as a forest (each indented
-//! under the team holding it, with how many ants it holds down through its member teams), the ants with their state,
-//! and the team's other humans, online or not. Each entry selects a view.
+//! under the team holding it, with how many ants it holds down through its member teams) and `+ new team`, which
+//! shows the form creating one, the ants with their state, and the team's other humans, online or not. Each entry
+//! selects a view.
 
 use ants_client::entry::Kind;
 use ants_proto::{Activity, ChannelId, ColonyEntry, Humans, ThreadId, UserId};
@@ -29,6 +30,8 @@ pub enum Item {
     Channel(ChannelId),
     /// A team: its lead, owner and description, and its members as a tree.
     Team(UserId),
+    /// The form creating a team, last of the teams.
+    NewTeam,
     /// An ant: where and how it runs, what holds it back, its activity, threads, queue and spend.
     Ant(UserId),
     /// Another human: the direct messages with it.
@@ -41,7 +44,7 @@ impl Item {
         match self {
             Self::Home | Self::Activity | Self::Work(_) => None,
             Self::Channel(_) => Some("CHANNELS"),
-            Self::Team(_) => Some("TEAMS"),
+            Self::Team(_) | Self::NewTeam => Some("TEAMS"),
             Self::Ant(_) => Some("ANTS"),
             Self::Person(_) => Some("PEOPLE"),
         }
@@ -61,6 +64,7 @@ pub fn items(data: &Data, selected: &Item, _now: DateTime<Utc>) -> Vec<Item> {
     items.extend(data.channels.iter().map(|c| Item::Channel(c.channel.clone())));
     if let Some(teams) = &data.teams {
         items.extend(crate::teams::forest(teams).into_iter().map(|(_, t)| Item::Team(t.team.clone())));
+        items.push(Item::NewTeam);
     }
     let mut ants: Vec<&UserId> = data.live.colony.iter().map(|e| &e.ant).collect();
     ants.sort();
@@ -156,6 +160,7 @@ fn line(
             }
             Line::from(spans)
         }
+        Item::NewTeam => Line::styled("+ new team", style::dim()),
         Item::Ant(ant) => {
             let entries: Vec<&ColonyEntry> = data.live.colony.iter().filter(|e| e.ant == *ant).collect();
             let (mark, color) = marker(&entries, now);

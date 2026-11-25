@@ -211,15 +211,16 @@ fn source(file: &str) -> &'static str {
 }
 
 /// The functions stepping through [`select::step`](crate::tui::select::step) for what has no rows in the key table, its
-/// keys told on screen: the help and the notices in their last line, the digest, the copy picker and the members
-/// editor in their title or the footer, and `Selection::step` itself.
-const UNLISTED: [(&str, &str); 7] = [
+/// keys told on screen: the help and the notices in their last line, the digest, the copy picker, the members editor
+/// and the team form in their title or the footer, and `Selection::step` itself.
+const UNLISTED: [(&str, &str); 8] = [
     ("help.rs", "key"),
     ("notices.rs", "key"),
     ("catchup.rs", "digest_key"),
     ("clipboard.rs", "key"),
     ("channel/members.rs", "key"),
     ("team/editor.rs", "key"),
+    ("team/create.rs", "key"),
     ("select.rs", "step"),
 ];
 

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use ants_client::attachments::Listed;
 use ants_daemon::records::reactions;
-use ants_proto::{ChannelId, ChannelNotify, JsDomain, Machine, Pick, Reaction, ThreadId, UserId, Uuid};
+use ants_proto::{ChannelId, ChannelNotify, JsDomain, Machine, Pick, Reaction, TeamChange, ThreadId, UserId, Uuid};
 use anyhow::{Result, anyhow, bail};
 use async_nats::jetstream;
 use futures::future::LocalBoxFuture;
@@ -138,6 +138,12 @@ pub enum Job {
     Team {
         team: UserId,
         change: crate::teams::change::Change,
+    },
+    /// Create a team as `ants team create` does, refused as it refuses it.
+    TeamCreate(crate::teams::change::Create),
+    /// Delete `team` as `ants team delete` does.
+    TeamDelete {
+        team: UserId,
     },
     /// Set the human's notify level of `channel`, as `ants channel notify` does.
     ChannelNotify {
@@ -393,6 +399,8 @@ impl Job {
             Self::Unmute { thread } => Ok(Done::line(quiet::unmuted(&ctx.js, me, &thread).await?)),
             Self::Channel { channel, change } => change_channel(ctx, channel, &change).await,
             Self::Team { team, change } => change_team(ctx, &team, &change).await,
+            Self::TeamCreate(create) => create_team(ctx, &create).await,
+            Self::TeamDelete { team } => delete_team(ctx, &team).await,
             Self::ChannelNotify { channel, level } => {
                 Ok(Done::line(quiet::channel_notify(&ctx.js, me, &channel, level).await?))
             }
@@ -484,7 +492,25 @@ pub async fn change_team(ctx: &Ctx, team: &UserId, change: &crate::teams::change
     let kv = crate::teams::open(&ctx.js, ctx.domain.as_ref()).await?;
     let humans = humans::load(&ctx.js, &ctx.me).await;
     let changed = change.write(&ctx.js, ctx.domain.as_ref(), &kv, team, &humans).await?;
+    crate::teams::change::tell(&ctx.client, &ctx.me.id, &kv, &[(team.clone(), TeamChange::Changed)]).await;
     Ok(Done { line: change.line(team, &changed), teams: true, ..Done::default() })
+}
+
+/// Create the team `create` names, as `ants team create` does: the lines it prints, joined.
+pub async fn create_team(ctx: &Ctx, create: &crate::teams::change::Create) -> Result<Done> {
+    let kv = crate::teams::open(&ctx.js, ctx.domain.as_ref()).await?;
+    let humans = humans::load(&ctx.js, &ctx.me).await;
+    let (team, lines) = create.write(&ctx.js, ctx.domain.as_ref(), &kv, &ctx.me.id, &humans).await?;
+    crate::teams::change::tell(&ctx.client, &ctx.me.id, &kv, &[(team.team, TeamChange::Created)]).await;
+    Ok(Done { line: lines.join("; "), teams: true, ..Done::default() })
+}
+
+/// Delete `team`, as `ants team delete` does: the lines it prints, joined.
+pub async fn delete_team(ctx: &Ctx, team: &UserId) -> Result<Done> {
+    let kv = crate::teams::open(&ctx.js, ctx.domain.as_ref()).await?;
+    let lines = crate::teams::change::delete(&kv, team).await?;
+    crate::teams::change::tell(&ctx.client, &ctx.me.id, &kv, &[(team.clone(), TeamChange::Deleted)]).await;
+    Ok(Done { line: lines.join("; "), teams: true, ..Done::default() })
 }
 
 /// What a change to `channel`'s entry did, in a line.
@@ -968,7 +994,7 @@ mod tests {
     /// The team editor's writes change the team as `ants team add|remove|set` does, refused as it refuses them, each
     /// telling the teams to read back.
     #[tokio::test]
-    async fn a_team_job_changes_the_team_as_ants_team_does() {
+    async fn a_team_job_creates_changes_and_deletes_a_team_as_ants_team_does() {
         use ants_daemon::records::direct_kv::DirectKv;
         use ants_proto::{AntIdentity, IDENTITIES_BUCKET, Team, TeamRefusal};
 
@@ -1019,6 +1045,24 @@ mod tests {
         let read = crate::teams::read_of(&ctx.js, None).await.unwrap().unwrap();
         let stored = read.team(&backend).unwrap();
         assert_eq!((stored.lead.clone(), stored.members.clone()), (Some(user("dev-b")), vec![user("dev-b")]));
-        assert_eq!((stored.owner.clone(), stored.description.as_deref()), (Some(bob), Some("The API.")));
+        assert_eq!((stored.owner.clone(), stored.description.as_deref()), (Some(bob.clone()), Some("The API.")));
+
+        let create = |team: &str, lead: &str| crate::teams::change::Create {
+            team: user(team),
+            lead: Some(user(lead)),
+            members: vec![backend.clone()],
+            owner: None,
+            description: None,
+        };
+        let taken = Job::TeamCreate(create("bob", "dev-a")).run(&ctx).await.unwrap_err();
+        assert_eq!(taken.to_string(), TeamRefusal::NameTaken { name: bob }.to_string());
+        let done = Job::TeamCreate(create("eng", "dev-a")).run(&ctx).await.unwrap();
+        assert_eq!((done.line.as_str(), done.teams), ("created team eng, led by dev-a", true));
+        let read = crate::teams::read_of(&ctx.js, None).await.unwrap().unwrap();
+        assert_eq!(read.holder(&backend).map(|t| t.team.as_str()), Some("eng"), "backend under eng");
+        let done = Job::TeamDelete { team: user("eng") }.run(&ctx).await.unwrap();
+        assert_eq!((done.line.as_str(), done.teams), ("deleted team eng", true));
+        let read = crate::teams::read_of(&ctx.js, None).await.unwrap().unwrap();
+        assert!(read.team(&user("eng")).is_none() && read.holder(&backend).is_none(), "backend on no team");
     }
 }
