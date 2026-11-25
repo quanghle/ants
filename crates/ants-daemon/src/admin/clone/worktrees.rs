@@ -52,11 +52,11 @@ pub(super) async fn worktrees(home: &Path, copies: &[ThreadCopy]) -> Result<Vec<
 impl Tree {
     /// Where the clone's session of the thread works in the worktree added again in `new_home`: at the place the
     /// session cloned worked at, in `was`, in this one.
-    pub(super) fn session_dir(&self, new_home: &Path, was: &Path) -> PathBuf {
+    pub(super) fn session_dir(&self, new_home: &Path, was: Option<&Path>) -> PathBuf {
         let to = new_home.join("worktrees").join(self.thread.as_str());
-        match was.strip_prefix(&self.from) {
-            Ok(within) => to.join(within),
-            Err(_) => to,
+        match was.and_then(|was| was.strip_prefix(&self.from).ok()) {
+            Some(within) => to.join(within),
+            None => to,
         }
     }
 
