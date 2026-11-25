@@ -11,6 +11,7 @@ use ants_proto::{HarnessAgent, StatusUpdate};
 use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::sync::{mpsc, oneshot};
 
+use super::background::Background;
 use super::connection::serve;
 use super::sign_in::HANDSHAKE_TIMEOUT;
 use super::{Launch, SignedOut};
@@ -142,6 +143,8 @@ pub struct Session {
     turns: mpsc::Sender<Turn>,
     task: tokio::task::JoinHandle<()>,
     agent: Option<HarnessAgent>,
+    /// What the last prompt's turn left running in the background, as the harness told.
+    background: Arc<Mutex<Vec<Background>>>,
 }
 
 impl Session {
@@ -160,7 +163,9 @@ impl Session {
         let (opened_tx, opened) = oneshot::channel();
         let (turns, turns_rx) = mpsc::channel(1);
         let id = Arc::new(Mutex::new(SessionId::new("")));
-        let task = tokio::spawn(serve(launch.clone(), resume, rebuild, id.clone(), opened_tx, turns_rx));
+        let background = Arc::default();
+        let shared = (id.clone(), Arc::clone(&background));
+        let task = tokio::spawn(serve(launch.clone(), resume, rebuild, shared, opened_tx, turns_rx));
         // Given up on before the session opens (a timed-out probe), the harness stops.
         let mut abort = AbortOnDrop(Some(task.abort_handle()));
         let opened =
@@ -172,7 +177,7 @@ impl Session {
             }
             StartFailed { harness: launch.harness.name.clone(), detail: format!("{e:#}") }.into()
         })?;
-        Ok(Self { id, turns, task, agent })
+        Ok(Self { id, turns, task, agent, background })
     }
 
     /// The agent the harness runs, as it named itself in `initialize`; None when it did not.
@@ -183,6 +188,14 @@ impl Session {
     /// The session the harness holds now.
     pub fn id(&self) -> SessionId {
         self.id.locked().clone()
+    }
+
+    /// What the last prompt's turn left running in the background that still runs, as a harness of a native protocol
+    /// tells ([`Background`]): a command a CLI runs in the background, such as a long check the agent waits on.
+    pub fn background(&self) -> Vec<Background> {
+        let mut left = self.background.locked();
+        left.retain(Background::runs);
+        left.clone()
     }
 
     /// False once the harness has exited or a prompt failed; the session can then only be resumed in a new one.

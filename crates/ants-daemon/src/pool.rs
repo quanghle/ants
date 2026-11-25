@@ -2,7 +2,9 @@
 //!
 //! Threads run concurrently, each in its own harness. A harness with a prompt in flight is never stopped, so when the
 //! cap is reached and every live harness is busy, a new thread waits for one to finish. While memory is low
-//! (`crate::limits::pressure`) idle harnesses stop at once and the cap is lowered.
+//! (`crate::limits::pressure`) idle harnesses stop at once and the cap is lowered. An idle harness whose last turn left
+//! work running in the background ([`Session::background`]), such as a long check its agent waits on, is kept past the
+//! idle timeout while that runs, up to [`Pool::keeping_background_for`], and is the last stopped to stay within the cap.
 //!
 //! With more threads busy than the cap, the idle harness of a thread with more messages in hand
 //! ([`Pool::set_in_hand`]) is kept for its next one, up to [`BURST`] prompts back to back and for [`KEEP_FOR`] after
@@ -148,6 +150,8 @@ struct Live {
     restarts: u64,
     /// Prompts it ran since it started or its thread last had no message in hand.
     turns: usize,
+    /// Whether it is idle past the idle timeout, kept while its last turn's background work runs.
+    kept: bool,
 }
 
 enum Slot {
@@ -171,6 +175,9 @@ pub struct Pool {
     store: SessionStore,
     max_live: usize,
     idle_after: Duration,
+    /// How long after its last prompt an idle harness is kept at most while its last turn's background work runs;
+    /// None for as long as that runs.
+    background_for: Option<Duration>,
     slots: Mutex<HashMap<ThreadId, Slot>>,
     /// The threads with messages in hand ([`Pool::set_in_hand`]). Locked after [`Pool::slots`], never before.
     in_hand: Mutex<HashSet<ThreadId>>,
@@ -223,6 +230,7 @@ impl Pool {
             store,
             max_live: max_live.max(1),
             idle_after,
+            background_for: Some(crate::harness::DEFAULT_PROMPT_TIMEOUT),
             slots: Mutex::default(),
             in_hand: Mutex::default(),
             changed: Notify::new(),
@@ -241,6 +249,13 @@ impl Pool {
     #[must_use]
     pub fn with_fallbacks(self, fallbacks: Vec<(String, Launch)>) -> Self {
         Self { fallbacks, ..self }
+    }
+
+    /// Keep an idle harness whose last turn left work running in the background ([`Session::background`]) while that
+    /// runs, for up to `limit` after its last prompt, the default prompt timeout unless set; None for as long as it runs.
+    #[must_use]
+    pub fn keeping_background_for(self, limit: Option<Duration>) -> Self {
+        Self { background_for: limit, ..self }
     }
 
     pub fn fallback_count(&self) -> usize {
@@ -406,16 +421,17 @@ impl Pool {
     }
 
     /// Stop harnesses idle since before `now - idle_after`, or while memory is low every one with no prompt in flight,
-    /// least recently used first. Returns how many stopped.
+    /// least recently used first. One whose last turn left work running in the background is kept while that runs, up
+    /// to [`Pool::keeping_background_for`] after its last prompt, unless memory is low. Returns how many stopped.
     pub fn evict_idle(&self, now: Instant) -> usize {
         let low = self.check_memory();
         let idle_after = if low { Duration::ZERO } else { self.idle_after };
         let mut slots = self.slots();
         let mut idle: Vec<(ThreadId, Instant)> = slots
-            .iter()
+            .iter_mut()
             .filter_map(|(thread, slot)| match slot {
                 Slot::Ready(live) if live.busy == 0 && now.saturating_duration_since(live.last_used) >= idle_after => {
-                    Some((thread.clone(), live.last_used))
+                    (low || !self.keeps_for_background(thread, live, now)).then(|| (thread.clone(), live.last_used))
                 }
                 _ => None,
             })
@@ -434,6 +450,36 @@ impl Pool {
             self.changed.notify_waiters();
         }
         idle.len()
+    }
+
+    /// Whether `live`, the idle harness of `thread`, is kept at `now` for the work its last turn left running in the
+    /// background: while that runs, up to [`Pool::keeping_background_for`] after its last prompt. Logs as it starts
+    /// and stops being kept.
+    fn keeps_for_background(&self, thread: &ThreadId, live: &mut Live, now: Instant) -> bool {
+        let idle_for = now.saturating_duration_since(live.last_used);
+        if let Some(limit) = self.background_for.filter(|limit| idle_for >= *limit) {
+            if live.kept {
+                tracing::info!(%thread, ?limit, "the background work of the idle harness ran past the limit");
+            }
+            return false;
+        }
+        let left = live.session.background();
+        if left.is_empty() {
+            if live.kept {
+                tracing::info!(%thread, "the background work of the idle harness ended");
+            }
+            return false;
+        }
+        if !live.kept {
+            live.kept = true;
+            let processes: Vec<String> = left.iter().map(|left| format!("{} {}", left.pid, left.command)).collect();
+            tracing::info!(
+                %thread,
+                processes = processes.join("; "),
+                "keeping the idle harness while its last turn's background work runs"
+            );
+        }
+        true
     }
 
     /// Tell which threads have messages in hand, waiting for a prompt or about to run one: the idle harness of such a
@@ -573,6 +619,7 @@ impl Pool {
             {
                 live.busy += 1;
                 live.turns += 1;
+                live.kept = false;
                 return Claim::Live(live.session.clone(), live.cwd.clone());
             }
             // A dead harness with a prompt in flight is about to fail it; take over once it has.
@@ -697,8 +744,17 @@ impl Pool {
         }
         let session = Arc::new(session);
         let (running, last_used) = (session.clone(), Instant::now());
-        let live =
-            Live { session: running, cwd: cwd.clone(), fallback, review, last_used, busy: 1, restarts, turns: 1 };
+        let live = Live {
+            session: running,
+            cwd: cwd.clone(),
+            fallback,
+            review,
+            last_used,
+            busy: 1,
+            restarts,
+            turns: 1,
+            kept: false,
+        };
         self.slots().insert(thread.clone(), Slot::Ready(live));
         starting.done = true;
         Ok(Lease { pool: self, thread: thread.clone(), session, cwd, rebuilt: lost })
@@ -724,15 +780,16 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 /// Stop the least recently used harness that has no prompt in flight and is not kept for the next prompt of its
-/// thread, which has messages `in_hand`: kept for [`BURST`] prompts back to back, each time for [`KEEP_FOR`]. When there
-/// is none, fails with when the first kept one is no longer kept, if any is.
+/// thread, which has messages `in_hand`: kept for [`BURST`] prompts back to back, each time for [`KEEP_FOR`]. One whose
+/// last turn left work running in the background goes only once no other can. When there is none, fails with when the
+/// first kept one is no longer kept, if any is.
 fn evict_least_recently_used(
     slots: &mut HashMap<ThreadId, Slot>,
     in_hand: &HashSet<ThreadId>,
     now: Instant,
 ) -> Result<(), Option<Instant>> {
     let mut kept_until: Option<Instant> = None;
-    let mut oldest: Option<(&ThreadId, Instant)> = None;
+    let mut oldest: Option<(&ThreadId, (bool, Instant))> = None;
     for (thread, slot) in slots.iter() {
         let Slot::Ready(live) = slot else { continue };
         if live.busy > 0 {
@@ -741,13 +798,24 @@ fn evict_least_recently_used(
         let until = live.last_used + KEEP_FOR;
         if live.turns < BURST && until > now && in_hand.contains(thread) {
             kept_until = Some(kept_until.map_or(until, |kept| kept.min(until)));
-        } else if oldest.is_none_or(|(_, last_used)| live.last_used < last_used) {
-            oldest = Some((thread, live.last_used));
+            continue;
+        }
+        // A harness's background work is read only where it could make the harness the one to stop.
+        let older = oldest.is_none_or(|(_, (working, last_used))| working || live.last_used < last_used);
+        if older {
+            let key = (!live.session.background().is_empty(), live.last_used);
+            if oldest.is_none_or(|(_, oldest)| key < oldest) {
+                oldest = Some((thread, key));
+            }
         }
     }
-    let Some((oldest, _)) = oldest else { return Err(kept_until) };
+    let Some((oldest, (working, _))) = oldest else { return Err(kept_until) };
     let oldest = oldest.clone();
-    tracing::info!(thread = %oldest, "stopping harness to stay within the cap");
+    if working {
+        tracing::info!(thread = %oldest, "stopping harness to stay within the cap, with its background work");
+    } else {
+        tracing::info!(thread = %oldest, "stopping harness to stay within the cap");
+    }
     slots.remove(&oldest);
     Ok(())
 }

@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, 
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use super::Cli;
-use super::leftovers::Leftovers;
+use super::leftovers::{Leftovers, Runs};
 use crate::sync::MutexExt as _;
 
 /// The last bytes of a process's stderr, and the task reading it.
@@ -131,6 +131,13 @@ impl Process {
         let process =
             Self { name: name.to_owned(), pid: child.id(), child: Some(child), stderr, leftovers: Some(leftovers) };
         Ok((process, stdin, stdout))
+    }
+
+    /// Have `runs` walk its descendants at the end of each turn ([`Runs::turn_ended`]).
+    pub(super) fn watched_by(&self, runs: &Runs) {
+        if let Some(leftovers) = &self.leftovers {
+            leftovers.watched_by(runs);
+        }
     }
 
     /// The last of what it wrote to stderr.

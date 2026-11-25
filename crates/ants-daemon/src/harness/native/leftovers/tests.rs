@@ -1,11 +1,12 @@
 //! Ending what native CLIs left running: the processes tagged with a run that is gone, those of a run or a daemon still
-//! running spared, and the descendants walked of a CLI, tagged or not.
+//! running spared, the descendants walked of a CLI, tagged or not, at a turn's end too for a CLI that died first, and
+//! what a daemon gone recorded.
 
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use super::TAG;
 use super::unix::{DAEMON, Daemon, GRACE, Proc, Run, Tag, descendants, end, os};
+use super::{Leftovers, Runs, TAG, record};
 
 /// The environment variable making [`a_loop_left_running`] loop.
 const LOOP: &str = "ANTS_TEST_LOOP";
@@ -134,4 +135,71 @@ fn the_descendants_walked_of_a_cli_are_ended_though_untagged() {
     end("test", &walked);
     assert!(cli.ended(), "the loop ended, and with it the CLI's wait");
     assert!(os::process(child).is_none(), "the loop is gone");
+}
+
+#[tokio::test]
+async fn what_a_turn_left_running_untagged_ends_at_the_release_though_the_cli_died_first() {
+    // Untagged, as macOS shows a `zsh` loop Claude Code left running.
+    let mut command = tokio::process::Command::new("sh");
+    command.args(["-c", "sh -c 'while :; do sleep 1; done' & echo $!; wait"]);
+    let mut leftovers = Leftovers::tag("test", &mut command);
+    command.env_remove(TAG).stdin(Stdio::null()).stdout(Stdio::piped()).kill_on_drop(true);
+    let mut cli = command.spawn().unwrap();
+    leftovers.follow(&cli);
+    let runs = Runs::default();
+    leftovers.watched_by(&runs);
+    let mut line = String::new();
+    let mut stdout = tokio::io::BufReader::new(cli.stdout.take().unwrap());
+    tokio::io::AsyncBufReadExt::read_line(&mut stdout, &mut line).await.unwrap();
+    let child: i32 = line.trim().parse().unwrap();
+    let root = i32::try_from(cli.id().unwrap()).unwrap();
+    let listed = ants_test_support::wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+        descendants(root)
+            .into_iter()
+            .find(|process| process.pid == child)
+            .ok_or_else(|| "the loop is not listed yet".to_owned())
+    });
+
+    assert_eq!(runs.turn_ended().await, Vec::new(), "the loop runs in the CLI's own process group");
+    cli.kill().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(os::process(child).is_some_and(|now| now.is(&listed)), "the loop outlives its CLI");
+    leftovers.release().await;
+    assert!(os::process(child).is_none_or(|now| !now.is(&listed)), "the loop is gone");
+}
+
+#[test]
+fn what_a_daemon_gone_recorded_is_ended_and_its_record_removed() {
+    let dir = ants_test_support::scratch_dir("leftovers-record");
+    let mut recorded = Running::tagged(None);
+    let mut spared = Running::tagged(None);
+    let gone = Daemon { pid: i32::MAX, start: 1 };
+    record::write(&dir, gone, &record::text(&[recorded.listed()])).unwrap();
+    record::write(&dir, *DAEMON, &record::text(&[spared.listed()])).unwrap();
+    std::fs::write(dir.join("not-a-record"), "1 2\n").unwrap();
+
+    let (ending, records) = record::of_daemons_gone(&dir);
+    assert_eq!(ending, [recorded.listed()], "only what a daemon gone recorded");
+    assert_eq!(records, [dir.join(format!("{}.1", i32::MAX))]);
+    end("test", &ending);
+    record::remove(&records);
+    assert!(recorded.ended(), "what the daemon gone recorded");
+    assert!(spared.runs(), "what a daemon running recorded is spared");
+    assert!(!records[0].exists(), "the record is removed");
+    record::write(&dir, *DAEMON, "").unwrap();
+    assert!(!dir.join(format!("{}.{}", DAEMON.pid, DAEMON.start)).exists(), "an empty record is none");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn records_are_kept_only_in_a_directory_of_the_users_alone() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let temp = ants_test_support::scratch_dir("leftovers-records");
+    let dir = record::in_temp(&temp).expect("made");
+    let base = dir.parent().unwrap().to_owned();
+    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!((mode(&base), mode(&dir)), (0o700, 0o700));
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(record::in_temp(&temp), None, "others may enter it");
+    let _ = std::fs::remove_dir_all(temp);
 }

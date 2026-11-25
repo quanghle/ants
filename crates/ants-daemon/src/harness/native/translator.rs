@@ -17,7 +17,7 @@ use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, Client, DynConnectTo, Error, ErrorCode, JsonRpcResponse};
 
 use super::{Cli, Credentials, Native, NativeSession, Open, Setting, Updates, failed, unsupported};
-use crate::harness::{SteerRequest, SteerResponse, advertise_steering, skills};
+use crate::harness::{SteerRequest, SteerResponse, advertise_steering, background, skills};
 use crate::sync::MutexExt as _;
 
 /// Credentials a provider refused at a prompt, by where they are kept and their fingerprint: what the CLI said then.
@@ -253,7 +253,9 @@ impl<N: Native> Translator<N> {
         {
             self.refused(e);
         }
-        done
+        // What the CLI runs is walked as each turn ends, so that its release ends it even if the CLI died first.
+        let left = self.cli.runs().turn_ended().await;
+        done.map(|response| background::with(response, &left))
     }
 
     pub(super) async fn steer(self: Arc<Self>, request: SteerRequest) -> Result<SteerResponse, Error> {

@@ -23,6 +23,7 @@ use futures::future::FusedFuture as _;
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
+use super::background::{self, Background};
 use super::configure::{new_session, open};
 use super::observe::{Current, Observed};
 use super::session::Turn;
@@ -40,15 +41,17 @@ const CANCEL_GRACE: Duration = Duration::from_secs(30);
 /// How long a harness has to answer the steers sent to a prompt that ended.
 const STEER_GRACE: Duration = Duration::from_secs(10);
 
-/// Own the harness connection: open the session, then run turns until the session is dropped or a prompt fails.
+/// Own the harness connection: open the session, then run turns until the session is dropped or a prompt fails. The
+/// session's owner reads the session's id, and what each turn left running in the background, of `shared`.
 pub(super) async fn serve(
     launch: Launch,
     resume: Option<SessionId>,
     rebuild: Option<Rebuild>,
-    current: Arc<Mutex<SessionId>>,
+    shared: (Arc<Mutex<SessionId>>, Arc<Mutex<Vec<Background>>>),
     opened: oneshot::Sender<Result<Option<HarnessAgent>>>,
     mut turns: mpsc::Receiver<Turn>,
 ) {
+    let (current, background) = shared;
     let observed: Arc<Mutex<Observed>> = Arc::default();
     let (sink, known) = (observed.clone(), observed.clone());
     // Bumped when a prompt is cancelled, which answers the permission requests still waiting.
@@ -120,6 +123,7 @@ pub(super) async fn serve(
                 cancelled: &cancelled,
                 methods: &methods,
                 current: &current,
+                background: &background,
                 mcp: &mcp,
                 images: caps.prompt_capabilities.image,
                 close: caps.session_capabilities.close.is_some(),
@@ -177,6 +181,8 @@ struct Connected<'a> {
     methods: &'a Mutex<Vec<AuthMethod>>,
     /// The session's id, as the session's owner reads it.
     current: &'a Mutex<SessionId>,
+    /// What the last turn left running in the background, as the session's owner reads it.
+    background: &'a Mutex<Vec<Background>>,
     mcp: &'a Vec<McpServer>,
     /// Whether the agent takes image content in prompts.
     images: bool,
@@ -387,6 +393,7 @@ impl Connected<'_> {
         match done {
             Some(Ok(done)) => {
                 tracing::debug!(session = %id, stop_reason = ?done.stop_reason, "prompt finished");
+                *self.background.locked() = background::of(&done);
                 if let (Some(tx), Some(usage)) = (spend, &done.usage) {
                     let _ = tx.send(Spend::Tokens(usage.total_tokens));
                 }
