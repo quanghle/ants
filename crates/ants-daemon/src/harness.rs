@@ -10,6 +10,7 @@ mod mcp;
 mod mcp_sign_in;
 pub(crate) mod native;
 mod observe;
+mod own_turn;
 mod process;
 mod session;
 mod sign_in;
@@ -26,6 +27,7 @@ pub use launch::{Launch, McpServers, McpSession};
 pub use mcp::{McpHost, open_mcp, unreported_mcp};
 pub use mcp_sign_in::{McpSignIn, McpSignIns};
 pub use native::Protocol;
+pub use own_turn::{OwnTurn, OwnTurns};
 use process::one_of;
 pub use process::{ModelSettings, on_path};
 pub use session::{

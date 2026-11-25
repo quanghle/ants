@@ -84,6 +84,9 @@ pub struct Prompt {
     /// Receives when the prompt got its thread's harness, once any wait for a free one is over: before the harness
     /// starts, when it must.
     pub began: Option<oneshot::Sender<tokio::time::Instant>>,
+    /// The turn the harness started of its own that the prompt takes ([`crate::harness::OwnTurn`]), the harness then
+    /// prompted with `text` only when it no longer runs that turn.
+    pub own_turn: Option<String>,
 }
 
 /// Messages added to a running prompt, for a harness that takes them into its turn (`_ants/steer`).
@@ -117,6 +120,7 @@ impl Prompt {
             channel: None,
             team: None,
             began: None,
+            own_turn: None,
         }
     }
 }

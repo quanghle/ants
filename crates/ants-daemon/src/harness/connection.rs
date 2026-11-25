@@ -227,6 +227,7 @@ impl Connected<'_> {
             channel,
             team,
             began: _,
+            own_turn,
         } = prompt;
         let notes = Notes { channel: channel.as_deref(), team: team.as_ref() };
         let ((lines, images), mut briefed) =
@@ -242,7 +243,9 @@ impl Connected<'_> {
             let too_many = self.observe(id, limits, spend.as_ref(), progress.as_ref());
             let text = self.compose(rebuild.as_ref(), &briefed, &mut history, (from.as_deref(), &text), &lines).await;
             let content = std::iter::once(ContentBlock::Text(TextContent::new(text))).chain(images.iter().cloned());
-            let request = self.cx.send_request(PromptRequest::new(id.clone(), content.collect())).block_task();
+            let request =
+                PromptRequest::new(id.clone(), content.collect()).meta(own_turn.as_deref().map(super::own_turn::meta));
+            let request = self.cx.send_request(request).block_task();
             let bounds = Bounds { limits, too_many: &too_many, stop: &mut stop, steers: &mut steers };
             let (done, cut) = bounded(self.cx, id, request, bounds, self.cancelled).await;
             let ended = self.ended(done, cut);

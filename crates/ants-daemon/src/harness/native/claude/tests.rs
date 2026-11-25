@@ -444,7 +444,8 @@ fn said(text: &str) -> Vec<ContentBlock> {
 /// A session of `fixture`'s CLI with the ant's `settings`, opened without the translator.
 async fn open_session(fixture: &Fixture, settings: &ModelSettings) -> ClaudeSession {
     let claude = Claude::start(Cli::new(&fixture.harness, &[], settings)).await.unwrap();
-    let open = Open { cwd: fixture.dir.clone(), mcp_servers: Vec::new(), sign_ins: None, skills: None };
+    let open =
+        Open { cwd: fixture.dir.clone(), mcp_servers: Vec::new(), sign_ins: None, own_turns: None, skills: None };
     claude.new_session(open).await.unwrap()
 }
 
@@ -876,4 +877,99 @@ async fn what_a_killed_claude_left_running_ends_once_its_session_is_released() {
     assert!(rustix::process::test_kill_process(child.0).is_ok(), "the loop outlives the CLI, reparented");
     session.close().await;
     gone(child.0, "the loop left running").await;
+}
+
+/// Claude Code telling that the background command `description` it started ended, its output in `file` (none when
+/// empty), as Claude Code 2.1.332 was seen to.
+fn task_ended(description: &str, file: &str) -> String {
+    let summary = format!("Background command \"{description}\" completed (exit code 0)");
+    event(json!({ "type": "system", "subtype": "task_notification", "task_id": "b1", "tool_use_id": "toolu_1",
+        "status": "completed", "output_file": file, "summary": summary }))
+}
+
+/// A turn answering `answer`, the session having cost `total` so far, as Claude Code runs a prompt's or one of its own.
+fn whole_turn(answer: &str, total: f64) -> Vec<String> {
+    vec![state("running"), init(), text(answer), result(total, json!({})), state("idle")]
+}
+
+/// The stub CLI's line waiting for `file` to exist.
+fn wait_for(file: &std::path::Path) -> String {
+    format!("!sh while [ ! -f '{}' ]; do sleep 0.05; done", file.display())
+}
+
+/// A launch of `native` for thread t1, the turns its sessions run of their own going to the receiver.
+fn reporting_own_turns(native: &Fixture) -> (Launch, mpsc::UnboundedReceiver<(ThreadId, crate::harness::OwnTurn)>) {
+    let (tx, reported) = mpsc::unbounded_channel();
+    let launch = native
+        .launch(ModelSettings::default())
+        .with_own_turns(Arc::new(move |thread: &ThreadId, turn: crate::harness::OwnTurn| {
+            let _ = tx.send((thread.clone(), turn));
+        }))
+        .for_thread(&"t1".parse().unwrap());
+    (launch, reported)
+}
+
+#[tokio::test]
+async fn a_turn_claude_code_runs_of_its_own_as_a_background_command_ends_is_reported_and_taken_by_its_prompt() {
+    let native = Fixture::new("claude-own-turn", "");
+    let done = native.dir.join("done");
+    let mut first = whole_turn("Started", 0.1);
+    first.extend([wait_for(&done), task_ended("Run the checks", "/tmp/b1.output")]);
+    first.extend(whole_turn("The checks passed", 0.3));
+    native.script(None, &[vec![signed_in()], first, whole_turn("Told", 0.4)]);
+    let (launch, mut reported) = reporting_own_turns(&native);
+    let session = Session::start(&launch, None).await.unwrap();
+
+    let (reply, _, _) = run(&session, Prompt::new("check in the background")).await;
+    assert_eq!(reply.unwrap(), "Started");
+    assert!(reported.try_recv().is_err(), "the prompt's turn is no turn of the CLI's own");
+    std::fs::write(&done, "").unwrap();
+    let (thread, turn) = tokio::time::timeout(Duration::from_secs(10), reported.recv()).await.unwrap().unwrap();
+    assert_eq!(thread.as_str(), "t1");
+    let why = "[ants] Background command \"Run the checks\" completed (exit code 0); its output is in /tmp/b1.output.";
+    assert_eq!(turn.text, why);
+
+    let taking = Prompt { own_turn: Some(turn.id.clone()), ..Prompt::new(why) };
+    let (reply, updates, spends) = run(&session, taking).await;
+    assert_eq!(reply.unwrap(), "The checks passed", "the turn's answer");
+    assert!(updates.contains(&StatusUpdate::Message { text: "The checks passed".to_owned() }), "{updates:?}");
+    assert!(spends.contains(&Spend::Cost { session: session.id(), total: 0.3 }), "{spends:?}");
+    assert_eq!(native.received(2).len(), 2, "taking the turn writes nothing: the initialize and the first prompt");
+
+    let again = Prompt { own_turn: Some(turn.id), ..Prompt::new("told again") };
+    assert_eq!(run(&session, again).await.0.unwrap(), "Told", "a turn taken already prompts with the message");
+    let received = native.received(2);
+    assert_eq!(received[2]["message"]["content"], json!([{ "type": "text", "text": "told again" }]));
+    session.close().await;
+}
+
+#[tokio::test]
+async fn a_prompt_coming_while_claude_code_runs_a_turn_of_its_own_waits_for_its_end_and_leaves_it_to_be_taken() {
+    let native = Fixture::new("claude-own-turn-first", "");
+    let (done, checked) = (native.dir.join("done"), native.dir.join("checked"));
+    let mut first = whole_turn("Started", 0.1);
+    first.extend([wait_for(&done), task_ended("Run the checks", ""), state("running"), init(), text("The checks")]);
+    first.extend([wait_for(&checked), text(" passed"), result(0.3, json!({})), state("idle")]);
+    native.script(None, &[vec![signed_in()], first, whole_turn("Next", 0.4)]);
+    let (launch, mut reported) = reporting_own_turns(&native);
+    let session = Session::start(&launch, None).await.unwrap();
+
+    assert_eq!(run(&session, Prompt::new("check in the background")).await.0.unwrap(), "Started");
+    std::fs::write(&done, "").unwrap();
+    let (_, turn) = tokio::time::timeout(Duration::from_secs(10), reported.recv()).await.unwrap().unwrap();
+    assert_eq!(turn.text, "[ants] Background command \"Run the checks\" completed (exit code 0).");
+    {
+        let next = run(&session, Prompt::new("next"));
+        tokio::pin!(next);
+        let waiting = tokio::time::timeout(Duration::from_millis(300), &mut next).await;
+        assert!(waiting.is_err(), "waiting for the turn's end");
+        assert_eq!(native.received(2).len(), 2, "the message would steer the CLI's own turn: not written yet");
+        std::fs::write(&checked, "").unwrap();
+        assert_eq!(next.await.0.unwrap(), "Next");
+    }
+
+    let taking = Prompt { own_turn: Some(turn.id), ..Prompt::new(turn.text) };
+    assert_eq!(run(&session, taking).await.0.unwrap(), "The checks passed", "kept for the prompt taking it");
+    assert!(reported.try_recv().is_err(), "the prompts' turns are none of the CLI's own");
+    session.close().await;
 }

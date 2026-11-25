@@ -52,7 +52,9 @@ pub(crate) use rpc::RpcError;
 pub(crate) use rpc::{Incoming, Rpc};
 pub(crate) use updates::{Updates, approve, deny_approval};
 
+use super::launch::Reports;
 use super::mcp_sign_in::Report;
+use super::own_turn::OwnTurnReport;
 use super::{Harness, ModelSettings};
 
 /// The protocol a harness definition's CLI speaks on stdio: its `protocol` key.
@@ -166,16 +168,16 @@ pub(crate) fn validate(harness: &Harness) -> anyhow::Result<()> {
 /// What the daemon's ACP client connects to for `harness`, with the ant's `env` and `settings`: the harness process
 /// itself for ACP ([`acp`], started and released as a native CLI is), else an in-process ACP agent that starts the CLI
 /// and translates its protocol.
-/// The sessions of a native CLI report their sign-ins to MCP servers to `report`, if any.
+/// The sessions of a native CLI report their sign-ins to MCP servers and the turns of their own to `reports`.
 pub(crate) fn agent(
     harness: &Harness,
     env: &[(String, String)],
     settings: &ModelSettings,
-    report: Option<Report>,
+    reports: Reports,
 ) -> DynConnectTo<Client> {
     match registration(harness.protocol) {
         Ok(None) => acp::connect(Cli::new(harness, env, settings)),
-        Ok(Some(registration)) => (registration.connect)(Cli::new(harness, env, settings).reporting(report)),
+        Ok(Some(registration)) => (registration.connect)(Cli::new(harness, env, settings).reporting(reports)),
         Err(e) => refusing(format!("harness {harness}: {e}")),
     }
 }
@@ -207,7 +209,8 @@ fn open_host<N: Native>(
     Box::pin(async move {
         let native = N::start(cli).await?;
         let mcp_servers = servers(native.info().http_mcp);
-        let session = native.new_session(Open { cwd, mcp_servers, sign_ins: None, skills: None }).await?;
+        let session =
+            native.new_session(Open { cwd, mcp_servers, sign_ins: None, own_turns: None, skills: None }).await?;
         Ok(Box::new(Host { _native: native, session }) as Box<dyn McpHost>)
     })
 }
@@ -280,6 +283,8 @@ pub(crate) struct Open {
     /// serving a thread, not one opened to read them ([`mcp_host`]), to probe the harness or to fork (the session/load
     /// following it signs in).
     pub sign_ins: Option<Report>,
+    /// Where it reports the turns it starts of its own between prompts: a session serving a thread, as for `sign_ins`.
+    pub own_turns: Option<OwnTurnReport>,
     /// The ant's confirmed skills to offer it, if any ([`super::skills`]).
     pub skills: Option<super::Skills>,
 }
@@ -384,6 +389,19 @@ pub(crate) trait NativeSession: Send + Sync + 'static {
         prompt: Vec<ContentBlock>,
         updates: Updates,
     ) -> impl Future<Output = Result<PromptResponse, Error>> + Send;
+
+    /// Run the prompt taking the turn of its own `id` the session reported ([`Open::own_turns`]): the turn's updates
+    /// streamed to `updates` and its end answering the prompt, without `prompt`, which is for a session that does not
+    /// know the turn, by default every session, prompted with it instead.
+    fn take_own_turn(
+        &self,
+        id: &str,
+        prompt: Vec<ContentBlock>,
+        updates: Updates,
+    ) -> impl Future<Output = Result<PromptResponse, Error>> + Send {
+        let _ = id;
+        self.prompt(prompt, updates)
+    }
 
     /// Add `prompt` to the running prompt as the user's next input to its turn, whose answer then answers it too;
     /// called only when [`Info::steer`]. `false` when the CLI cannot take it now, as with no turn running or one

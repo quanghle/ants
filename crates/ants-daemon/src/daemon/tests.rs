@@ -41,6 +41,8 @@ mod escalations;
 mod handling;
 mod holds;
 mod outbox;
+#[cfg(unix)]
+mod own_turns;
 mod prompt;
 mod queue;
 mod served;
@@ -91,6 +93,8 @@ struct Bus {
     builtin: Option<ants_proto::BuiltinAnt>,
     /// The trails dev-a conducts ([`Bus::conduct`]); none: it conducts none.
     trails: Option<crate::trail::Trails>,
+    /// The turns of their own dev-a's harnesses run, sent through [`Bus::own_turns_sink`].
+    own_turns: super::own_turn::OwnTurns,
 }
 
 impl Bus {
@@ -149,6 +153,7 @@ impl Bus {
             sense: None,
             builtin: None,
             trails: None,
+            own_turns: super::own_turn::OwnTurns::default(),
         };
         (bus, replies)
     }
@@ -196,6 +201,12 @@ impl Bus {
         let trails = crate::trail::Trails::new(conducting).await.unwrap();
         self.trails = Some(trails.clone());
         trails
+    }
+
+    /// Where a launch's sessions hand the turns they run of their own, sent as dev-a on their thread.
+    fn own_turns_sink(&self) -> crate::harness::OwnTurns {
+        let owners = crate::records::owners::Owners::new(self.js.clone());
+        self.own_turns.sink(self.dev.clone(), crate::mcp::jetstream_outbox(self.js.clone()), owners)
     }
 
     /// Send `text` from the human, returning the envelope and its stream sequence.
@@ -314,7 +325,7 @@ impl Bus {
                 fallback_retry: Duration::from_millis(300),
                 store_every: Duration::from_millis(300),
             },
-            holds: super::holds::Holds::default(),
+            holds: super::holds::Holds { own_turns: self.own_turns.clone(), ..super::holds::Holds::default() },
             provider: Provider {
                 identity: self.identity.as_ref(),
                 lifecycle: self.lifecycle.as_ref(),

@@ -33,7 +33,7 @@ use super::redacting::{
 };
 use super::settings::{Config, Connection, HarnessSettings, Spending, WorktreeSettings};
 use super::window::Window;
-use super::{ACK_WAIT, GROWN_WAIT, IN_HAND_PER_HARNESS, Served, Stop, mcp_sign_in, stopped};
+use super::{ACK_WAIT, GROWN_WAIT, IN_HAND_PER_HARNESS, Served, Stop, mcp_sign_in, own_turn, stopped};
 
 /// The config with worktrees turned on or off for good, telling of a default turning them on and warning of threads
 /// running at once in one git work tree. Whether threads do get a worktree each is told once the repository is looked
@@ -278,6 +278,8 @@ pub(super) struct Services {
     pub(super) mcp: Mcp,
     /// The sign-ins to MCP servers of the harnesses' sessions.
     pub(super) mcp_sign_ins: mcp_sign_in::Untold,
+    /// The turns of their own the harnesses' sessions run.
+    pub(super) own_turns: own_turn::OwnTurns,
 }
 
 impl Services {
@@ -289,8 +291,8 @@ impl Services {
 
 /// Set up the ant's redactor, approvals, notes, spending ledger, escalator and records, and start its MCP server, its
 /// provider among the bus's taking tool calls naming `machine` for the machine serving the ant; with how the harnesses
-/// start, with the ant's MCP server and their tool requests going to its approver, and the sign-ins to MCP servers of
-/// their sessions going to its `mcp_sign_ins`.
+/// start, with the ant's MCP server and their tool requests going to its approver, the sign-ins to MCP servers of
+/// their sessions going to its `mcp_sign_ins` and the turns they run of their own to its `own_turns`.
 pub(super) async fn services(bus: Bus<'_>, allow: Allowlist, machine: &str) -> Result<(Services, Launch)> {
     let Bus { config, js, humans, providers, .. } = bus;
     let redactor = std::sync::Arc::new(redactor(config.policy.redact, &config.harness));
@@ -342,7 +344,11 @@ pub(super) async fn services(bus: Bus<'_>, allow: Allowlist, machine: &str) -> R
         mcp.with_callers(Callers::new(config.ant.clone(), machine.to_owned(), identity.clone()));
     }
     let mcp_sign_ins = mcp_sign_in::Untold::default();
-    let mut launch = launch(&config.harness, policy, &mcp).with_mcp_sign_ins(mcp_sign_ins.sink());
+    let own_turns = own_turn::OwnTurns::default();
+    let owners = crate::records::owners::Owners::new(js.clone());
+    let mut launch = launch(&config.harness, policy, &mcp)
+        .with_mcp_sign_ins(mcp_sign_ins.sink())
+        .with_own_turns(own_turns.sink(config.ant.clone(), outbox.clone(), owners));
     if let Some(sense) = sense {
         launch = launch.with_skills(sense.skills(&config.storage.home));
     }
@@ -361,6 +367,7 @@ pub(super) async fn services(bus: Bus<'_>, allow: Allowlist, machine: &str) -> R
         lifecycle,
         mcp,
         mcp_sign_ins,
+        own_turns,
     };
     Ok((services, launch))
 }

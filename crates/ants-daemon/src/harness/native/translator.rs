@@ -2,22 +2,24 @@
 //! sessions.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, AuthMethod, AuthMethodAgent, CancelNotification, CloseSessionRequest, CloseSessionResponse,
     ForkSessionRequest, ForkSessionResponse, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest,
-    PromptResponse, SessionCapabilities, SessionCloseCapabilities, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionForkCapabilities, SessionId, SessionMode, SessionModeState,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
+    LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, PromptCapabilities,
+    PromptRequest, PromptResponse, SessionCapabilities, SessionCloseCapabilities, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionForkCapabilities, SessionId, SessionMode,
+    SessionModeState, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, Client, DynConnectTo, Error, ErrorCode, JsonRpcResponse};
 
 use super::{Cli, Credentials, Native, NativeSession, Open, Setting, Updates, failed, unsupported};
-use crate::harness::{SteerRequest, SteerResponse, advertise_steering, background, skills};
+use crate::harness::{SteerRequest, SteerResponse, advertise_steering, background, own_turn, skills};
 use crate::sync::MutexExt as _;
 
 /// Credentials a provider refused at a prompt, by where they are kept and their fingerprint: what the CLI said then.
@@ -211,9 +213,15 @@ impl<N: Native> Translator<N> {
         (id, modes, options)
     }
 
+    /// How a session serving the thread opens, in `cwd` with `mcp_servers` and `skills`: reporting its sign-ins to MCP
+    /// servers and the turns it starts of its own.
+    fn open(&self, cwd: PathBuf, mcp_servers: Vec<McpServer>, skills: Option<crate::harness::Skills>) -> Open {
+        Open { cwd, mcp_servers, sign_ins: self.cli.report(), own_turns: self.cli.own_turns(), skills }
+    }
+
     pub(super) async fn new_session(self: Arc<Self>, request: NewSessionRequest) -> Result<NewSessionResponse, Error> {
         let skills = skills::of_meta(request.meta.as_ref());
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report(), skills };
+        let open = self.open(request.cwd, request.mcp_servers, skills);
         let session = self.opening()?.new_session(open).await?;
         let (id, modes, options) = self.opened(SessionId::new(session.id()), session);
         Ok(NewSessionResponse::new(id).modes(modes).config_options(options))
@@ -221,7 +229,7 @@ impl<N: Native> Translator<N> {
 
     async fn load_session(self: Arc<Self>, request: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
         let skills = skills::of_meta(request.meta.as_ref());
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: self.cli.report(), skills };
+        let open = self.open(request.cwd, request.mcp_servers, skills);
         let session = self.opening()?.load_session(&request.session_id.0, open).await?;
         let (_, modes, options) = self.opened(request.session_id, session);
         Ok(LoadSessionResponse::new().modes(modes).config_options(options))
@@ -232,7 +240,8 @@ impl<N: Native> Translator<N> {
         if !native.info().fork {
             return Err(unsupported("session/fork"));
         }
-        let open = Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: None, skills: None };
+        let open =
+            Open { cwd: request.cwd, mcp_servers: request.mcp_servers, sign_ins: None, own_turns: None, skills: None };
         let session = native.fork_session(&request.session_id.0, open).await?;
         let (id, modes, options) = self.opened(SessionId::new(session.id()), session);
         Ok(ForkSessionResponse::new(id).modes(modes).config_options(options))
@@ -247,7 +256,10 @@ impl<N: Native> Translator<N> {
         let updates = Updates::new(cx, request.session_id);
         let prompting = Prompting::new(&live.prompts);
         self.cli.runs().turn_started();
-        let done = live.session.prompt(request.prompt, updates).await;
+        let done = match own_turn::of(request.meta.as_ref()) {
+            Some(turn) => live.session.take_own_turn(turn, request.prompt, updates).await,
+            None => live.session.prompt(request.prompt, updates).await,
+        };
         drop(prompting);
         if let Err(e) = &done
             && e.code == ErrorCode::AUTH_REQUIRED
