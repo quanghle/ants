@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use ants_proto::{
     Envelope, RunId, RunState, SpendsFrom, ThreadId, TrailFunction, TrailName, TrailRun, TrailSource, TrailSpent,
+    WorkBranch,
 };
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
@@ -126,6 +127,10 @@ impl Hub {
                 from.run, from.conductor
             )
         };
+        let work_branch = match self.worktrees.get() {
+            Some(worktrees) => worktrees.ahead(thread).await,
+            None => None,
+        };
         let start = StartRun {
             trail,
             args: args.args,
@@ -134,6 +139,7 @@ impl Hub {
             thread: thread.clone(),
             limits,
             spends_from: spends_from.clone(),
+            work_branch: work_branch.map(|branch| WorkBranch { name: branch.name, by: self.ant.clone() }),
         };
         let Some(wait) = wait else {
             let run = trails.start(start).await?;

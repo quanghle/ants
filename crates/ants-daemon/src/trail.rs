@@ -130,6 +130,10 @@ pub struct StartRun {
     /// The step the run is started answering, with `run_trail` on the step's thread, `thread`: the run spends from the
     /// step's run, its limits cut to what the step's grant leaves after the runs already started answering it.
     pub spends_from: Option<SpendsFrom>,
+    /// The branch the work so far is on as the run starts: that of `thread`, holding commits the repository's `HEAD`
+    /// lacks, when the run is started with `run_trail` from a thread in a worktree. Its agent() steps name it to merge
+    /// until a step's reply names another ([`ants_proto::TrailRun::work_branch`]).
+    pub work_branch: Option<ants_proto::WorkBranch>,
 }
 
 /// How a run stands ([`Trails::status`]).

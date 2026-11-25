@@ -805,6 +805,7 @@ async fn a_paused_conductor_starts_no_run_and_holds_its_runs_steps_until_resumed
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
         spends_from: None,
+        work_branch: None,
     };
     let refused = lead.trails.start(start).await.unwrap_err();
     assert!(refused.contains("is paused") && refused.contains("'ants resume lead'"), "{refused}");

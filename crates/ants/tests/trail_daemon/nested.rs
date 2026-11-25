@@ -13,12 +13,12 @@ const DEPLOY: &str = "await agent(\"build it\", ant=\"dev\")\nawait agent(\"chec
 const FOUR: &str = "for prompt in [\"a\", \"b\", \"c\", \"d\"]:\n    await agent(prompt, ant=\"x\")\n";
 
 /// The run `run_trail` says it started.
-fn started(text: &str) -> RunId {
+pub(super) fn started(text: &str) -> RunId {
     text.strip_prefix("Started run ").unwrap().split_once(' ').unwrap().0.parse().unwrap()
 }
 
 /// An outbox handing what it sends to the receiver.
-fn channel_outbox() -> (ants_daemon::mcp::Outbox, mpsc::UnboundedReceiver<Envelope>) {
+pub(super) fn channel_outbox() -> (ants_daemon::mcp::Outbox, mpsc::UnboundedReceiver<Envelope>) {
     channel_outbox_failing(0)
 }
 
@@ -45,7 +45,7 @@ fn channel_outbox_failing(spent: usize) -> (ants_daemon::mcp::Outbox, mpsc::Unbo
     (outbox, rx)
 }
 
-fn serve(trails: &Trails) -> JoinHandle<()> {
+pub(super) fn serve(trails: &Trails) -> JoinHandle<()> {
     let trails = trails.clone();
     tokio::spawn(async move { trails.serve().await })
 }
@@ -106,6 +106,7 @@ async fn runs_started_answering_a_step_share_its_grant_and_tell_all_they_spent_a
         thread: ThreadId::generate(),
         limits: TrailLimits { steps: 4, ..TrailLimits::default() },
         spends_from: None,
+        work_branch: None,
     };
     let root = lead.trails.start(start).await.unwrap();
     let step = lead.step().await;
@@ -333,6 +334,7 @@ async fn a_nested_run_s_trail_call_on_the_route_of_its_step_s_run_is_refused_and
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
         spends_from: None,
+        work_branch: None,
     };
     let root = lead.trails.start(start).await.unwrap();
     let step = lead.step().await;

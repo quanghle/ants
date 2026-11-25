@@ -46,12 +46,13 @@ impl Trails {
             thread: firing.thread_id.clone(),
             limits: start.limits,
             spends_from: None,
+            work_branch: None,
         };
         self.start_as(run, start).await
     }
 
     pub(super) async fn start_as(&self, run: RunId, start: StartRun) -> Result<RunId, String> {
-        let StartRun { trail, args, owner, origin, thread, mut limits, spends_from } = start;
+        let StartRun { trail, args, owner, origin, thread, mut limits, spends_from, work_branch } = start;
         if self.inner.pause.get().is_some() {
             let ant = &self.inner.ant;
             return Err(format!("{ant} is paused and starts no trail run: 'ants resume {ant}' resumes it"));
@@ -87,7 +88,7 @@ impl Trails {
             spends_from,
             grants: Vec::new(),
             origin,
-            work_branch: None,
+            work_branch,
             limits,
             state: RunState::Running,
             phase: None,
@@ -146,7 +147,17 @@ impl Trails {
             return Err(format!("{by} is no human of the colony"));
         }
         let origin = Origin { by: Starter::Human { user: by.clone() }, channel: None };
-        self.start(StartRun { trail, args, owner: Some(by.clone()), origin, thread, limits, spends_from: None }).await
+        let start = StartRun {
+            trail,
+            args,
+            owner: Some(by.clone()),
+            origin,
+            thread,
+            limits,
+            spends_from: None,
+            work_branch: None,
+        };
+        self.start(start).await
     }
 
     /// Stop a run for `by`: it sends no further step, ignores the replies of the steps it waited on and withdraws

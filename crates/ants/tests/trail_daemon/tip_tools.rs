@@ -123,6 +123,7 @@ async fn leave_tip_is_left_only_answering_a_step_of_a_saved_trail_on_a_trusted_t
         thread: ThreadId::generate(),
         limits: TrailLimits::default(),
         spends_from: None,
+        work_branch: None,
     };
     let run = lead.trails.start(start(Starter::Human { user: ants_test_support::human() })).await.unwrap();
     let step = lead.step().await;

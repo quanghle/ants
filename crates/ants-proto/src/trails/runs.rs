@@ -131,8 +131,9 @@ pub struct TrailRun {
     pub grants: Vec<StepGrant>,
     /// Where that thread came from, as the conductor's daemon settled it: a run from a webhook's thread is untrusted.
     pub origin: Origin,
-    /// The branch the work of the run's steps so far is on, as the latest reply to an agent() step naming one told it,
-    /// which the agent() steps sent after it name ([`WorkBranch`]).
+    /// The branch the work of the run so far is on, as the latest reply to an agent() step naming one told it, else
+    /// the branch of the thread `run_trail` started the run from, which the agent() steps sent after it name
+    /// ([`WorkBranch`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_branch: Option<WorkBranch>,
     pub limits: TrailLimits,
