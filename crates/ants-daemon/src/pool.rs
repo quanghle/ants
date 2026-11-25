@@ -99,6 +99,14 @@ impl SessionStore {
         }
     }
 
+    /// [`SessionStore::get`] for starting the thread's harness, with whether a record was stored that this version
+    /// cannot read (one an earlier version wrote): the thread then starts over from its history and stores its new
+    /// session over the record, instead of failing every message of the thread. Pruning keeps reading such a record
+    /// as an error, which keeps the thread's worktree.
+    async fn get_to_start(&self, thread: &ThreadId) -> Result<(Option<Stored>, bool)> {
+        to_start(thread, self.get(thread).await)
+    }
+
     /// Forget the thread's session, as a failed clone order does with those it stored.
     pub async fn delete(&self, thread: &ThreadId) -> Result<()> {
         match self {
@@ -646,7 +654,7 @@ impl Pool {
             launch
         };
         let harness = launch.harness_name();
-        let stored = self.store.get(thread).await?;
+        let (stored, unreadable) = self.store.get_to_start(thread).await?;
         let moved = stored.as_ref().is_some_and(|stored| stored.harness != harness);
         let cloned = stored.as_ref().is_some_and(|stored| stored.cloned);
         let was = stored.as_ref().map(|stored| stored.cwd.as_path());
@@ -654,7 +662,9 @@ impl Pool {
         let resume =
             stored.as_ref().filter(|_| !moved && !cloned && left.is_none()).map(|stored| stored.session.clone());
         let launch = launch.for_thread(thread).in_dir(cwd.clone());
-        let session = if moved {
+        let session = if unreadable {
+            Session::start_over(&launch, Rebuild::Lost).await?
+        } else if moved {
             Session::start_over(&launch, Rebuild::Moved).await?
         } else if cloned {
             Session::start_over(&launch, Rebuild::Cloned).await?
@@ -671,7 +681,7 @@ impl Pool {
             Some(old) if *old == session.id() => tracing::info!(%thread, session = %old, "resumed harness session"),
             _ => tracing::info!(%thread, session = %session.id(), "started harness session"),
         }
-        let lost = resume.as_ref().is_some_and(|old| *old != session.id());
+        let lost = unreadable || resume.as_ref().is_some_and(|old| *old != session.id());
         if let Some(lifecycle) = self.lifecycle.as_ref().filter(|_| lost) {
             lifecycle.emit(EventKind::SessionLost, Some(thread)).await;
             lifecycle.emit(EventKind::SessionRebuilt { reason: Rebuilt::Lost }, Some(thread)).await;
@@ -692,6 +702,19 @@ impl Pool {
         self.slots().insert(thread.clone(), Slot::Ready(live));
         starting.done = true;
         Ok(Lease { pool: self, thread: thread.clone(), session, cwd, rebuilt: lost })
+    }
+}
+
+/// What [`SessionStore::get`] found, as [`SessionStore::get_to_start`] takes it: a record that does not parse is none,
+/// flagged, and any other error stays one.
+fn to_start(thread: &ThreadId, got: Result<Option<Stored>>) -> Result<(Option<Stored>, bool)> {
+    match got {
+        Ok(stored) => Ok((stored, false)),
+        Err(e) if e.downcast_ref::<serde_json::Error>().is_some() => {
+            tracing::warn!(%thread, error = format!("{e:#}"), "the stored session of the thread is unreadable: starting over");
+            Ok((None, true))
+        }
+        Err(e) => Err(e),
     }
 }
 

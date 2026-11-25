@@ -158,3 +158,17 @@ async fn ant_and_tool_instructions_reach_every_prompt_and_resumed_session() {
     assert_eq!(log.locked().loaded, ["s1"]);
     pool.shutdown().await;
 }
+
+#[test]
+fn a_stored_session_an_earlier_version_wrote_starts_the_thread_over_and_other_errors_stay() {
+    let written_by_0_3: &[u8] = br#"{"session":"0c1d","harness":"claude-code"}"#;
+    let unreadable = serde_json::from_slice::<Stored>(written_by_0_3).context("reading the session of the thread");
+    let (stored, flagged) = to_start(&thread(1), unreadable.map(Some)).unwrap();
+    assert_eq!((stored, flagged), (None, true));
+
+    let stored = Stored { session: "s1".into(), harness: "fake".into(), cwd: "/w".into(), cloned: false };
+    assert_eq!(to_start(&thread(1), Ok(Some(stored.clone()))).unwrap(), (Some(stored), false));
+    assert_eq!(to_start(&thread(1), Ok(None)).unwrap(), (None, false));
+    let timed_out = Err(anyhow::anyhow!("timed out")).context("reading the session of the thread");
+    assert!(to_start(&thread(1), timed_out).is_err(), "a store that cannot be read is no fresh start");
+}
