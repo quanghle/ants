@@ -14,7 +14,8 @@ b = await agent(f"b {n}", ant="ops")
 b
 "#;
 
-/// Iterations of [`COUNTING`]'s loop that take a worker well over 300 ms and well under its 10 s compute limit.
+/// Iterations of [`COUNTING`]'s loop that take a worker well over a 100 ms compute limit and well under the default
+/// 10 s.
 const COUNT: &str = "3000000";
 
 /// The state `run` ended in, failed, and the error and limit of it.
@@ -170,16 +171,34 @@ async fn a_run_out_of_turns_fails_naming_it_and_resumes_under_more() {
 async fn a_stop_while_the_script_computes_takes_effect_once_it_ends_listing_the_steps_it_then_waits_on() {
     let Some(server) = NatsServer::start() else { return };
     init(&server).await;
-    let mut lead = conductor(&server, &ants_binary(), Vec::new()).await;
-    let run = lead.start(COUNTING, TrailLimits::default()).await;
+    // A worker started once `hold` exists computes only once `go` does: how long the script computes is the test's,
+    // not the machine's, which under load could take a loop past the compute limit and end the run before the stop.
+    let dir = scratch_dir("trail-held-worker");
+    let (worker, hold, computing, go) = (dir.join("worker"), dir.join("hold"), dir.join("computing"), dir.join("go"));
+    let wrapper = format!(
+        "#!/bin/sh\nif [ -e {hold:?} ]; then\n  touch {computing:?}\n  while [ ! -e {go:?} ]; do sleep 0.05; done\nfi\n\
+         exec {:?} \"$@\"\n",
+        ants_binary()
+    );
+    std::fs::write(&worker, wrapper).unwrap();
+    std::process::Command::new("chmod").arg("+x").arg(&worker).status().unwrap();
+    let mut lead = conductor(&server, &worker, Vec::new()).await;
+    let run = lead.start(TWO_STEPS, TrailLimits::default()).await;
     let a = lead.step().await;
-    assert!(lead.reply(&a, COUNT).await);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let started = std::time::Instant::now();
-    let waiting = lead.trails.stop(&run, &ants_test_support::human()).await.unwrap();
+    std::fs::write(&hold, "").unwrap();
+    assert!(lead.reply(&a, "A").await);
+    eventually("the script computes", async || computing.exists()).await;
+    let waiting = {
+        let human = ants_test_support::human();
+        let stopping = lead.trails.stop(&run, &human);
+        tokio::pin!(stopping);
+        let early = tokio::time::timeout(Duration::from_millis(300), &mut stopping).await;
+        assert!(early.is_err(), "the stop waits for the computation to end: {early:?}");
+        std::fs::write(&go, "").unwrap();
+        stopping.await.unwrap()
+    };
     let b = lead.step().await;
-    assert!(started.elapsed() > Duration::from_millis(100), "the stop waited for the computation to end");
-    assert_eq!(b.text, format!("b {COUNT}"));
+    assert_eq!(b.text, "b");
     let waiting: Vec<_> = waiting.iter().map(|step| (step.to.clone(), step.message)).collect();
     assert_eq!(waiting, [(ant("ops"), b.id)], "the step sent as the computation ended is for the human to withdraw");
     assert_eq!(lead.header(&run).await.state, RunState::Stopped { by: ants_test_support::human() });
@@ -190,7 +209,7 @@ async fn a_stop_while_the_script_computes_takes_effect_once_it_ends_listing_the_
     let again = lead.step().await;
     assert_ne!(again.id, b.id);
     assert!(lead.reply(&again, "B").await);
-    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("B") });
+    assert_eq!(lead.ended(&run).await, RunState::Done { result: json!("AB") });
 }
 
 #[tokio::test]
