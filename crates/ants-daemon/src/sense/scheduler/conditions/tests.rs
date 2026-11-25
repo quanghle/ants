@@ -1,5 +1,5 @@
-//! Tests of condition probes: file fingerprints within the workdir and changes against a baseline, command checks and
-//! their timeouts, GitHub and bd checks, and git checks waiting on a reference.
+//! Tests of condition probes: file fingerprints within the workdir and changes against a baseline, command checks, the
+//! digests of their stdout and status, and their timeouts, GitHub and bd checks, and git checks waiting on a reference.
 
 use ants_sense::log::MemoryLog;
 use ants_sense::testing;
@@ -60,13 +60,26 @@ async fn command_checks_obey_allow_rules_and_use_the_workdir_and_environment() {
     let mut context = Context { workdir: &root, env: &env, allow: &[], unasked: false, items: &items, now: Utc::now() };
     let command = parse(json!({"kind":"command","command":"test \"$SENSE_TEST_FLAG\" = ready"}));
     assert!(evaluate(&command, None, &context).await.is_err());
-    let allow = vec!["execute:test *".into()];
+    let allow = vec!["execute:test *".into(), "execute:cat *".into()];
     context.allow = &allow;
     let result = evaluate(&command, None, &context).await.unwrap();
     assert!(result.fired);
-    assert_eq!(result.value, json!(true), "command output is never kept");
+    assert_eq!(result.value.as_object().unwrap().keys().collect::<Vec<_>>(), ["digest"]);
     std::fs::write(root.join("flag"), "ready").unwrap();
     assert!(evaluate(&parse(json!({"kind":"command","command":"test -f flag"})), None, &context).await.unwrap().fired);
+    let cat = parse(json!({"kind":"command","command":"cat flag"}));
+    let first = evaluate(&cat, None, &context).await.unwrap().value;
+    assert_eq!(evaluate(&cat, None, &context).await.unwrap().value, first, "the same stdout and status");
+    std::fs::write(root.join("flag"), "changed").unwrap();
+    assert_ne!(evaluate(&cat, None, &context).await.unwrap().value, first, "another stdout");
+    std::fs::remove_file(root.join("flag")).unwrap();
+    let gone = evaluate(&cat, None, &context).await.unwrap();
+    assert!(!gone.fired);
+    assert_ne!(
+        gone.value,
+        evaluate(&parse(json!({"kind":"command","command":"test -d ."})), None, &context).await.unwrap().value,
+        "the same empty stdout, another status"
+    );
     assert!(
         evaluate(&parse(json!({"kind":"command","command":"test -f flag; touch forbidden"})), None, &context)
             .await

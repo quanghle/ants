@@ -150,6 +150,8 @@ pub(super) fn schema() -> Value {
                        "time":{"type":"string","pattern":"^([01][0-9]|2[0-3]):[0-5][0-9]$"},
                        "timezone":{"type":"string","description":timezone}}},
         {"type":"object","additionalProperties":false,"required":["kind","condition"],
+         "description":"Checked at most once a minute (every 5 for gh and bd), every 30 after 10 checks seeing no \
+                        change, a command's the same stdout and exit status.",
          "properties":{"kind":{"const":"condition"},"condition":condition}},
         watch
     ]})

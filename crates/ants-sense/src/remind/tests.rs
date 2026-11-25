@@ -1,5 +1,6 @@
 //! Tests of reminders: pending deliveries across restarts, refires and snoozes, recurring deadlines, condition
-//! reservations, the active limit, triggers refused, trusted origins, and stale revisions.
+//! reservations, a command condition's backoff on its digest, the active limit, triggers refused, trusted origins,
+//! and stale revisions.
 
 use std::sync::Arc;
 
@@ -186,6 +187,47 @@ async fn condition_reservation_survives_takeover_and_rejects_an_earlier_probe() 
     .unwrap();
     assert_eq!(firing.id, format!("{id}:1"));
     assert!(!get(&*takeover, &id).await.unwrap().values.contains_key("observation"));
+}
+
+fn command_digest(stdout: &str, status: i32) -> Value {
+    let mut digest = CommandDigest::default();
+    digest.update(stdout.as_bytes());
+    digest.finish(Some(status))
+}
+
+/// Check command condition `id` when due, seeing `observation`: its unchanged checks then and the wait for the next.
+async fn check_command(items: &dyn Items, id: &ItemId, observation: Option<Value>) -> (u64, Duration) {
+    let at = Reminder::of(&get(items, id).await.unwrap()).unwrap().next_due.unwrap();
+    assert!(condition_observed(items, id, at, false, "not yet", observation).await.unwrap().is_none());
+    let reminder = Reminder::of(&get(items, id).await.unwrap()).unwrap();
+    (reminder.unchanged_checks.unwrap(), reminder.next_due.unwrap() - at)
+}
+
+#[tokio::test]
+async fn a_command_condition_backs_off_only_while_its_stdout_and_exit_status_stay_the_same() {
+    let (sense, items) = fixture(SharedLog::default()).await;
+    let id = create(&sense, json!({"kind":"condition","condition":{"kind":"command","command":"pr-blocked 7"}})).await;
+    let minute = Duration::minutes(1);
+    let seen = |stdout, status| Some(command_digest(stdout, status));
+    assert_eq!(check_command(&*items, &id, seen("ci: pending", 1)).await, (0, minute), "the first check");
+    for check in 1..30 {
+        let stdout = if check % 2 == 0 { "ci: pending" } else { "ci: running" };
+        assert_eq!(check_command(&*items, &id, seen(stdout, 1)).await, (0, minute), "a changing stdout");
+    }
+    assert_eq!(check_command(&*items, &id, seen("ci: running", 2)).await, (0, minute), "another exit status");
+    for checks in 1..10 {
+        assert_eq!(check_command(&*items, &id, seen("ci: running", 2)).await, (checks, minute));
+    }
+    let backoff = Duration::minutes(30);
+    assert_eq!(check_command(&*items, &id, seen("ci: running", 2)).await, (10, backoff), "ten unchanged checks");
+    let reminder = Reminder::of(&get(&*items, &id).await.unwrap()).unwrap();
+    assert_eq!(reminder.observation, seen("ci: running", 2), "only the digest is kept");
+    assert_eq!(check_command(&*items, &id, seen("ci: failed", 2)).await, (0, minute), "a change");
+    assert_eq!(check_command(&*items, &id, None).await, (1, minute), "a failed check sees nothing");
+    let output = Some(json!({"digest": "ci: failed"}));
+    assert_eq!(check_command(&*items, &id, output).await, (2, minute), "an observation of output is dropped");
+    let reminder = Reminder::of(&get(&*items, &id).await.unwrap()).unwrap();
+    assert_eq!(reminder.observation, seen("ci: failed", 2));
 }
 
 #[tokio::test]

@@ -92,6 +92,36 @@ impl Condition {
     }
 }
 
+/// The digest of a command condition's check, of its stdout as it is read and then its exit status: all its
+/// observation keeps of it, so a check seeing the same digest as the last counts as unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct CommandDigest(sha2::Sha256);
+
+impl CommandDigest {
+    /// Take `bytes` the command wrote to stdout next.
+    pub fn update(&mut self, bytes: &[u8]) {
+        sha2::Digest::update(&mut self.0, bytes);
+    }
+
+    /// The observation of the check: the digest of its stdout and `status`, none when a signal ended the command.
+    pub fn finish(self, status: Option<i32>) -> Value {
+        use sha2::Digest as _;
+        let status = status.map_or_else(|| "signal".to_owned(), |status| format!("exit {status}"));
+        let digest = self.0.chain_update([0]).chain_update(status).finalize();
+        json!({"digest": data_encoding::HEXLOWER.encode(&digest)})
+    }
+}
+
+/// Whether `observation` is a [`CommandDigest`]'s, so holds none of a command's output.
+pub(super) fn digest_only(observation: &Value) -> bool {
+    observation.as_object().is_some_and(|fields| {
+        fields.len() == 1
+            && fields.get("digest").and_then(Value::as_str).is_some_and(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
+    })
+}
+
 fn validate_repo(repo: &str) -> Result<(), String> {
     text("repo", repo)?;
     if repo.split('/').count() != 2 || repo.split('/').any(|part| part.is_empty() || part.starts_with('-')) {
