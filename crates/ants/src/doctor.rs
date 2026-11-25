@@ -33,10 +33,10 @@ use self::teams::{check_team_changes, check_teams};
 pub use self::trails::trail_worker;
 use self::trails::{check_runs, check_worker};
 use self::transports::{check_transports, installed_transports, same_address};
+use self::updates::{check_update, latest_release};
 use self::web::check_web_listeners;
 use crate::auth;
 use crate::people::humans::{Me, Rights};
-use crate::release::update;
 use crate::service::Services;
 use crate::webhook;
 
@@ -52,6 +52,7 @@ mod services;
 mod teams;
 mod trails;
 mod transports;
+mod updates;
 mod web;
 
 /// How long a network check may take.
@@ -172,7 +173,8 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     let reactions = check_reactions(ants, setup, NETWORK_TIMEOUT);
     let trail_saves = check_trail_saves(ants, setup, NETWORK_TIMEOUT);
     let team_changes = check_team_changes(ants, setup, NETWORK_TIMEOUT);
-    let update = check_update(loaded.as_ref().map_or_default(|l| l.auto_update));
+    let auto_update = loaded.as_ref().map_or_default(|l| l.auto_update);
+    let latest = latest_release(auto_update);
     let worker = async {
         match (&loaded, &setup.worker) {
             (None, _) => Check::skip("trail worker", "no config file read: no daemon here conducts runs"),
@@ -183,9 +185,9 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
             (Some(_), Some(program)) => check_worker(program, ants_trail::GRACE).await,
         }
     };
-    let ((reached, connected), ants_checked, resolver, reactions, trail_saves, team_changes, update, worker) =
-        tokio::join!(reach, ants_checked, resolver, reactions, trail_saves, team_changes, update, worker);
-    checks.extend(update);
+    let ((reached, connected), ants_checked, resolver, reactions, trail_saves, team_changes, latest, worker) =
+        tokio::join!(reach, ants_checked, resolver, reactions, trail_saves, team_changes, latest, worker);
+    checks.extend(check_update(auto_update, latest, connected.as_ref()).await);
     checks.extend(reached);
     let settings = loaded.as_ref().map_or_default(|l| l.storage);
     checks.extend(check_storage(connected.as_ref(), setup, settings).await);
@@ -329,28 +331,6 @@ fn check_config(path: &Path, checks: &mut Vec<Check>) -> Option<config::Loaded> 
             None
         }
     }
-}
-
-/// Whether a release newer than this ants is out, asked of GitHub only when the config file's `auto_update` is on.
-async fn check_update(mode: config::AutoUpdate) -> Option<Check> {
-    if mode == config::AutoUpdate::Off {
-        return None;
-    }
-    let running = update::Version::running();
-    let latest = tokio::time::timeout(NETWORK_TIMEOUT * 2, update::resolve(None, false)).await;
-    let release = match latest {
-        Err(_) => return Some(Check::skip("update", "GitHub did not answer in time")),
-        Ok(Err(e)) => return Some(Check::skip("update", format!("finding the latest release: {e:#}"))),
-        Ok(Ok(release)) => release,
-    };
-    Some(match release.version().filter(|latest| *latest > running) {
-        Some(latest) => Check::warn(
-            "update",
-            format!("ants {latest} is available (running {running}; auto_update = \"{}\")", mode.as_str()),
-            vec!["ants update".to_owned()],
-        ),
-        None => Check::ok("update", format!("ants {running} is the latest release")),
-    })
 }
 
 #[cfg(test)]
