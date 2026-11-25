@@ -1,5 +1,5 @@
 //! A git worktree per thread: made, reused, pruned with its branch, started from HEAD or the remote, by ants sharing
-//! a repository at once, and whether an ant gets them at all.
+//! a repository at once, registered by hand or by git, made again when cut short, and whether an ant gets them at all.
 
 use std::process::Command;
 
@@ -397,5 +397,77 @@ async fn an_upstream_base_falls_back_to_head() {
     std::fs::remove_dir_all(&remote).unwrap();
     let path = worktrees.checkout(&thread("d")).await.unwrap();
     assert_eq!(run(&path, &["log", "-1", "--format=%s"]).trim(), "local work", "the fetch fails");
+    std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worktree_registered_by_hand_is_one_to_git() {
+    let Some(repo) = repo("worktrees-by-hand") else { return };
+    let home = repo.parent().unwrap().join("home");
+    let log = repo.parent().unwrap().join("hook.log");
+    hook(&repo, &format!("echo \"$* $(pwd)\" >> '{}'", log.display()));
+    let worktrees = Worktrees::find(&ant(), &repo, &home).await.unwrap();
+    assert!(worktrees.by_hand);
+    let path = worktrees.checkout(&thread("a")).await.unwrap();
+    worktrees.checkout(&thread("b")).await.unwrap();
+    let head = run(&repo, &["rev-parse", "HEAD"]);
+    let zero = "0".repeat(head.trim().len());
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().lines().next().unwrap(),
+        format!("{zero} {} 1 {}", head.trim(), path.display()),
+        "the post-checkout hook runs as for git worktree add"
+    );
+    assert_eq!(run(&path, &["status", "--porcelain"]), "", "checked out");
+    assert_eq!(run(&path, &["rev-parse", "--show-toplevel"]).trim(), path.to_str().unwrap());
+    let listed = run(&repo, &["worktree", "list", "--porcelain"]);
+    let entry = format!("worktree {}\nHEAD {}branch refs/heads/ants/dev-a/a\n", path.display(), head);
+    assert!(listed.contains(&entry), "{listed}");
+    assert!(!listed.contains("locked") && !listed.contains("prunable"), "{listed}");
+    run(&repo, &["worktree", "prune"]);
+    assert_eq!(run(&repo, &["worktree", "list", "--porcelain"]), listed, "a prune keeps it");
+    run(&repo, &["worktree", "remove", path.to_str().unwrap()]);
+    assert!(!path.exists());
+    std::fs::remove_dir_all(home.join("worktrees/b")).unwrap();
+    assert!(run(&repo, &["worktree", "list", "--porcelain"]).contains("prunable"));
+    run(&repo, &["worktree", "prune"]);
+    assert_eq!(run(&repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 1);
+    std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_worktree_cut_short_while_made_is_made_again() {
+    let Some(repo) = repo("worktrees-cut-short") else { return };
+    let home = repo.parent().unwrap().join("home");
+    let worktrees = Worktrees::find(&ant(), &repo, &home).await.unwrap();
+    let a = thread("a");
+    let path = worktrees.checkout(&a).await.unwrap();
+    // As left by a daemon killed before the worktree was unlocked: no .git file yet, which git would not add again.
+    std::fs::remove_file(path.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/worktrees/a/locked"), "initializing").unwrap();
+    assert!(run(&repo, &["worktree", "list", "--porcelain"]).contains("locked initializing"));
+    assert_eq!(worktrees.checkout(&a).await.unwrap(), path);
+    assert_eq!(run(&path, &["branch", "--show-current"]).trim(), "ants/dev-a/a");
+    let listed = run(&repo, &["worktree", "list", "--porcelain"]);
+    assert_eq!(listed.matches("worktree ").count(), 2, "{listed}");
+    assert!(!listed.contains("locked"), "{listed}");
+    std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn a_sparse_checkout_gets_its_worktrees_from_git() {
+    let Some(repo) = repo("worktrees-sparse") else { return };
+    let home = repo.parent().unwrap().join("home");
+    std::fs::create_dir(repo.join("other")).unwrap();
+    std::fs::write(repo.join("other/file"), "two").unwrap();
+    run(&repo, &["add", "."]);
+    commit(&repo, "other");
+    run(&repo, &["sparse-checkout", "set", "sub"]);
+    let worktrees = Worktrees::find(&ant(), &repo, &home).await.unwrap();
+    assert!(!worktrees.by_hand, "git worktree add copies the sparse checkout");
+    let path = worktrees.checkout(&thread("a")).await.unwrap();
+    assert!(path.join("sub/file").is_file() && !path.join("other").exists(), "sparse as the repository");
+    assert_eq!(run(&path, &["branch", "--show-current"]).trim(), "ants/dev-a/a");
     std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
 }

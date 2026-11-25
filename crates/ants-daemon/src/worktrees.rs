@@ -19,13 +19,14 @@
 //! Ants of one daemon may share a repository. Git does not take a `git worktree prune` beside a `git worktree add` on
 //! one repository (the prune removes the add's half-made registration), so the removals, prunes and branch deletions
 //! of a repository go alone across the daemon, by its git common directory. Adds do run beside each other,
-//! `ADDS_AT_ONCE` at a time: git takes the longer for one the more worktrees the repository has, which a burst of
-//! new threads of many ants would otherwise wait for one after the other. An add that fails anyway, as with another
-//! process's git racing it, is tried once more, alone, and a branch made by an add that failed is deleted; an add git
-//! does not finish within [`ADD_TIMEOUT`] is stopped, and failed. Fetches of one repository go one at a time, apart
-//! from those changes, so they do not clash on the remote's refs while other ants' worktrees need not wait for the
-//! remote. A branch of the ant left without a worktree, as by a daemon killed while adding one, is deleted once its
-//! thread has no session, unless it holds commits.
+//! `ADDS_AT_ONCE` at a time, so a burst of new threads of many ants does not wait for each checkout one after the
+//! other. A worktree on a new branch is registered by hand rather than by `git worktree add`, which takes the longer
+//! the more worktrees the repository has (`register`). An add that fails anyway, as with another process's git racing
+//! it, is tried once more, alone, and a branch made by an add that failed is deleted; an add git does not finish
+//! within [`ADD_TIMEOUT`] is stopped, and failed. Fetches of one repository go one at a time, apart from those
+//! changes, so they do not clash on the remote's refs while other ants' worktrees need not wait for the remote. A
+//! branch of the ant left without a worktree, as by a daemon killed while adding one, is deleted once its thread has
+//! no session, unless it holds commits.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,7 @@ use crate::process::{git, run};
 
 mod branches;
 mod policy;
+mod register;
 mod repository;
 
 pub use self::branches::Branch;
@@ -52,10 +54,11 @@ pub use self::policy::{per_thread, shares_git_workdir};
 /// Longest a git fetch for a thread's new branch may take.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Longest one `git worktree add` may take, its checkout and the repository's `post-checkout` hook included.
+/// Longest the making of one thread's worktree may take, its checkout and the repository's `post-checkout` hook
+/// included.
 pub const ADD_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How many `git worktree add` run at once in one repository, across the daemon's ants.
+/// How many worktrees are made at once in one repository, across the daemon's ants.
 const ADDS_AT_ONCE: u32 = 4;
 
 /// Where a thread's new branch starts: the ant config key `worktree_base`.
@@ -120,9 +123,14 @@ pub struct Worktrees {
     /// daemon working in it ([`repository::repository`]). Its [`repository::Changes`] are taken after
     /// [`Worktrees::changing`], never before.
     repository: Arc<Repository>,
+    /// The repository's git common directory, where its worktrees are registered.
+    common: PathBuf,
+    /// Whether a thread's worktree on a new branch is registered by hand rather than by `git worktree add`
+    /// ([`register`]).
+    by_hand: bool,
     /// Where a thread's new branch starts.
     base: Base,
-    /// Longest one `git worktree add` may take.
+    /// Longest the making of one worktree may take.
     add_timeout: Duration,
 }
 
@@ -146,15 +154,20 @@ impl Worktrees {
                     );
                 }
                 let dir = home.join("worktrees");
-                let common = match git(workdir, ["rev-parse", "--git-common-dir"]).await {
-                    Ok(common) => workdir.join(common.trim()),
+                let (git_dir, common) = match git(workdir, ["rev-parse", "--git-dir", "--git-common-dir"]).await {
+                    Ok(dirs) => {
+                        let mut dirs = dirs.lines().map(|dir| workdir.join(dir.trim()));
+                        let git_dir = dirs.next().unwrap_or_else(|| repo.join(".git"));
+                        (git_dir.clone(), dirs.next().unwrap_or(git_dir))
+                    }
                     Err(e) => {
                         tracing::warn!(error = format!("{e:#}"), "finding the repository's git directory");
-                        repo.join(".git")
+                        (repo.join(".git"), repo.join(".git"))
                     }
                 };
+                let by_hand = register::by_hand(workdir, &git_dir).await;
                 let worktrees = Self::new(ant, repo, within, dir, &common);
-                Some(Self { workdir: workdir.to_owned(), born: AtomicBool::new(born), ..worktrees })
+                Some(Self { workdir: workdir.to_owned(), born: AtomicBool::new(born), by_hand, ..worktrees })
             }
             Err(e) => {
                 tracing::warn!(
@@ -197,6 +210,7 @@ impl Worktrees {
     }
 
     fn new(ant: &UserId, repo: PathBuf, within: PathBuf, dir: PathBuf, common: &Path) -> Self {
+        let common = common.canonicalize().unwrap_or_else(|_| common.to_owned());
         Self {
             ant: ant.clone(),
             repo,
@@ -205,7 +219,9 @@ impl Worktrees {
             born: AtomicBool::new(true),
             dir,
             changing: Mutex::new(()),
-            repository: repository(common),
+            repository: repository(&common),
+            common,
+            by_hand: false,
             base: Base::Head,
             add_timeout: ADD_TIMEOUT,
         }
@@ -356,18 +372,23 @@ impl Worktrees {
         Err(e)
     }
 
-    /// One attempt at [`Worktrees::add`]: on `branch`, or a new branch started from `new` when given. Fails when git
-    /// does not finish within [`Worktrees::add_timeout`].
+    /// One attempt at [`Worktrees::add`]: on `branch` with `git worktree add`, or a new branch started from `new` when
+    /// given, registered by hand where it can be ([`register`]). Fails when git does not finish within
+    /// [`Worktrees::add_timeout`]. Registrations of `path` left by an attempt cut short are forgotten first.
     async fn try_add(&self, path: &Path, branch: &str, new: Option<&str>) -> Result<()> {
         // Left over from an add that failed half-way: it is no worktree, and in the way of a new one.
         if path.exists() {
             std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))?;
         }
         std::fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
-        let path = path.as_os_str();
+        if let (Some(name), Ok(dir)) = (path.file_name(), self.dir.canonicalize()) {
+            self.forget_cut_short(&dir.join(name));
+        }
         let args: Vec<&OsStr> = match new {
-            None => vec!["worktree".as_ref(), "add".as_ref(), "--quiet".as_ref(), path, branch.as_ref()],
+            Some(start) if self.by_hand => return self.register(path, branch, start).await,
+            None => vec!["worktree".as_ref(), "add".as_ref(), "--quiet".as_ref(), path.as_ref(), branch.as_ref()],
             Some(start) => {
+                let path = path.as_os_str();
                 // No upstream for the branch, which starting from a remote branch would otherwise set. Forced, which
                 // spares git looking through every worktree of the repository for one with the branch checked out:
                 // none has a branch this add makes.
