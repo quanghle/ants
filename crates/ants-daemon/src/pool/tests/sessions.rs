@@ -95,7 +95,7 @@ async fn a_clone_s_session_is_forked_else_starts_over_from_the_thread_history() 
     assert_eq!(log.locked().forked, [("s9".to_owned(), std::path::PathBuf::from("/w"))]);
 
     let store = SessionStore::memory();
-    let stored = Stored { session, harness: "test".to_owned(), cwd: "/".into(), cloned: true };
+    let stored = Stored { session, harness: "test".to_owned(), cwd: Some("/".into()), cloned: true };
     store.put(&thread(1), stored).await.unwrap();
     let pool = Pool::new(launch, store.clone(), 4, IDLE);
     let reply = pool.run(&thread(1), with_history("b")).await.unwrap().text;

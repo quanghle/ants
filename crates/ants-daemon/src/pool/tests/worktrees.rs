@@ -132,8 +132,8 @@ async fn a_thread_with_a_session_from_before_worktrees_were_turned_on_stays_in_t
     assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, "s1: b", "resumed, where it was created");
     pool.prompt(&thread(2), "c").await.unwrap();
     assert_eq!(log.locked().cwds, [repo.clone(), repo.clone(), home.join("worktrees/t2")]);
-    assert_eq!(store.get(&thread(1)).await.unwrap().map(|s| s.cwd), Some(repo.clone()));
-    assert_eq!(store.get(&thread(2)).await.unwrap().map(|s| s.cwd), Some(home.join("worktrees/t2")));
+    assert_eq!(store.get(&thread(1)).await.unwrap().and_then(|s| s.cwd), Some(repo.clone()));
+    assert_eq!(store.get(&thread(2)).await.unwrap().and_then(|s| s.cwd), Some(home.join("worktrees/t2")));
     std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
 }
 
@@ -170,7 +170,7 @@ async fn a_session_whose_directory_is_no_longer_the_thread_s_starts_over_told_wh
         (log.cwds[2..].to_vec(), log.loaded.len())
     };
     assert_eq!((cwds, loaded), (vec![repo.clone()], 1), "the session of the worktree is not loaded in the workdir");
-    assert_eq!(store.get(&thread(1)).await.unwrap().map(|s| s.cwd), Some(repo.clone()));
+    assert_eq!(store.get(&thread(1)).await.unwrap().and_then(|s| s.cwd), Some(repo.clone()));
     assert_eq!(pool.prune_worktrees().await.removed, 0, "its session is stored still");
     pool.evict_idle(Instant::now() + IDLE * 2);
     store.delete(&thread(1)).await.unwrap();
@@ -200,5 +200,46 @@ async fn a_thread_under_review_works_among_its_checkouts() {
     pool.evict_idle(Instant::now() + IDLE * 2);
     assert_eq!(pool.prompt(&thread(1), "c").await.unwrap(), "s1: c", "its session goes on, the checkouts gone");
     assert_eq!(log.locked().cwds[2..], [home.join("worktrees/t1")]);
+    std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn a_stored_session_without_cwd_resumes_and_records_its_directory() {
+    let legacy: Stored = serde_json::from_str(r#"{"session":"s1","harness":"test"}"#).unwrap();
+    assert_eq!(legacy, Stored { session: SessionId::new("s1"), harness: "test".to_owned(), cwd: None, cloned: false });
+
+    let Some(repo) = crate::test_support::repo("pool-legacy-cwd") else { return };
+    let home = repo.parent().unwrap().join("home");
+    let (launch, log, _) = fake::launch();
+    let launch = launch.in_dir(repo.clone());
+    let store = SessionStore::memory();
+
+    // Shared workdir: pre-0.4.0 record resumes in place rather than relocating from an empty path, and heals cwd.
+    let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
+    pool.prompt(&thread(1), "a").await.unwrap();
+    pool.shutdown().await;
+    store.put(&thread(1), legacy.clone()).await.unwrap();
+
+    let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE);
+    assert_eq!(pool.run(&thread(1), with_history("b")).await.unwrap().text, "s1: b");
+    assert_eq!(log.locked().loaded, ["s1"], "resumed, not started over as relocated");
+    assert_eq!(store.get(&thread(1)).await.unwrap().and_then(|s| s.cwd), Some(repo.clone()));
+    pool.shutdown().await;
+
+    // Worktrees on: pre-0.4.0 record resumes in its worktree and records that worktree as cwd.
+    let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
+    let pool = Pool::new(launch.clone(), store.clone(), 4, IDLE).with_worktrees(worktrees);
+    pool.prompt(&thread(2), "c").await.unwrap();
+    pool.shutdown().await;
+    let legacy_t2: Stored = serde_json::from_str(r#"{"session":"s2","harness":"test"}"#).unwrap();
+    store.put(&thread(2), legacy_t2).await.unwrap();
+
+    let worktrees = Worktrees::find(&"dev-a".parse().unwrap(), &repo, &home).await.unwrap();
+    let pool = Pool::new(launch, store.clone(), 4, IDLE).with_worktrees(worktrees);
+    let t2 = home.join("worktrees/t2");
+    assert_eq!(pool.run(&thread(2), with_history("d")).await.unwrap().text, "s2: d");
+    assert_eq!(log.locked().loaded, ["s1", "s2"]);
+    assert_eq!(log.locked().cwds.last(), Some(&t2));
+    assert_eq!(store.get(&thread(2)).await.unwrap().and_then(|s| s.cwd), Some(t2));
     std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
 }

@@ -59,7 +59,9 @@ pub struct Stored {
     pub session: SessionId,
     pub harness: String,
     /// The directory the session was created in: the thread works there for as long as the session is stored.
-    pub cwd: PathBuf,
+    /// `None` only when read from a record written before `cwd` was stored; filled in on the next write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
     /// Set by a clone order for a session it could not fork: the clone's first session of the thread starts over,
     /// seeded from the thread's history ([`Rebuild::Cloned`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -389,7 +391,7 @@ impl Pool {
                 lifecycle.emit(EventKind::SessionRebuilt { reason: Rebuilt::Overflow }, Some(thread)).await;
             }
             let harness = self.launch_on(fallback)?.harness_name().to_owned();
-            let stored = Stored { session: after, harness, cwd: lease.cwd.clone(), cloned: false };
+            let stored = Stored { session: after, harness, cwd: Some(lease.cwd.clone()), cloned: false };
             if let Err(e) = self.store.put(thread, stored).await {
                 tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
             }
@@ -649,7 +651,7 @@ impl Pool {
         let stored = self.store.get(thread).await?;
         let moved = stored.as_ref().is_some_and(|stored| stored.harness != harness);
         let cloned = stored.as_ref().is_some_and(|stored| stored.cloned);
-        let was = stored.as_ref().map(|stored| stored.cwd.as_path());
+        let was = stored.as_ref().and_then(|stored| stored.cwd.as_deref()).filter(|p| !p.as_os_str().is_empty());
         let (cwd, left) = self.directory(thread, launch.cwd(), was).await?;
         let resume =
             stored.as_ref().filter(|_| !moved && !cloned && left.is_none()).map(|stored| stored.session.clone());
@@ -678,10 +680,15 @@ impl Pool {
         }
         // A session resumed among a review's checkouts keeps the directory it was created in.
         let resumed = resume.is_some() && !lost;
-        let created_in = stored.filter(|_| resumed).map_or_else(|| cwd.clone(), |stored| stored.cwd);
+        let created_in = stored
+            .filter(|_| resumed)
+            .and_then(|stored| stored.cwd)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| cwd.clone());
         // Stored on every start, so the key of a thread still in use does not age out. Losing it only costs the
         // thread its history after the next stop, so the prompt goes ahead.
-        let stored = Stored { session: session.id(), harness: harness.to_owned(), cwd: created_in, cloned: false };
+        let stored =
+            Stored { session: session.id(), harness: harness.to_owned(), cwd: Some(created_in), cloned: false };
         if let Err(e) = self.store.put(thread, stored).await {
             tracing::warn!(%thread, error = format!("{e:#}"), "storing the session of the thread");
         }

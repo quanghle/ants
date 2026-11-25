@@ -54,7 +54,12 @@ async fn a_restarted_pool_resumes_a_session_only_in_the_harness_it_ran_in() {
     pool.run_on(&thread(1), with_history("a"), Some(0)).await.unwrap();
     pool.shutdown().await;
     let ran_in = |harness: &str| {
-        Some(Stored { session: SessionId::new("s1"), harness: harness.to_owned(), cwd: "/".into(), cloned: false })
+        Some(Stored {
+            session: SessionId::new("s1"),
+            harness: harness.to_owned(),
+            cwd: Some("/".into()),
+            cloned: false,
+        })
     };
     assert_eq!(store.get(&thread(1)).await.unwrap(), ran_in("spare"));
 

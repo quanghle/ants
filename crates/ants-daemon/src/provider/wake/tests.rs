@@ -35,7 +35,7 @@ impl Setup {
         let sessions = SessionStore::memory();
         let thread = ThreadId::generate();
         let (session, cwd) = (SessionId::new("s1"), std::path::PathBuf::from("/"));
-        let stored = Stored { session, harness: "fake".to_owned(), cwd, cloned: false };
+        let stored = Stored { session, harness: "fake".to_owned(), cwd: Some(cwd), cloned: false };
         sessions.put(&thread, stored).await.unwrap();
         let sent = Sent::default();
         let fail_after_storing = Arc::new(AtomicBool::new(false));
