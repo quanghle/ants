@@ -112,3 +112,31 @@ fn w_and_e_withdraw_a_channel_post_of_the_human_from_the_ants_it_woke_that_have_
     let started = format!("withdraw unavailable: dev-a started on message {} already; x cancels it", top.id);
     assert_eq!(page.key(Key::Char('W'), &m.data, at(5)), refused(started));
 }
+
+#[test]
+fn a_watcher_s_wake_a_later_one_withdrew_is_left_out_and_one_the_ant_took_up_stays() {
+    let thread = ThreadId::generate();
+    let m = model();
+    let wake = |seq: u64, text: &str, replaces: Option<Uuid>| {
+        let mut entry = message(seq, &thread, "dev-a", "dev-a", text);
+        entry.provider = Some("sense".into());
+        entry.watcher = Some(Box::new(ants_proto::WatchWake {
+            id: "rem-1".into(),
+            title: "CI of #7".into(),
+            done: false,
+            output: None,
+            cut: false,
+            replaces,
+        }));
+        entry
+    };
+    let first = wake(1, "checks are red", None);
+    let second = wake(2, "checks are amber", first.id);
+    // The daemon found the second taken up already: the third names none.
+    let third = wake(3, "checks are green", None);
+    let mut page = Page::new(thread.clone());
+    page.history.loaded(&thread, Ok(vec![first, second, third])).unwrap();
+    let shown = screen(&page, &m, 100, at(4));
+    assert!(!shown.contains("checks are red"), "{shown}");
+    assert!(shown.contains("checks are amber") && shown.contains("checks are green"), "{shown}");
+}

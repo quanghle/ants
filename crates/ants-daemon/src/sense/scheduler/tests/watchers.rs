@@ -75,6 +75,10 @@ async fn a_command_watcher_wakes_on_each_change_with_its_output_and_retires_once
     let first = host.requests.locked()[0].clone();
     assert!(first.text.contains("```\nfailing [redacted]\n```"), "{}", first.text);
     assert_eq!(first.replaces, None);
+    let watcher = first.watcher.clone().expect("a watcher's wake");
+    assert_eq!((watcher.id, watcher.title.as_str()), (id.to_string(), "scheduled work"));
+    assert_eq!((watcher.output.as_deref(), watcher.done, watcher.cut), (Some("failing [redacted]"), false, false));
+    assert_eq!(watcher.replaces, None, "the daemon's to set");
     assert!(config.outputs.locked().is_empty(), "the output goes with its wake");
 
     std::fs::write(root.join("result"), "passing").unwrap();
@@ -88,6 +92,7 @@ async fn a_command_watcher_wakes_on_each_change_with_its_output_and_retires_once
     cycle(&sense, items, &host, &config, at).await.unwrap();
     let last = host.requests.locked()[2].clone();
     assert!(last.text.contains("this is its last firing") && last.text.contains("[exit status 3]"), "{}", last.text);
+    assert!(last.watcher.as_ref().is_some_and(|watcher| watcher.done), "{last:?}");
     assert_eq!(last.replaces.as_deref(), Some(second.id.as_str()));
     assert_eq!(reminder(items, &id).await.status, Status::Done);
     at += chrono::Duration::hours(1);
@@ -211,4 +216,6 @@ async fn a_firing_prepared_before_a_restart_says_its_output_was_not_kept() {
         "{:?}",
         host.requests.locked()
     );
+    let watcher = host.requests.locked()[0].watcher.clone().expect("a watcher's wake");
+    assert_eq!((watcher.output, watcher.cut), (None, false), "no output kept");
 }

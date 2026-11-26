@@ -4,14 +4,15 @@
 //! new one. A request's id is remembered for [`WAKE_DEDUP`] in [`ants_proto::ATTEMPTS_BUCKET`], so a repeat sends
 //! nothing and names the same thread, across restarts and the machines serving the ant. The message carries a fresh
 //! turn budget, so it spends none of its thread's turns; it renews no spending allowance, and an ant is woken at most
-//! [`WAKES_PER_HOUR`] times an hour.
+//! [`WAKES_PER_HOUR`] times an hour. A request replacing an earlier one withdraws that one's message first, and a
+//! watcher's wake names the message only when the withdrawal won ([`ants_proto::WatchWake::replaces`]).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use ants_proto::provider::{BoxFuture, Host, MAX_WAKE_TEXT, RpcError, WAKE_DEDUP, WakeRequest, Woken};
-use ants_proto::{Envelope, ThreadId, UserId};
+use ants_proto::{Envelope, MAX_WATCH_OUTPUT, MessageMark, ThreadId, UserId, WatchWake};
 use async_nats::jetstream;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -123,6 +124,19 @@ struct Mark {
     /// Whether the message was stored: until it is, a repeat of the request sends it again, under the same id.
     #[serde(default)]
     sent: bool,
+    /// What withdrawing the message of the request it replaces did, once tried, so a repeat sends the same message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replaced: Option<Replaced>,
+}
+
+/// What became of the message of the request a wake request replaces ([`WakeRequest::replaces`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum Replaced {
+    /// This daemon withdrew it, message `message`, from the ant's queue before the ant took it up.
+    Withdrawn { message: Uuid },
+    /// It goes on: taken up already, withdrawn by someone else, or no message of the provider's known.
+    Kept,
 }
 
 impl Waker {
@@ -151,6 +165,9 @@ impl Waker {
         if request.text.len() > MAX_WAKE_TEXT {
             return Err(invalid(&format!("the text of a wake request is limited to {MAX_WAKE_TEXT} bytes")));
         }
+        if let Some(watcher) = &request.watcher {
+            check_watcher(watcher)?;
+        }
         let key = mark_key(&self.ant, provider, &request.id);
         // A second try finds the mark of a request with the same id that took the key meanwhile.
         for _ in 0..2 {
@@ -163,7 +180,7 @@ impl Waker {
             }
             self.count()?;
             let thread = request.thread.clone().unwrap_or_else(ThreadId::generate);
-            let mark = Mark { thread, message: Uuid::now_v7(), sent: false };
+            let mark = Mark { thread, message: Uuid::now_v7(), sent: false, replaced: None };
             let value = serde_json::to_vec(&mark).map_err(|e| RpcError::internal(&e.to_string()))?;
             if self.marks.update(&key, value, last).await.map_err(storing)? {
                 return self.send(&key, mark, &request).await;
@@ -210,12 +227,30 @@ impl Waker {
         Ok(())
     }
 
-    /// Send the message of `mark`, the request's under `key`, unless it was sent, and record it sent.
-    async fn send(&self, key: &str, mark: Mark, request: &WakeRequest) -> Result<Woken, RpcError> {
+    /// Send the message of `mark`, the request's under `key`, unless it was sent, and record it sent: after
+    /// withdrawing the message of the request it replaces, unless a try before did, the outcome recorded with it.
+    async fn send(&self, key: &str, mut mark: Mark, request: &WakeRequest) -> Result<Woken, RpcError> {
         let thread = mark.thread.clone();
         if mark.sent {
             return Ok(Woken { thread });
         }
+        let mut replaced = mark.replaced;
+        if let (None, Some(earlier)) = (replaced, &request.replaces) {
+            replaced = self.withdraw(earlier).await;
+            if replaced.is_some() {
+                mark.replaced = replaced;
+                if let Err(e) = self.put_mark(key, &mark).await {
+                    tracing::warn!(%thread, error = e.message, "recording the replaced wake");
+                }
+            }
+        }
+        let watcher = request.watcher.clone().map(|watcher| WatchWake {
+            replaces: match replaced {
+                Some(Replaced::Withdrawn { message }) => Some(message),
+                Some(Replaced::Kept) | None => None,
+            },
+            ..watcher
+        });
         let owner = match &request.thread {
             Some(thread) => self.owners.recorded(thread, &self.ant).await.unwrap_or_else(|e| {
                 tracing::warn!(%thread, error = format!("{e:#}"), "reading the thread's owner for a wake");
@@ -225,42 +260,67 @@ impl Waker {
         };
         let envelope = Envelope::on_thread(thread.clone(), self.ant.clone(), self.ant.clone(), request.text.clone())
             .with_owner(owner)
-            .woken_by(&self.provider);
+            .woken_by(&self.provider)
+            .watching(watcher);
         // Under the mark's id, the stream drops it as a duplicate if an earlier try stored it.
         let envelope = Envelope { id: mark.message, ..envelope };
         (self.outbox)(envelope).await.map_err(|e| unavailable(&format!("sending the wake: {e:#}")))?;
         tracing::info!(%thread, provider = self.provider, id = request.id, "woke the ant");
         crate::monitoring::metrics::ant(&self.ant).woken();
-        if let Some(replaced) = &request.replaces {
-            self.withdraw(replaced).await;
-        }
-        let sent = serde_json::to_vec(&Mark { sent: true, ..mark }).map_err(|e| RpcError::internal(&e.to_string()))?;
-        if let Err(e) = self.marks.put(key, sent).await {
-            tracing::warn!(%thread, error = format!("{e:#}"), "recording the wake sent");
+        if let Err(e) = self.put_mark(key, &Mark { sent: true, ..mark }).await {
+            tracing::warn!(%thread, error = e.message, "recording the wake sent");
         }
         Ok(Woken { thread })
+    }
+
+    async fn put_mark(&self, key: &str, mark: &Mark) -> Result<(), RpcError> {
+        let value = serde_json::to_vec(mark).map_err(|e| RpcError::internal(&e.to_string()))?;
+        self.marks.put(key, value).await.map_err(storing)
     }
 }
 
 impl Waker {
     /// Withdraw the message of the provider's wake request `id` while it waits in the ant's queue, as a later wake
-    /// replacing it is sent: one taken up already goes on.
-    async fn withdraw(&self, id: &str) {
+    /// replacing it is about to be sent: one taken up already goes on. Withdrawn only when this daemon's mark won
+    /// (or, on a repeat, had won: the mark it put is found); none when it could not tell.
+    async fn withdraw(&self, id: &str) -> Option<Replaced> {
         let key = mark_key(&self.ant, &self.provider, id);
         let earlier = match self.mark(&key).await {
             Ok((Some(mark), _)) if mark.sent => mark,
-            Ok(_) => return,
+            Ok(_) => return Some(Replaced::Kept),
             Err(e) => {
                 tracing::warn!(id, error = e.message, "reading the replaced wake");
-                return;
+                return None;
             }
         };
+        let withdrawn = Replaced::Withdrawn { message: earlier.message };
         match crate::delivery::attempts::withdraw(&self.marks, &self.ant, &earlier.message, &self.ant, None).await {
-            Ok(None) => tracing::info!(thread = %earlier.thread, id, "withdrew the replaced wake"),
-            Ok(Some(_)) => {}
-            Err(e) => tracing::warn!(id, error = format!("{e:#}"), "withdrawing the replaced wake"),
+            Ok(None) => {
+                tracing::info!(thread = %earlier.thread, id, "withdrew the replaced wake");
+                Some(withdrawn)
+            }
+            Ok(Some(MessageMark::Withdrawn { by, on_behalf_of: None, .. })) if by == self.ant => Some(withdrawn),
+            Ok(Some(_)) => Some(Replaced::Kept),
+            Err(e) => {
+                tracing::warn!(id, error = format!("{e:#}"), "withdrawing the replaced wake");
+                None
+            }
         }
     }
+}
+
+/// Refuse a watcher's part of a wake request that is malformed or carries more output than a wake does.
+fn check_watcher(watcher: &WatchWake) -> Result<(), RpcError> {
+    if watcher.id.is_empty() || watcher.title.trim().is_empty() {
+        return Err(invalid("a watcher's wake needs the watcher's id and title"));
+    }
+    if watcher.output.as_ref().is_some_and(|output| output.len() > MAX_WATCH_OUTPUT) {
+        return Err(invalid(&format!("a watcher's output in a wake is limited to {MAX_WATCH_OUTPUT} bytes")));
+    }
+    if watcher.id.len() + watcher.title.len() > MAX_WAKE_TEXT {
+        return Err(invalid(&format!("a watcher's id and title are limited to {MAX_WAKE_TEXT} bytes")));
+    }
+    Ok(())
 }
 
 /// Key in [`ants_proto::ATTEMPTS_BUCKET`] of the mark of `provider`'s wake request `id` for `ant`: under the ant's own

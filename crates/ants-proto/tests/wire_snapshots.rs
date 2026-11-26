@@ -47,6 +47,18 @@ fn parse<T: DeserializeOwned>(json: &str) -> T {
     serde_json::from_str(json).unwrap_or_else(|e| panic!("does not parse: {e}\n{json}"))
 }
 
+/// A watcher's wake that withdrew the watcher's earlier one, its output cut.
+fn watch_wake() -> WatchWake {
+    WatchWake {
+        id: "rem-2".to_owned(),
+        title: "CI of #7".to_owned(),
+        done: true,
+        output: Some("build: fail".to_owned()),
+        cut: true,
+        replaces: Some(id(2)),
+    }
+}
+
 fn id(n: u128) -> Uuid {
     Uuid::from_u128(0x019a7d2e_0000_7000_8000_000000000000 | n)
 }
@@ -154,6 +166,7 @@ fn envelope() -> Envelope {
         on_behalf_of: Some(user("alice")),
         webhook: true,
         provider: Some("sense".to_owned()),
+        watcher: Some(Box::new(watch_wake())),
         queue: true,
         allow: Some(vec!["read:*".to_owned(), "other:send_message".to_owned()]),
         mention: Some(mention()),
@@ -245,6 +258,7 @@ fn plain_envelope() -> Envelope {
         on_behalf_of: None,
         webhook: false,
         provider: None,
+        watcher: None,
         queue: false,
         allow: None,
         mention: None,

@@ -142,6 +142,32 @@ fn a_provider_s_wake_is_one_only_on_the_ant_s_own_inbox() {
 }
 
 #[test]
+fn a_watcher_s_wake_is_one_only_as_a_provider_s_wake_on_the_ant_s_own_inbox() {
+    let dev_a = p("dev-a");
+    let watcher = ants_proto::WatchWake {
+        id: "rem-1".into(),
+        title: "CI of #7".into(),
+        done: false,
+        output: Some("red".into()),
+        cut: false,
+        replaces: Some(Uuid::from_u128(1)),
+    };
+    let wake =
+        Envelope::on_thread(t("t1"), dev_a.clone(), dev_a, "changed").woken_by("sense").watching(Some(watcher.clone()));
+    let claimed = Envelope { from: p("dev-b"), ..wake.clone() };
+    let unwoken = Envelope { provider: None, ..wake.clone() };
+    let entries = entries(&[
+        (wake.subject(), json(&wake)),
+        (claimed.subject(), json(&claimed)),
+        (unwoken.subject(), json(&unwoken)),
+        // On another sender's subject: forged.
+        ("ants.inbox.dev-a.mallory".to_owned(), json(&wake)),
+    ]);
+    assert_eq!(entries[0].watcher.as_deref(), Some(&watcher));
+    assert!(entries[1..].iter().all(|entry| entry.watcher.is_none()), "{entries:?}");
+}
+
+#[test]
 fn an_answer_counts_only_when_valid_and_to_a_question_read_before_it() {
     let alice = p("alice");
     let options = ["yes".to_owned(), "not yet".to_owned()];

@@ -85,9 +85,9 @@ pub use enroll::{
     enrollment_user,
 };
 pub use envelope::{
-    Envelope, FindingOutcome, FindingVerdict, MAX_OUTCOME_REASON, MAX_REVIEW_FINDINGS_BYTES, Mention, NotesPost,
-    NoticeKind, Quote, ReviewCommit, ReviewOutcomes, SummaryOf, SummaryRequest, one_recipient, parse_mentions,
-    several_mentions,
+    Envelope, FindingOutcome, FindingVerdict, MAX_OUTCOME_REASON, MAX_REVIEW_FINDINGS_BYTES, MAX_WATCH_OUTPUT, Mention,
+    NotesPost, NoticeKind, Quote, ReviewCommit, ReviewOutcomes, SummaryOf, SummaryRequest, WatchWake, one_recipient,
+    parse_mentions, several_mentions,
 };
 pub use error::Error;
 pub use escalation::{Away, ChainEntry, Escalation, EscalationReason, Hop, OwnerBecause};

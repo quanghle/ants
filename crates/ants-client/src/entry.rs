@@ -1,9 +1,10 @@
 //! One stored message on a thread, an [`Entry`], with its [`Kind`], and what an ant stored on its timeline as an entry
-//! has it ([`ToolCall`], [`NoReply`], [`PromptEnded`], [`ToolRejection`]).
+//! has it ([`ToolCall`], [`NoReply`], [`PromptEnded`], [`ToolRejection`]), and the watchers' wakes a later wake of
+//! theirs withdrew ([`withdrawn_wakes`]).
 
 use ants_proto::{
     Acting, Answer, Answered, ChannelId, DecidedBy, EscalationReason, NoReplyWhy, NoticeKind, Questions, Quote,
-    Reacted, SummaryRequest, ThreadId, TimelineEnd, UserId, Uuid,
+    Reacted, SummaryRequest, ThreadId, TimelineEnd, UserId, Uuid, WatchWake,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -268,6 +269,12 @@ pub struct Entry {
     /// [`Envelope::wake_provider`]: ants_proto::Envelope::wake_provider
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// The watcher whose wake an inbox message that is a provider's wake is ([`Envelope::wake_watcher`]): the watcher,
+    /// its check's output, and the watcher's earlier wake the daemon withdrew for this one ([`withdrawn_wakes`]).
+    ///
+    /// [`Envelope::wake_watcher`]: ants_proto::Envelope::wake_watcher
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watcher: Option<Box<WatchWake>>,
     /// The thread an inbox message's thread was spun off ([`Envelope::origin_thread`]).
     ///
     /// [`Envelope::origin_thread`]: ants_proto::Envelope::origin_thread
@@ -323,6 +330,7 @@ impl Entry {
             turns: None,
             webhook: false,
             provider: None,
+            watcher: None,
             origin: None,
             in_reply_to: None,
             notice: None,
@@ -426,6 +434,42 @@ impl Entry {
     pub fn users(&self) -> impl Iterator<Item = &UserId> {
         self.from.iter().chain(&self.to)
     }
+
+    /// The watcher whose wake it is, the ant's to itself, and the ant: none for a forged message.
+    fn watcher_wake(&self) -> Option<(&WatchWake, &UserId)> {
+        let watcher = self.watcher.as_deref().filter(|_| self.kind == Kind::Message && !self.forged)?;
+        let ant = self.from.as_ref().filter(|from| self.to.as_ref() == Some(*from) && self.provider.is_some())?;
+        Some((watcher, ant))
+    }
+}
+
+/// The ids of the watchers' wakes among `entries` that a later wake of the same watcher, on the same thread, withdrew
+/// from the ant's queue before the ant took them up ([`WatchWake::replaces`]): a reader hides them. A wake counts
+/// only as the ant's to itself and not forged, for the one it names and the one naming it alike.
+pub fn withdrawn_wakes(entries: &[Entry]) -> std::collections::HashSet<Uuid> {
+    let wakes: std::collections::HashMap<Uuid, (&Entry, &WatchWake, &UserId)> = entries
+        .iter()
+        .filter_map(|entry| Some((entry.id?, entry, entry.watcher_wake()?)))
+        .map(|(id, entry, (watcher, ant))| (id, (entry, watcher, ant)))
+        .collect();
+    wakes
+        .values()
+        .filter_map(|(entry, watcher, ant)| {
+            let replaced = watcher.replaces?;
+            let (earlier, earlier_watcher, earlier_ant) = wakes.get(&replaced)?;
+            let same = earlier_watcher.id == watcher.id && earlier_ant == ant && earlier.thread_id == entry.thread_id;
+            same.then_some(replaced)
+        })
+        .collect()
+}
+
+/// `entries` without the watchers' wakes a later wake withdrew ([`withdrawn_wakes`]).
+pub fn without_withdrawn_wakes(mut entries: Vec<Entry>) -> Vec<Entry> {
+    let withdrawn = withdrawn_wakes(&entries);
+    if !withdrawn.is_empty() {
+        entries.retain(|entry| entry.id.is_none_or(|id| !withdrawn.contains(&id)));
+    }
+    entries
 }
 
 #[cfg(test)]
@@ -495,6 +539,14 @@ mod tests {
             turns: Some(3),
             webhook: true,
             provider: Some("sense".into()),
+            watcher: Some(Box::new(WatchWake {
+                id: "rem-1".into(),
+                title: "CI of #7".into(),
+                done: true,
+                output: Some("red".into()),
+                cut: true,
+                replaces: Some(id(10)),
+            })),
             origin: Some("t0".parse().unwrap()),
             in_reply_to: Some(id(8)),
             notice: Some(NoticeKind::Spend),
@@ -506,7 +558,7 @@ mod tests {
     fn an_entry_reads_back_from_what_it_serializes_to_with_every_field() {
         let entry = full();
         let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json.as_object().unwrap().len(), 35, "a field left out: {json}");
+        assert_eq!(json.as_object().unwrap().len(), 36, "a field left out: {json}");
         assert_eq!(json["attachments"][0]["stored"], "2023-11-14T22:13:20.005Z");
         assert_eq!((&json["in_reply_to"], &json["turns"]), (&json!(Uuid::from_u128(8)), &json!(3)));
         assert_eq!(serde_json::from_value::<Entry>(json).unwrap(), entry);
@@ -518,5 +570,64 @@ mod tests {
             json!({ "seq": 1, "stored_at": bare.stored_at, "kind": "no_reply", "thread_id": "t1", "text": "" })
         );
         assert_eq!(serde_json::from_value::<Entry>(json).unwrap(), bare);
+    }
+
+    /// Watcher `watcher`'s wake `id` from `ant` to `to` on thread `t1`, replacing the wake `replaces`.
+    fn wake(id: u128, watcher: &str, ant: &str, to: &str, replaces: Option<u128>) -> Entry {
+        let watch = WatchWake {
+            id: watcher.into(),
+            title: "CI of #7".into(),
+            done: false,
+            output: None,
+            cut: false,
+            replaces: replaces.map(Uuid::from_u128),
+        };
+        Entry {
+            id: Some(Uuid::from_u128(id)),
+            from: Some(ant.parse().unwrap()),
+            to: Some(to.parse().unwrap()),
+            provider: Some("sense".into()),
+            watcher: Some(Box::new(watch)),
+            ..Entry::new(u64::try_from(id).unwrap(), Utc::now(), Kind::Message, "t1".parse().unwrap())
+        }
+    }
+
+    fn ids(entries: &[Entry]) -> Vec<u128> {
+        entries.iter().map(|entry| entry.id.unwrap().as_u128()).collect()
+    }
+
+    #[test]
+    fn a_watcher_s_wake_hides_the_earlier_wake_it_withdrew_and_only_that() {
+        let entries = vec![
+            wake(1, "w", "dev-a", "dev-a", None),
+            wake(2, "w", "dev-a", "dev-a", Some(1)),
+            wake(3, "w", "dev-a", "dev-a", None),
+            wake(4, "w", "dev-a", "dev-a", Some(3)),
+        ];
+        assert_eq!(ids(&without_withdrawn_wakes(entries)), [2, 4]);
+        // The daemon names no wake the ant took up already: those stay.
+        let taken = vec![wake(1, "w", "dev-a", "dev-a", None), wake(2, "w", "dev-a", "dev-a", None)];
+        assert_eq!(ids(&without_withdrawn_wakes(taken)), [1, 2]);
+    }
+
+    #[test]
+    fn a_wake_names_no_other_watcher_s_wake_nor_one_elsewhere_and_a_forged_one_none() {
+        let other_watcher = vec![wake(1, "w", "dev-a", "dev-a", None), wake(2, "v", "dev-a", "dev-a", Some(1))];
+        assert_eq!(ids(&without_withdrawn_wakes(other_watcher)), [1, 2]);
+        let elsewhere = Entry { thread_id: "t2".parse().unwrap(), ..wake(1, "w", "dev-a", "dev-a", None) };
+        assert_eq!(ids(&without_withdrawn_wakes(vec![elsewhere, wake(2, "w", "dev-a", "dev-a", Some(1))])), [1, 2]);
+        let forged = Entry { forged: true, ..wake(2, "w", "dev-a", "dev-a", Some(1)) };
+        assert_eq!(ids(&without_withdrawn_wakes(vec![wake(1, "w", "dev-a", "dev-a", None), forged])), [1, 2]);
+        let from_another = wake(2, "w", "dev-b", "dev-a", Some(1));
+        assert_eq!(ids(&without_withdrawn_wakes(vec![wake(1, "w", "dev-a", "dev-a", None), from_another])), [1, 2]);
+        let another_ant = wake(2, "w", "dev-b", "dev-b", Some(1));
+        assert_eq!(ids(&without_withdrawn_wakes(vec![wake(1, "w", "dev-a", "dev-a", None), another_ant])), [1, 2]);
+        let unwoken = Entry { provider: None, ..wake(2, "w", "dev-a", "dev-a", Some(1)) };
+        assert_eq!(ids(&without_withdrawn_wakes(vec![wake(1, "w", "dev-a", "dev-a", None), unwoken])), [1, 2]);
+        let earlier_forged = Entry { forged: true, ..wake(1, "w", "dev-a", "dev-a", None) };
+        assert_eq!(
+            ids(&without_withdrawn_wakes(vec![earlier_forged, wake(2, "w", "dev-a", "dev-a", Some(1))])),
+            [1, 2]
+        );
     }
 }

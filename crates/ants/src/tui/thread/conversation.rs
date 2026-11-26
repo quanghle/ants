@@ -92,7 +92,8 @@ pub(super) struct Timed<'a> {
 
 /// The conversation of `entries`, in the order stored, `with` what is timed, each before the first message stored
 /// after it, the calls and ends shown as `tools` has them; `busy` tells whether an ant runs a prompt on the thread,
-/// the turns after the last message then running, and `human` tells the humans.
+/// the turns after the last message then running, and `human` tells the humans. A watcher's wake a later one withdrew
+/// is left out ([`ants_client::entry::withdrawn_wakes`]).
 pub(super) fn rows<'a>(
     entries: &'a [Entry],
     with: Timed<'a>,
@@ -111,7 +112,9 @@ pub(super) fn rows<'a>(
     timeline.sort_by_key(|(at, ..)| *at);
     let mut timeline = timeline.into_iter().peekable();
     let mut rows = Vec::new();
-    for entry in entries.iter().filter(|e| !e.kind.on_timeline()) {
+    let withdrawn = ants_client::entry::withdrawn_wakes(entries);
+    let shown = |e: &&Entry| !e.kind.on_timeline() && e.id.is_none_or(|id| !withdrawn.contains(&id));
+    for entry in entries.iter().filter(shown) {
         let stretch = std::iter::from_fn(|| timeline.next_if(|(at, ..)| *at < entry.stored_at));
         let stretch: Vec<_> = stretch.map(|(_, ant, item)| (ant, item)).collect();
         timed(&mut rows, &levels, stretch, tools == Tools::Collapsed, false);

@@ -291,6 +291,11 @@ pub struct WakeRequest {
     /// queue, as a watcher's newer firing replaces its last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
+    /// The watcher whose wake it is, which the message carries ([`crate::Envelope::watcher`]): its output at most
+    /// [`crate::MAX_WATCH_OUTPUT`] bytes. Its `replaces` is the daemon's to set, from what withdrawing the message of
+    /// the request `replaces` names did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watcher: Option<crate::WatchWake>,
 }
 
 /// The result of [`super::method::WAKE`].

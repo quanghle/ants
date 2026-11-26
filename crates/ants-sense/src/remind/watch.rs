@@ -34,7 +34,7 @@ pub const MAX_TRAIL_SECONDS: u64 = 5 * 60;
 /// The most bytes of JSON of a trail watcher's args.
 pub const MAX_ARGS_BYTES: usize = 64 * 1024;
 /// The most bytes of a check's output a wake passes on.
-pub const MAX_OUTPUT_BYTES: usize = 4096;
+pub const MAX_OUTPUT_BYTES: usize = ants_proto::MAX_WATCH_OUTPUT;
 
 /// What a watcher runs on each check.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
