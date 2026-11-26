@@ -69,8 +69,13 @@ a thread whose origin is of a kind this version of sense does not know.
   against the mean of up to 5 dreams before, as `prompts replied 3 (mean 1.5, +100%)`, a share of failed tool calls
   in points), its open work, then its core memories and its top 10 memories of every scope as `sense_recall` ranks
   them without a query. Each entry is keyed by its id, kind, scope and trust, the growth report and each list of open
-  work by its name. Entries past the size cap of a memories read are left out and counted; an ant with no sense data
-  reads `no sense data` ([cli.md](cli.md)).
+  work by its name, and its typed fields tell the same ([architecture.md](architecture.md#provider-protocol)): its
+  `section` (`identity`, `report`, `persona`, `self_model`, `relationships`, `skills`, `dream`, `work`, `memories`,
+  `left_out`), and the `id`, `kind`, `scope`, `trust`, `title` (of a dream, the title of its diary) and `revision` of
+  the item it shows, `core` for a core memory; a list of open work has `kind` `findings`, `commitments`, `reminders`
+  or `tasks`.
+  Entries past the size cap of a memories read, their keys and typed fields counted, are left out and counted; an ant
+  with no sense data reads `no sense data` ([cli.md](cli.md)).
 - **The open work in the memories view,** only shown: the ant answers its findings and keeps its work with its own
   tools, and nothing in the view asks the human reading it to act. One entry a list, none for an empty one, each at
   most 20 items within 32 KiB, those left out counted, the items as the brief and the ant's tools show them:
@@ -79,7 +84,11 @@ a thread whose origin is of a kind this version of sense does not know.
     offers first, then those of a sage's answer given late, which the next dream offers ([Dreams](#dreams)), after a line naming the dream, where it stands and how many it has;
   - `open commitments`: overdue first, each with its promisee, due time and source thread;
   - `active reminders`: the fired ones with their last firing, then the upcoming ones with their trigger, each with
-    its next time, thread and commitment;
+    its next time, thread and commitment, a watcher with its last firing and failing checks, and a typed row for each
+    in `triggers`, counted within the 32 KiB: its `id`, `revision`, `kind` (`reminder` or `watcher`), `title`,
+    `status` (`upcoming`, `delivery_pending` or `awaiting_acknowledgement`), `thread`, `trigger` (as `after 600 s`,
+    `daily at 09:00 Europe/London` or `watch command gh pr checks 7, every 60 s`), `next_due`, `last_fired`,
+    `commitment`, and a watcher's `failing_checks` and `last_error`;
   - `open tasks`: those not closed, by priority then age, each with its status, lease and external reference
     ([Work and reminders](#work-and-reminders)).
 - **The growth report:** the view's `growth report` entry counts, from the ant's sense data alone, how its identity

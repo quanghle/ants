@@ -2,14 +2,15 @@
 //! last dream unanswered or deferred, its sage's among them, then those its sage gave late, which the next dream offers
 //! ([`crate::dream`]); its open commitments, overdue first ([`crate::promise`]); its active reminders, fired then
 //! upcoming ([`crate::remind`]); and its tasks not closed, by priority then age ([`crate::task`]). Each is one entry
-//! listing at most [`LISTED`] within [`MEMORY_FILE_CAP`] bytes, the cap of an entry of a memories read, then counting
-//! those left out; none for an empty list. The ant answers its findings and keeps its work with its own tools: nothing
+//! of section `work`, its kind naming the list, listing at most [`LISTED`] within [`MEMORY_FILE_CAP`] bytes, the cap
+//! of an entry of a memories read, then counting those left out; none for an empty list. The entry of the reminders
+//! has a typed row for each reminder and watcher it lists, counted within the cap. The ant answers its findings and keeps its work with its own tools: nothing
 //! here asks the human reading it to act (requirement ants-x39hk.1).
 
 use std::fmt::Write as _;
 
 use ants_proto::MEMORY_FILE_CAP;
-use ants_proto::provider::MemoryEntry;
+use ants_proto::provider::{MemoryEntry, MemoryFields, TriggerRow};
 use chrono::{DateTime, Utc};
 
 use crate::dream::{self, State, finding_line};
@@ -34,14 +35,15 @@ const TAIL: usize = 64;
 
 /// The entries of the open work of the ant whose items are `items`, at `now`.
 pub(super) async fn entries(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<MemoryEntry>, StoreError> {
-    let [fired, upcoming] = remind::brief(items, now).await?;
+    let [fired, upcoming] = remind::rows(items, now).await?;
+    let reminders = fired.into_iter().chain(upcoming).map(|(line, row)| (line, Some(row))).collect();
     let tasks = task::list(items, usize::MAX).await?;
     let tasks = tasks.iter().filter(|found| found.task.status != Status::Closed).map(task::brief_line).collect();
     Ok([
         findings(items).await?,
-        listed(COMMITMENTS, String::new(), promise::brief(items, now).await?.lines),
-        listed(REMINDERS, String::new(), fired.lines.into_iter().chain(upcoming.lines).collect()),
-        listed(TASKS, String::new(), tasks),
+        listed(COMMITMENTS, "commitments", String::new(), plain(promise::brief(items, now).await?.lines)),
+        listed(REMINDERS, "reminders", String::new(), reminders),
+        listed(TASKS, "tasks", String::new(), plain(tasks)),
     ]
     .into_iter()
     .flatten()
@@ -88,26 +90,36 @@ async fn findings(items: &dyn Items) -> Result<Option<MemoryEntry>, StoreError> 
         let _ = write!(head, "; {late} given late by {sage}, which the next dream offers");
     }
     head.push('.');
-    Ok(listed(FINDINGS, head, lines))
+    Ok(listed(FINDINGS, "findings", head, plain(lines)))
 }
 
-/// The entry `key`: `head`, then the first of `lines` fitting [`LISTED`] lines and [`MEMORY_FILE_CAP`] bytes, then one
-/// counting those left out; none without lines.
-fn listed(key: &str, head: String, lines: Vec<String>) -> Option<MemoryEntry> {
+/// `lines` without rows.
+fn plain(lines: Vec<String>) -> Vec<(String, Option<TriggerRow>)> {
+    lines.into_iter().map(|line| (line, None)).collect()
+}
+
+/// The entry `key`, of `kind`: `head`, then the first of `lines` fitting [`LISTED`] lines and [`MEMORY_FILE_CAP`] bytes, their
+/// rows as JSON among them, then one counting those left out; none without lines.
+fn listed(key: &str, kind: &str, head: String, lines: Vec<(String, Option<TriggerRow>)>) -> Option<MemoryEntry> {
     if lines.is_empty() {
         return None;
     }
     let total = lines.len();
+    let mut fields =
+        MemoryFields { section: Some(super::WORK.to_owned()), kind: Some(kind.to_owned()), ..MemoryFields::default() };
     let mut content = head;
     let mut shown = 0;
-    for line in lines.into_iter().take(LISTED) {
-        if content.len() + 1 + line.len() > MEMORY_FILE_CAP - TAIL {
+    for (line, row) in lines.into_iter().take(LISTED) {
+        let mut more = fields.clone();
+        more.triggers.extend(row);
+        if content.len() + 1 + line.len() + more.size() > MEMORY_FILE_CAP - TAIL {
             break;
         }
         if !content.is_empty() {
             content.push('\n');
         }
         content.push_str(&line);
+        fields = more;
         shown += 1;
     }
     if shown < total {
@@ -116,7 +128,7 @@ fn listed(key: &str, head: String, lines: Vec<String>) -> Option<MemoryEntry> {
         }
         let _ = write!(content, "{} more left out.", total - shown);
     }
-    Some(MemoryEntry { key: key.to_owned(), content })
+    Some(MemoryEntry { key: key.to_owned(), content, fields })
 }
 
 #[cfg(test)]

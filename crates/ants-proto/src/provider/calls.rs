@@ -314,10 +314,100 @@ pub struct MemoriesView {
     pub memories: Vec<MemoryEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One entry of a memories view: its `key`, a line naming what it is, and its `content`, the text shown under it,
+/// with what it is in typed fields ([`MemoryFields`]) for a client to show without reading them out of the key. A
+/// provider may leave any of those out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryEntry {
     pub key: String,
     pub content: String,
+    #[serde(flatten)]
+    pub fields: MemoryFields,
+}
+
+impl MemoryEntry {
+    /// An entry of `key` and `content` alone.
+    pub fn new(key: impl Into<String>, content: impl Into<String>) -> Self {
+        Self { key: key.into(), content: content.into(), fields: MemoryFields::default() }
+    }
+}
+
+/// What an entry of a memories view is, beside its key and content, each left out when unknown or not applying.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryFields {
+    /// The part of the view it belongs to, as the provider names its parts (sense: `identity`, `report`, `persona`,
+    /// `self_model`, `relationships`, `skills`, `dream`, `work`, `memories`, `left_out`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+    /// The id of the item it shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The item's kind, or, for a list of open work, what it lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Whom or what the item is about (`self`, `human:<name>`, `ant:<name>`, `repo:<remote>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Whether the item's text is the ant's own (`self`) or to verify before use (`untrusted`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The item's revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    /// Whether it is a core memory, which every brief carries.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub core: bool,
+    /// The rows of an entry listing reminders and watchers, one per line of its content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<TriggerRow>,
+}
+
+impl MemoryFields {
+    /// The bytes it adds to the JSON of an entry, which the caps of a memories read count ([`crate::MEMORY_FILE_CAP`],
+    /// [`crate::MEMORIES_CAP`]): none when it holds no field.
+    pub fn size(&self) -> usize {
+        match serde_json::to_vec(self) {
+            // Flattened into the entry, its fields lose their braces and gain a comma.
+            Ok(json) if json.len() > 2 => json.len() - 1,
+            Ok(_) => 0,
+            Err(_) => usize::MAX,
+        }
+    }
+}
+
+/// A reminder or watcher an entry of a memories view lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerRow {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    /// `reminder` or `watcher`.
+    pub kind: String,
+    pub title: String,
+    /// Where it stands: sense's are `upcoming`, `delivery_pending` (fired, its delivery not yet confirmed) and
+    /// `awaiting_acknowledgement` (fired and delivered).
+    pub status: String,
+    /// The thread its firings wake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<ThreadId>,
+    /// When it fires, in a line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_due: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fired: Option<DateTime<Utc>>,
+    /// The id of the commitment it reminds of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commitment: Option<String>,
+    /// A watcher's checks in a row that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_checks: Option<u64>,
+    /// Why a watcher's latest check failed, while its checks keep failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// The result of [`super::method::EXPORT`]: the provider's data of an ant, which `ants ant export` carries as it is.
@@ -341,6 +431,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn the_size_of_typed_fields_is_what_they_add_to_an_entry() {
+        let plain = MemoryEntry::new("lesson-1", "Tag first.");
+        assert_eq!(plain.fields.size(), 0);
+        let fields = MemoryFields { kind: Some("lesson".into()), revision: Some(2), ..MemoryFields::default() };
+        let typed = MemoryEntry { fields, ..plain.clone() };
+        let len = |entry: &MemoryEntry| serde_json::to_vec(entry).unwrap().len();
+        assert_eq!(len(&typed), len(&plain) + typed.fields.size());
+    }
 
     #[test]
     fn webhook_and_review_threads_are_untrusted() {

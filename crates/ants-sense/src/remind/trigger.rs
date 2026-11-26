@@ -54,6 +54,26 @@ impl Trigger {
         }
     }
 
+    /// When it fires, in a line: `at 2025-01-01T12:00:00Z`, `after 300 s`, `daily at 09:00 Europe/London`,
+    /// `weekly on mon at 09:00 UTC`, `condition {…}`, `watch command gh run list, every 60 s`.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::At { at } => format!("at {}", crate::items::stamp(*at)),
+            Self::After { seconds } => format!("after {seconds} s"),
+            Self::Daily { time, timezone } => format!("daily at {time} {timezone}"),
+            Self::Weekly { weekday, time, timezone } => format!("weekly on {weekday} at {time} {timezone}"),
+            Self::Condition { condition } => format!("condition {}", json!(condition)),
+            Self::Watch(watch) => {
+                let run = match &watch.run {
+                    super::Watched::Command { command } => format!("command {command}"),
+                    super::Watched::Trail { name, .. } => format!("trail {name}"),
+                };
+                let every = watch.interval_seconds.unwrap_or(super::watch::MIN_INTERVAL_SECONDS);
+                format!("watch {run}, every {every} s")
+            }
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), String> {
         match self {
             Self::At { .. } => Ok(()),

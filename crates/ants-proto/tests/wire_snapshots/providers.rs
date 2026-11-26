@@ -111,9 +111,11 @@ fn provider_protocol() {
 
     snap("provider_woken", &Woken { thread: other_thread() });
     snap("provider_ant_ref", &ant);
-    let memories =
-        MemoriesView { memories: vec![MemoryEntry { key: "lesson/deploy".into(), content: "Tag first.".into() }] };
+    let memories = MemoriesView { memories: vec![MemoryEntry::new("lesson/deploy", "Tag first.")] };
     snap("provider_memories_view", &memories);
+    snap("provider_memories_view_typed", &MemoriesView { memories: vec![typed_memory(), reminders()] });
+    let untyped: MemoriesView = parse(r#"{"memories": [{"key": "lesson/deploy", "content": "Tag first."}]}"#);
+    assert_eq!(untyped, memories, "a provider may leave the typed fields out");
     let export = Export { provider: "sense".into(), data: json!({"memories": 1}) };
     snap("provider_export", &export);
     snap("provider_import_request", &ImportRequest { ant: ant.ant, identity: ant.identity, export });
@@ -161,9 +163,15 @@ fn admin_orders_of_providers() {
     snap("admin_op_export_provider", &AdminOp::ExportProvider { identity: "0f1e".into() });
     snap("admin_op_import_provider", &AdminOp::ImportProvider { identity: "0f1e".into(), payload: payload.clone() });
     snap("admin_provider_export", &ProviderExport { provider: Some("sense".into()), payload: Some(payload) });
+    let typed = typed_memory();
     let provider = ProviderMemories {
         provider: "sense".into(),
-        memories: vec![BdMemory { key: "lesson/deploy".into(), content: "Tag first.".into(), truncated: true }],
+        memories: vec![ProviderMemory {
+            key: typed.key,
+            content: typed.content,
+            fields: typed.fields,
+            truncated: true,
+        }],
         error: Some("provider sense did not answer within 10s".into()),
     };
     let memories = Memories {
@@ -173,4 +181,70 @@ fn admin_orders_of_providers() {
         ..Memories::default()
     };
     snap("admin_memories_of_a_provider", &memories);
+}
+
+/// A memory of a memories view, with its typed fields.
+fn typed_memory() -> provider::MemoryEntry {
+    provider::MemoryEntry {
+        key: "lesson-1a2b (lesson, self, importance 3, core), active, trust self, revision 2".into(),
+        content: "Tag first\nThe release job reads the tag.".into(),
+        fields: provider::MemoryFields {
+            section: Some("memories".into()),
+            id: Some("lesson-1a2b".into()),
+            kind: Some("lesson".into()),
+            scope: Some("self".into()),
+            trust: Some("self".into()),
+            title: Some("Tag first".into()),
+            revision: Some(2),
+            core: true,
+            triggers: vec![],
+        },
+    }
+}
+
+/// The active reminders of a memories view: a reminder fired and a watcher failing its checks.
+fn reminders() -> provider::MemoryEntry {
+    use provider::TriggerRow;
+
+    let reminder = TriggerRow {
+        id: "reminder-3c4d".into(),
+        revision: Some(4),
+        kind: "reminder".into(),
+        title: "Ask for the review".into(),
+        status: "awaiting_acknowledgement".into(),
+        thread: Some(thread()),
+        trigger: Some("at 2025-01-01T12:01:00Z".into()),
+        next_due: Some(at(59)),
+        last_fired: Some(at(1)),
+        commitment: Some("promise-5e6f".into()),
+        failing_checks: None,
+        last_error: None,
+    };
+    let watcher = TriggerRow {
+        id: "reminder-7a8b".into(),
+        revision: Some(9),
+        kind: "watcher".into(),
+        title: "CI of main".into(),
+        status: "upcoming".into(),
+        thread: Some(other_thread()),
+        trigger: Some("watch command gh run list, every 60 s".into()),
+        next_due: Some(at(3)),
+        last_fired: Some(at(2)),
+        commitment: None,
+        failing_checks: Some(3),
+        last_error: Some("it exited with status 1".into()),
+    };
+    provider::MemoryEntry {
+        key: "active reminders".into(),
+        content:
+            "- reminder-3c4d (revision 4, fired): Ask for the review; ...\n- reminder-7a8b (revision 9, upcoming): \
+                  CI of main; ..."
+                .into(),
+        fields: provider::MemoryFields {
+            section: Some("work".into()),
+            kind: Some("reminders".into()),
+            triggers: vec![reminder, watcher],
+            ..provider::MemoryFields::default()
+        },
+    }
 }

@@ -8,8 +8,8 @@
 //!   daemon's), as `bd memories --json` lists them.
 //! - Provider memories: the memories view of the ant's provider ([`crate::provider::Providers::of`]), when it serves
 //!   one and the order names the ant's identity, read after the core memories, so they come before the harness's in the
-//!   caps. A provider failing or slower than [`PROVIDER_TIMEOUT`] is noted in [`ProviderMemories::error`], not a
-//!   refusal.
+//!   caps, each entry with its typed fields ([`ProviderMemory`]), which count within them. A provider failing or slower
+//!   than [`PROVIDER_TIMEOUT`] is noted in [`ProviderMemories::error`], not a refusal.
 //!
 //! A file is read only if, its symbolic links resolved, it still matches one of the globs, their own links resolved,
 //! and lies under the ant's workdir, its home or the home directory: a link out of those paths is named in
@@ -28,10 +28,10 @@ use std::time::Duration;
 
 #[cfg(doc)]
 use ants_proto::AdminOp;
-use ants_proto::provider::{AntRef, Capability, Connected};
+use ants_proto::provider::{AntRef, Capability, Connected, MemoryEntry, MemoryFields};
 use ants_proto::{
     AdminOrder, AdminOutcome, BdMemories, BdMemory, CoreMemories, MEMORIES_CAP, MEMORIES_FRESH, MEMORY_FILE_CAP,
-    Memories, MemoryFile, ProviderMemories, Skipped,
+    Memories, MemoryFile, ProviderMemories, ProviderMemory, Skipped,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -101,7 +101,7 @@ pub(crate) struct Of<'a> {
     pub identity: Option<&'a str>,
 }
 
-/// A provider's error, cut short for an outcome.
+/// A provider's error, or a text of its memories view, cut short for an outcome.
 pub(super) fn cut_error(e: impl std::fmt::Display) -> String {
     e.to_string().chars().take(MAX_ERROR).collect()
 }
@@ -135,7 +135,7 @@ pub(crate) async fn read(ant: &Ant, harness: Option<&Harness>, env: &Env, provid
     let mut skipped = Vec::new();
     let core = core_memories(ant);
     let mut cap = |what: &str, text: Option<String>| {
-        let (text, cut) = budget.take(&text?, false)?;
+        let (text, cut) = budget.take(&text?, MEMORY_FILE_CAP, false)?;
         if cut {
             skipped.push(Skipped { what: what.to_owned(), why: "cut short: over the size cap".to_owned() });
         }
@@ -195,9 +195,9 @@ async fn provider_memories(
     match view {
         Ok(view) => {
             for entry in view.memories {
-                let key = entry.key.chars().take(MAX_ERROR).collect::<String>();
-                match budget.take(&entry.content, false) {
-                    Some((content, truncated)) => memories.memories.push(BdMemory { key, content, truncated }),
+                let key = cut_error(&entry.key);
+                match provider_memory(entry, budget) {
+                    Some(memory) => memories.memories.push(memory),
                     None => skipped.push(Skipped { what: format!("provider memory {key}"), why: OVER_CAP.to_owned() }),
                 }
             }
@@ -207,13 +207,47 @@ async fn provider_memories(
     Some(memories)
 }
 
-/// What is left of [`MEMORIES_CAP`]: bytes of the texts as JSON strings.
+/// `entry` of a provider's memories view as `budget` lets it be shown: its key and typed texts cut to [`MAX_ERROR`]
+/// characters, its first trigger rows that fit, then the start of its content within [`MEMORY_FILE_CAP`] bytes, its
+/// typed fields as JSON among them; none when nothing of it fits.
+fn provider_memory(entry: MemoryEntry, budget: &mut Budget) -> Option<ProviderMemory> {
+    let MemoryEntry { key, content, fields } = entry;
+    let cut = |text: Option<String>| text.as_deref().map(cut_error);
+    let mut fields = MemoryFields {
+        section: cut(fields.section),
+        id: cut(fields.id),
+        kind: cut(fields.kind),
+        scope: cut(fields.scope),
+        trust: cut(fields.trust),
+        title: cut(fields.title),
+        ..fields
+    };
+    let mut truncated = false;
+    while !fields.triggers.is_empty() && fields.size() > budget.0.min(MEMORY_FILE_CAP) {
+        fields.triggers.pop();
+        truncated = true;
+    }
+    let size = fields.size();
+    if size > budget.0.min(MEMORY_FILE_CAP) {
+        return None;
+    }
+    let before = budget.0;
+    budget.0 -= size;
+    let Some((content, cut_short)) = budget.take(&content, MEMORY_FILE_CAP - size, truncated) else {
+        budget.0 = before;
+        return None;
+    };
+    Some(ProviderMemory { key: cut_error(&key), content, fields, truncated: cut_short })
+}
+
+/// What is left of [`MEMORIES_CAP`]: bytes of the texts as JSON strings, and of a provider memory's typed fields as
+/// JSON.
 struct Budget(usize);
 
 impl Budget {
-    /// The start of `text` that fits in [`MEMORY_FILE_CAP`] bytes and in what is left, which it takes, with whether it
-    /// was cut short, or already `cut`; none when nothing is left.
-    fn take(&mut self, text: &str, cut: bool) -> Option<(String, bool)> {
+    /// The start of `text` that fits in `cap` bytes, at most [`MEMORY_FILE_CAP`], and in what is left, which it takes,
+    /// with whether it was cut short, or already `cut`; none when nothing is left.
+    fn take(&mut self, text: &str, cap: usize, cut: bool) -> Option<(String, bool)> {
         if self.0 == 0 && !text.is_empty() {
             return None;
         }
@@ -225,7 +259,7 @@ impl Budget {
                 c if c < ' ' => 6,
                 c => c.len_utf8(),
             };
-            if bytes + c.len_utf8() > MEMORY_FILE_CAP || json + escaped > self.0 {
+            if bytes + c.len_utf8() > cap.min(MEMORY_FILE_CAP) || json + escaped > self.0 {
                 end = at;
                 break;
             }
@@ -440,7 +474,7 @@ fn read_file(path: &Path, budget: &mut Budget) -> std::io::Result<Option<MemoryF
         Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
     };
     let cut = (text.len() as u64) < size;
-    Ok(budget.take(&text, cut).map(|(text, truncated)| MemoryFile {
+    Ok(budget.take(&text, MEMORY_FILE_CAP, cut).map(|(text, truncated)| MemoryFile {
         path: path.display().to_string(),
         size,
         text,
@@ -480,7 +514,7 @@ async fn bd_memories(
     match listed {
         Ok(listed) => {
             for Listed { key, content } in listed {
-                match budget.take(&content, false) {
+                match budget.take(&content, MEMORY_FILE_CAP, false) {
                     Some((content, truncated)) => memories.memories.push(BdMemory { key, content, truncated }),
                     None => skipped.push(Skipped { what: format!("bd memory {key}"), why: OVER_CAP.to_owned() }),
                 }
