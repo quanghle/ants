@@ -22,7 +22,7 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::{ANSWER_GRACE, ANSWER_WAIT, Change, HumanMessage, HumanStore};
+use super::{ANSWER_GRACE, ANSWER_WAIT, Change, HumanMessage, HumanStore, StoredLetter};
 use crate::delivery::attempts::{self, Recorded};
 use crate::delivery::queue;
 use crate::records::direct_kv::DirectKv;
@@ -45,10 +45,15 @@ struct JetStreamStore {
 }
 
 impl JetStreamStore {
-    async fn read(&self, filter: &str, since: SystemTime, mut take: impl FnMut(u64, &str, &[u8])) -> Result<()> {
+    async fn read(
+        &self,
+        filter: &str,
+        since: SystemTime,
+        mut take: impl FnMut(u64, SystemTime, &str, &[u8]),
+    ) -> Result<()> {
         let start = consumer::DeliverPolicy::ByStartTime { start_time: since.into() };
-        reading::read_back(&self.js, "", Reading::Gets, filter, start, |seq, _, subject, payload| {
-            take(seq, subject, payload);
+        reading::read_back(&self.js, "", Reading::Gets, filter, start, |seq, stored, subject, payload| {
+            take(seq, stored, subject, payload);
             ControlFlow::Continue(())
         })
         .await
@@ -122,24 +127,37 @@ impl HumanStore for JetStreamStore {
         Box::pin(async move {
             let mut found = BTreeMap::new();
             for filter in [subject::inbox_of(&human), subject::inbox_from(&human), subject::inbox_from(&assistant)] {
-                self.read(&filter, since, |seq, subject, payload| {
+                self.read(&filter, since, |seq, stored, subject, payload| {
                     let Ok(envelope) = serde_json::from_slice::<Envelope>(payload) else { return };
                     let for_human = envelope.from != assistant || envelope.on_behalf_of.as_ref() == Some(&human);
                     if for_human && envelope.check_subject(subject).is_ok() {
-                        found.insert(seq, envelope);
+                        found.insert(seq, HumanMessage { seq, stored_at: stored.into(), envelope });
                     }
                 })
                 .await
                 .with_context(|| format!("reading {filter}"))?;
             }
-            Ok(found.into_iter().map(|(seq, envelope)| HumanMessage { seq, envelope }).collect())
+            Ok(found.into_values().collect())
+        })
+    }
+
+    fn dead_letters(&self, since: SystemTime) -> BoxFuture<'_, Result<Vec<StoredLetter>>> {
+        Box::pin(async move {
+            let mut found = Vec::new();
+            self.read(subject::DEAD_ALL, since, |seq, stored, subject, payload| {
+                let (subject, payload) = (subject.to_owned(), payload.to_vec());
+                found.push(StoredLetter { seq, stored_at: stored.into(), subject, payload });
+            })
+            .await
+            .context("reading the dead letters")?;
+            Ok(found)
         })
     }
 
     fn approvals(&self, since: SystemTime) -> BoxFuture<'_, Result<(Vec<ApprovalRequest>, HashSet<Uuid>)>> {
         Box::pin(async move {
             let (mut requests, mut decided) = (Vec::new(), HashSet::new());
-            self.read(subject::ALL_APPROVALS, since, |_, subject, payload| {
+            self.read(subject::ALL_APPROVALS, since, |_, _, subject, payload| {
                 if let Ok(request) = serde_json::from_slice::<ApprovalRequest>(payload)
                     && request.check_subject(subject).is_ok()
                 {

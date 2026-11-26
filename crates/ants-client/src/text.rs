@@ -1,9 +1,9 @@
-//! The words an entry is noted with: a verdict, an escalation, how long a tool call took; and an excerpt of what
-//! someone else wrote.
+//! The words an entry is noted with: a verdict, an escalation, how long a tool call took, the questions a message asks;
+//! and an excerpt of what someone else wrote.
 
 use std::time::Duration;
 
-use ants_proto::{Escalation, UserId, Verdict};
+use ants_proto::{Escalation, Questions, UserId, Verdict};
 
 /// How a verdict is printed.
 pub fn spelling(verdict: Verdict) -> &'static str {
@@ -45,4 +45,13 @@ pub fn excerpt(text: &str, max: usize) -> String {
         out.push('…');
     }
     out
+}
+
+/// What `questions` ask in a line: the first question's text, and how many more follow.
+pub fn asking(questions: &Questions) -> String {
+    let first = questions.questions.first().map_or("", |q| q.text.as_str());
+    match questions.questions.len() {
+        0 | 1 => first.to_owned(),
+        n => format!("{first} (+{} more)", n - 1),
+    }
 }

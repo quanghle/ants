@@ -51,8 +51,13 @@ pub struct Parser {
 
 impl Parser {
     /// The valid question `e` asks, kept to check later answers against, and its valid answer to a question read
-    /// earlier; none of either for a forged message.
-    fn question_and_answer(&mut self, e: &Envelope, forged: bool) -> (Option<Questions>, Option<Answer>) {
+    /// earlier, given by its sender or by the human `acting` says it acts for; none of either for a forged message.
+    fn question_and_answer(
+        &mut self,
+        e: &Envelope,
+        forged: bool,
+        acting: &Acting,
+    ) -> (Option<Questions>, Option<Answer>) {
         if forged {
             return (None, None);
         }
@@ -60,8 +65,12 @@ impl Parser {
         if question.is_some() {
             self.questions.insert(e.id, Envelope { text: String::new(), ..e.clone() });
         }
+        let answerer = match acting {
+            Acting::For(human) => human,
+            Acting::Own | Acting::Forged(_) => &e.from,
+        };
         let asked = e.answer.as_ref().and_then(|a| self.questions.get(&a.question));
-        (question, asked.filter(|q| e.answers(q).is_some()).and(e.answer.clone()))
+        (question, asked.filter(|q| e.answers_as(q, answerer).is_some()).and(e.answer.clone()))
     }
 
     /// The entry of the envelope stored at `seq` on inbox `subject`, None for one that does not parse.
@@ -73,12 +82,25 @@ impl Parser {
         subject: &str,
         payload: &[u8],
     ) -> Option<Entry> {
-        let entry = |kind, thread| Entry::new(seq, stored_at, kind, thread);
         let e: Envelope = serde_json::from_slice(payload).ok()?;
+        Some(self.envelope_with(lookups, seq, stored_at, subject, e))
+    }
+
+    /// The entry of `e`, an envelope stored at `seq` on inbox `subject` and read already, as [`Parser::entry_with`]
+    /// reads it.
+    pub fn envelope_with(
+        &mut self,
+        lookups: &dyn Lookups,
+        seq: u64,
+        stored_at: DateTime<Utc>,
+        subject: &str,
+        e: Envelope,
+    ) -> Entry {
+        let entry = |kind, thread| Entry::new(seq, stored_at, kind, thread);
         let forged = e.check_subject(subject).is_err();
         let (e, sealed) = lookups.read(e);
-        let (question, answer) = self.question_and_answer(&e, forged || sealed == Some(sealed::State::Forged));
         let acting = acting(lookups, &e.from, e.on_behalf_of.as_ref());
+        let (question, answer) = self.question_and_answer(&e, forged || sealed == Some(sealed::State::Forged), &acting);
         let provider = e.wake_provider().filter(|_| !forged).map(str::to_owned);
         let watcher = e.wake_watcher().filter(|_| !forged).cloned().map(Box::new);
         let (kind, note, text) = if let Some(d) = &e.approval {
@@ -97,7 +119,7 @@ impl Parser {
         };
         let notice = e.notice.filter(|_| kind == Kind::Message && !forged);
         let channel = e.mention.map(|m| m.channel);
-        Some(Entry {
+        Entry {
             id: Some(e.id),
             from: Some(e.from),
             to: Some(e.to),
@@ -127,7 +149,7 @@ impl Parser {
             in_reply_to: e.in_reply_to,
             notice,
             ..entry(kind, e.thread_id)
-        })
+        }
     }
 
     /// The entry of the message stored at `seq` on `subject`, None for one that is not ants' or does not parse, read

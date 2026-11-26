@@ -1,6 +1,6 @@
 //! What a reader makes of a message sealed between two humans ([`State`]), and how one it does not open shows
-//! ([`unopened`]). Opening one needs the reader's device key and the directory of devices, which stay with the client
-//! that holds them.
+//! ([`unopened`], [`unopened_text`]). Opening one needs the reader's device key and the directory of devices, which
+//! stay with the client that holds them.
 
 use ants_proto::{Envelope, Sealed};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,16 @@ impl State {
             Self::Unreadable => "[sealed]",
             Self::Forged => "[forged]",
         }
+    }
+}
+
+/// What a sealed message the device did not open reads in place of its text: one it has no key entry for was sent
+/// before it had a key; None for one opened or not sealed.
+pub fn unopened_text(sealed: Option<State>) -> Option<&'static str> {
+    match sealed? {
+        State::Opened => None,
+        State::Unreadable => Some("[sealed] sent before this device had a key"),
+        State::Forged => Some("[forged] does not open with the key of the device it names"),
     }
 }
 

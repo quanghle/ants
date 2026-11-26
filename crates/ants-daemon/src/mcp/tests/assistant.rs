@@ -9,6 +9,7 @@ type Reacted = (UserId, Uuid, Reaction, Option<UserId>);
 #[derive(Default)]
 struct MemoryHuman {
     messages: StdMutex<Vec<HumanMessage>>,
+    letters: StdMutex<Vec<super::assist::StoredLetter>>,
     requests: StdMutex<Vec<ants_proto::ApprovalRequest>>,
     titles: StdMutex<Vec<ThreadTitle>>,
     done: StdMutex<Vec<ants_proto::ThreadDone>>,
@@ -40,7 +41,19 @@ impl MemoryHuman {
     fn store(&self, envelope: Envelope) {
         let mut messages = self.messages.locked();
         let seq = messages.len() as u64 + 1;
-        messages.push(HumanMessage { seq, envelope });
+        messages.push(HumanMessage { seq, stored_at: envelope.sent_at, envelope });
+    }
+
+    /// Store `letter` after the messages stored so far, under the next sequence.
+    fn dead(&self, letter: &ants_proto::DeadLetter) {
+        let mut messages = self.messages.locked();
+        // A placeholder takes the letter's sequence, so the next message comes after it.
+        let seq = messages.len() as u64 + 1;
+        let placeholder = Envelope::new(user("nobody"), user("nobody"), "");
+        messages.push(HumanMessage { seq, stored_at: chrono::Utc::now(), envelope: placeholder });
+        let (subject, payload) = (ants_proto::subject::dead(&letter.ant), serde_json::to_vec(letter).unwrap());
+        let stored_at = chrono::Utc::now();
+        self.letters.locked().push(super::assist::StoredLetter { seq, stored_at, subject, payload });
     }
 }
 
@@ -56,6 +69,11 @@ impl HumanStore for MemoryHuman {
         };
         let found = self.messages.locked().iter().filter(|m| involved(&m.envelope)).cloned().collect();
         Box::pin(async move { Ok(found) })
+    }
+
+    fn dead_letters(&self, _: std::time::SystemTime) -> BoxFuture<'_, Result<Vec<super::assist::StoredLetter>>> {
+        let letters = self.letters.locked().clone();
+        Box::pin(async move { Ok(letters) })
     }
 
     fn approvals(
@@ -863,7 +881,8 @@ async fn the_queue_lists_what_home_lists_less_the_snoozed_threads() {
     assert!(ok, "{queue}");
     assert!(queue.contains("Stuck threads (1), escalated to alice"), "{queue}");
     assert!(queue.contains(&format!("on thread {stuck}, dev-b to alice: Out of turns")), "{queue}");
-    assert!(queue.contains("Unread messages to alice (1):") && queue.contains("bob to alice: Lunch?"), "{queue}");
+    let unread = "Unread messages to alice from other humans (1):";
+    assert!(queue.contains(unread) && queue.contains("bob to alice: Lunch?"), "{queue}");
     assert!(queue.contains("Unread mentions of alice (1):") && queue.contains("@alice look"), "{queue}");
     assert!(queue.contains(&format!("Due reminders (1):\n- thread {reminded}, due ")), "{queue}");
     assert!(queue.contains(": call bob"), "{queue}");
@@ -874,7 +893,44 @@ async fn the_queue_lists_what_home_lists_less_the_snoozed_threads() {
     store.store(Envelope::on_thread(snoozed.clone(), bob.clone(), alice.clone(), "Now?"));
     store.store(Envelope::on_thread(stuck.clone(), alice.clone(), dev_b.clone(), "Go on"));
     let (_, queue) = call(&client, "human_queue", serde_json::json!({})).await;
-    assert!(queue.contains(&format!("on thread {snoozed}, bob to alice: Now?")), "the snooze ended: {queue}");
+    let first = format!("on thread {snoozed}, bob to alice: Later (2 unread)");
+    assert!(queue.contains(&first), "the snooze ended, the first unread listed: {queue}");
     assert!(!queue.contains(&own.to_string()), "{queue}");
     assert!(queue.contains("Stuck threads (0)"), "alice answered: {queue}");
+}
+
+/// human_queue counts a thread stuck on a dead letter as home does, lists a thread an ant answered alice on that she
+/// owns as finished, and leaves out an ant's message and the threads marked done.
+#[tokio::test]
+async fn the_queue_counts_dead_letters_lists_finished_threads_and_leaves_out_ants_messages_and_done_threads() {
+    let home = home("assist-queue-home");
+    let (mcp, _sent, humans, device, store) = assistant(&home).await;
+    grant(&humans, &device, Some("dev-a"), false);
+    let (alice, bob, dev_b, dev_c) = (user("alice"), user("bob"), user("dev-b"), user("dev-c"));
+    let [owned, dead, fyi, done] = [(); 4].map(|()| ThreadId::generate());
+    let deploy = Envelope::on_thread(owned.clone(), alice.clone(), dev_b.clone(), "deploy");
+    store.store(deploy.with_owner(Some(alice.clone())));
+    store.store(Envelope::on_thread(owned.clone(), dev_b.clone(), alice.clone(), "deployed"));
+    let build = Envelope::on_thread(dead.clone(), alice.clone(), dev_c.clone(), "build");
+    store.store(build.clone());
+    store.dead(&ants_proto::DeadLetter::of_envelope(dev_c.clone(), 3, 5, "harness failed", build));
+    store.store(Envelope::on_thread(fyi.clone(), dev_c.clone(), alice.clone(), "fyi"));
+    store.store(Envelope::on_thread(done.clone(), bob.clone(), alice.clone(), "Lunch?"));
+    store.done.locked().push(ants_proto::ThreadDone::new(done.clone(), alice.clone(), 6));
+    let (url, token) = http_server(&mcp, &ThreadId::generate());
+    let client = http_client(&url, &token).await;
+
+    let (ok, queue) = call(&client, "human_queue", serde_json::json!({})).await;
+    assert!(ok, "{queue}");
+    assert!(queue.contains("Stuck threads (1)") && queue.contains(&format!("on thread {dead}: build")), "{queue}");
+    let finished = "Finished threads (1), an ant answered alice on a thread it owns:";
+    assert!(queue.contains(finished) && queue.contains("dev-b to alice: deployed"), "{queue}");
+    assert!(queue.contains("Unread messages to alice from other humans (0):"), "{queue}");
+    for left in [&fyi, &done] {
+        assert!(!queue.contains(&left.to_string()), "{left}: {queue}");
+    }
+
+    store.store(Envelope::on_thread(dead.clone(), alice.clone(), dev_c.clone(), "try again"));
+    let (_, queue) = call(&client, "human_queue", serde_json::json!({})).await;
+    assert!(queue.contains("Stuck threads (0)"), "alice spoke since: {queue}");
 }

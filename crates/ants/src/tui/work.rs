@@ -19,7 +19,8 @@ use crate::text::ago;
 pub mod entries;
 mod facts;
 
-pub use facts::{Asked, Facts, ThreadState};
+pub use ants_client::facts::{Asked, Facts};
+pub use facts::ThreadState;
 
 impl ThreadState {
     pub fn color(self) -> Color {
