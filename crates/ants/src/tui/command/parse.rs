@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use ants_client::sending::bar::{self, Draft};
 use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, UserId};
 use chrono::TimeDelta;
 
@@ -268,7 +269,6 @@ fn first_word(text: &str) -> (&str, &str) {
     text.split_once(char::is_whitespace).map_or((text, ""), |(word, rest)| (word, rest.trim()))
 }
 
-/// What the bar's `text` says to do, or why it says nothing that can be done.
 /// `text` split at whitespace into words, a run quoted with `'` or `"` at the start of a word, up to its closing quote,
 /// being one word without its quotes; a quote with none closing it is kept as typed.
 pub fn quoted_words(text: &str) -> Vec<String> {
@@ -290,38 +290,16 @@ pub fn quoted_words(text: &str) -> Vec<String> {
     words
 }
 
+/// What the bar's `text` says to do, its messages read as every client reads them ([`bar::draft`]), or why it says
+/// nothing that can be done.
 pub fn parse(text: &str) -> Result<Command, String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Err("nothing to send".to_owned());
-    }
-    if let Some(literal) = text.strip_prefix("//") {
-        return Ok(Command::Say(format!("/{literal}")));
-    }
-    if let Some(command) = text.strip_prefix('/') {
-        return match first_word(command) {
-            (name, "") if name.eq_ignore_ascii_case("later") => Err("usage: /later TEXT".to_owned()),
-            (name, later) if name.eq_ignore_ascii_case("later") => Ok(Command::Later(later.to_owned())),
-            _ => slash(command).map(Command::Slash),
-        };
-    }
-    if let Some(rest) = text.strip_prefix('@') {
-        let (name, text) = first_word(rest);
-        let to: UserId = name.parse().map_err(|e| format!("{e}"))?;
-        if text.is_empty() {
-            return Err(format!("nothing to send to @{to}"));
-        }
-        return Ok(Command::Ask { to, text: text.to_owned() });
-    }
-    if let Some(rest) = text.strip_prefix('#') {
-        let (name, text) = first_word(rest);
-        let channel: ChannelId = name.parse().map_err(|e| format!("{e}"))?;
-        if text.is_empty() {
-            return Err(format!("nothing to post to #{channel}"));
-        }
-        return Ok(Command::Post { channel, text: text.to_owned() });
-    }
-    Ok(Command::Say(text.to_owned()))
+    Ok(match bar::draft(text).map_err(|e| e.to_string())? {
+        Draft::Command { line } => Command::Slash(slash(&line)?),
+        Draft::Ask { to, text } => Command::Ask { to, text },
+        Draft::Post { channel, text } => Command::Post { channel, text },
+        Draft::Say { text } => Command::Say(text),
+        Draft::Later { text } => Command::Later(text),
+    })
 }
 
 /// The slash command `text`, after its `/`.

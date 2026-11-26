@@ -3,20 +3,9 @@
 
 use std::time::Duration;
 
+pub use ants_client::text::excerpt;
 pub use ants_proto::one_line;
 use chrono::{DateTime, TimeDelta, Utc};
-
-/// The first line of `text`, words someone else wrote, cut to `max` characters, `…` marking what is left out: tabs
-/// as spaces, control characters and those reordering text left out ([`ants_proto::lines`]).
-pub fn excerpt(text: &str, max: usize) -> String {
-    let text = ants_proto::lines(text);
-    let line = text.lines().next().unwrap_or("");
-    let mut out: String = line.chars().take(max).collect();
-    if out.len() < text.len() {
-        out.push('…');
-    }
-    out
-}
 
 /// `text`, words someone else wrote, as it comes, without control characters but line breaks, nor those reordering
 /// text: for text printed piece by piece, as an ant streams it.

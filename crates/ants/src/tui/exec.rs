@@ -92,8 +92,8 @@ pub enum Job {
     /// Reply `text` on `thread` to `to`, else to the ant that last messaged the human there ([`reply_to`]), else to the
     /// other human ([`dm_with`]), else as [`Job::Unaddressed`] does; quoting the message it replies to if any.
     ///
-    /// [`reply_to`]: super::work::entries::reply_to
-    /// [`dm_with`]: super::work::entries::dm_with
+    /// [`reply_to`]: ants_client::sending::bar::reply_to
+    /// [`dm_with`]: ants_client::sending::bar::dm_with
     Reply {
         thread: ThreadId,
         to: Option<UserId>,

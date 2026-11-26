@@ -2,7 +2,6 @@
 
 use std::io::{self, Write};
 
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use ratatui::backend::{Backend as _, CrosstermBackend};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::crossterm::cursor::{RestorePosition, SavePosition};
@@ -60,24 +59,7 @@ fn bare(text: &str) -> Vec<String> {
 }
 
 fn links(text: &str) -> Vec<(String, String)> {
-    let mut links = Vec::new();
-    let mut current = None;
-    for event in Parser::new(text) {
-        match event {
-            Event::Start(Tag::Link { dest_url, .. }) if safe(&dest_url) => {
-                current = Some((String::new(), dest_url.to_string()));
-            }
-            Event::Text(text) | Event::Code(text) if current.is_some() => {
-                current.as_mut().expect("a link").0.extend(text.chars().filter(|c| !c.is_control()));
-            }
-            Event::End(TagEnd::Link) => {
-                if let Some(link) = current.take().filter(|(label, _)| !label.is_empty()) {
-                    links.push(link);
-                }
-            }
-            _ => {}
-        }
-    }
+    let mut links = ants_client::markdown::parse(text).links();
     links.extend(bare(text).into_iter().map(|url| (url.clone(), url)));
     links
 }
