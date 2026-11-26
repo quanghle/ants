@@ -4,20 +4,24 @@
 //! [`STASHED`] turns. The prompt taking it ([`own_turn::of`]) is not written to the harness: the turn's updates go to
 //! the daemon as the prompt's, those still to come too, and its end answers the prompt. A turn ends at a
 //! `usage_update` carrying `_claude/origin`, as claude-agent-acp ends each, else once the harness said nothing of it
-//! for [`QUIET`]. A prompt the harness is sent meanwhile takes what of the turn is still to come. A turn the report
+//! for [`QUIET`]. A prompt coming meanwhile, which would join the turn, is held until it ended, then sent to the
+//! harness, the turn kept for the prompt taking it, as the claude translator holds one; what else the daemon sends,
+//! answers to the harness's permission requests among them, goes on to the harness meanwhile. A turn the report
 //! refuses is kept for no prompt: its updates go on to the daemon as any between prompts do, where only their cost
-//! counts.
+//! counts, and a prompt coming while it runs is held as well.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, Lines};
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
+use super::{Stdin, Turns};
 use crate::harness::own_turn::{self, OwnTurn, OwnTurnReport};
 use crate::sync::MutexExt as _;
 
@@ -49,6 +53,25 @@ struct State {
     turns: VecDeque<Turn>,
     /// Lines for the daemon to read before the harness's next.
     queued: VecDeque<String>,
+    /// The prompts held while a turn of the harness's own runs in their sessions, oldest first.
+    held: VecDeque<Held>,
+}
+
+struct Held {
+    id: Value,
+    session: String,
+    line: String,
+}
+
+/// What becomes of a line from the daemon ([`OwnTurns::sent`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Sent {
+    /// It goes on to the harness.
+    Harness,
+    /// A prompt taking a turn kept here: not written to the harness, its answer ending a turn all the same.
+    Taken,
+    /// Nothing of it now: a prompt held, or the cancel of one, answered here.
+    Later,
 }
 
 struct Turn {
@@ -89,16 +112,17 @@ impl OwnTurns {
         Self { name: name.to_owned(), report, state: Mutex::default(), wake: Notify::new() }
     }
 
-    /// Whether `line`, from the daemon, goes on to the harness: all but a prompt taking a turn kept here.
-    pub(super) fn sent(&self, line: &str) -> bool {
+    /// What becomes of `line`, from the daemon: all goes on to the harness but a prompt taking a turn kept here, and
+    /// one coming while a turn of the harness's own runs in its session, held until it ended ([`Self::released`]).
+    pub(super) fn sent(&self, line: &str) -> Sent {
         if !line.contains("\"session/") {
-            return true;
+            return Sent::Harness;
         }
-        let Ok(message) = serde_json::from_str::<Value>(line) else { return true };
+        let Ok(message) = serde_json::from_str::<Value>(line) else { return Sent::Harness };
         let params = &message["params"];
         let session = params["sessionId"].as_str().unwrap_or_default();
         let mut state = self.state.locked();
-        let State { prompts, opening, turns, queued } = &mut *state;
+        let State { prompts, opening, turns, queued, held } = &mut *state;
         match (message["method"].as_str(), message.get("id")) {
             (Some("session/new" | "session/load" | "session/resume" | "session/fork"), Some(id)) => {
                 opening.insert(id.to_string());
@@ -108,12 +132,12 @@ impl OwnTurns {
                     turns.iter().position(|turn| turn.id == own && turn.session == session && turn.taken.is_none())
                 });
                 let Some(index) = taking else {
-                    // What the harness still runs of a turn of its own goes to the prompt it takes.
-                    for turn in turns.iter_mut().filter(|turn| turn.session == session && !turn.taken.is_by()) {
-                        turn.ended = true;
+                    if running(turns, session) || held.iter().any(|held| held.session == session) {
+                        held.push_back(Held { id: id.clone(), session: session.to_owned(), line: line.to_owned() });
+                        return Sent::Later;
                     }
                     prompts.insert(id.to_string(), session.to_owned());
-                    return true;
+                    return Sent::Harness;
                 };
                 let turn = &mut turns[index];
                 queued.extend(std::mem::take(&mut turn.lines));
@@ -125,9 +149,16 @@ impl OwnTurns {
                 }
                 drop(state);
                 self.wake.notify_one();
-                return false;
+                return Sent::Taken;
             }
             (Some("session/cancel"), None) => {
+                if let Some(index) = held.iter().position(|held| held.session == session) {
+                    let held = held.remove(index).expect("a prompt held");
+                    queued.push_back(answer(&held.id, "cancelled"));
+                    drop(state);
+                    self.wake.notify_one();
+                    return Sent::Later;
+                }
                 let taken = turns.iter_mut().find(|turn| turn.session == session && turn.taken.is_by());
                 if let Some(turn) = taken
                     && let Taken::By(id) = std::mem::replace(&mut turn.taken, Taken::Dropped)
@@ -139,14 +170,32 @@ impl OwnTurns {
             }
             _ => {}
         }
-        true
+        Sent::Harness
+    }
+
+    /// The prompts held whose sessions no turn of the harness's own runs in any more, for the harness, noted as sent
+    /// to it.
+    fn released(&self) -> Vec<String> {
+        let mut state = self.state.locked();
+        let State { prompts, turns, held, .. } = &mut *state;
+        let (mut released, mut waiting) = (Vec::new(), HashSet::new());
+        held.retain_mut(|held| {
+            if waiting.contains(&held.session) || running(turns, &held.session) {
+                waiting.insert(held.session.clone());
+                return true;
+            }
+            prompts.insert(held.id.to_string(), held.session.clone());
+            released.push(std::mem::take(&mut held.line));
+            false
+        });
+        released
     }
 
     /// `line`, from the harness, if it goes on to the daemon now: not when kept for a turn of the harness's own, nor
     /// when lines are queued before it, which it joins.
     fn received(&self, line: String) -> Option<String> {
         let mut state = self.state.locked();
-        let State { prompts, opening, turns, queued } = &mut *state;
+        let State { prompts, opening, turns, queued, .. } = &mut *state;
         let pass = |queued: &mut VecDeque<String>, line: String| {
             if queued.is_empty() {
                 return Some(line);
@@ -235,10 +284,11 @@ impl OwnTurns {
         self.state.locked().queued.pop_front()
     }
 
-    /// When the first turn taken whose end the harness may not mark lasts until.
+    /// When the first turn taken, or holding a prompt, whose end the harness may not mark lasts until.
     fn deadline(&self) -> Option<Instant> {
         let state = self.state.locked();
-        state.turns.iter().filter(|turn| turn.taken.is_by()).map(|turn| turn.last + QUIET).min()
+        let holding = |turn: &Turn| turn.open() && state.held.iter().any(|held| held.session == turn.session);
+        state.turns.iter().filter(|turn| turn.taken.is_by() || holding(turn)).map(|turn| turn.last + QUIET).min()
     }
 
     /// End the turns taken that have been quiet for [`QUIET`], answering their prompts.
@@ -255,6 +305,11 @@ impl OwnTurns {
     }
 }
 
+/// Whether a turn of the harness's own that no prompt takes runs in `session`.
+fn running(turns: &VecDeque<Turn>, session: &str) -> bool {
+    turns.iter().any(|turn| turn.session == session && !turn.taken.is_by() && turn.open())
+}
+
 impl Taken {
     fn is_none(&self) -> bool {
         matches!(self, Self::No)
@@ -266,25 +321,65 @@ impl Taken {
 }
 
 /// The next line for the daemon from the harness's `lines`, the turns of its `own` taken care of, if it reports them;
-/// None once its output ended.
+/// None once its output ended. The prompts held for those turns are written to its `stdin` as released, `writing` while
+/// its lines are read, and noted in its `turns`.
 pub(super) async fn next(
     own: Option<&OwnTurns>,
     lines: &mut Lines<impl AsyncBufRead + Unpin>,
+    writing: &mut Option<BoxFuture<'static, io::Result<()>>>,
+    stdin: &Stdin,
+    turns: &Turns,
 ) -> io::Result<Option<String>> {
+    enum Next {
+        Woken,
+        Written(io::Result<()>),
+        Quiet,
+        Line(io::Result<Option<String>>),
+    }
     let Some(own) = own else { return lines.next_line().await };
     loop {
         if let Some(line) = own.queued() {
             return Ok(Some(line));
         }
+        if writing.is_none() {
+            let released = own.released();
+            if !released.is_empty() {
+                let (stdin, turns) = (stdin.clone(), turns.clone());
+                *writing = Some(Box::pin(async move {
+                    for line in released {
+                        turns.sent(&line);
+                        stdin.write(line).await?;
+                    }
+                    Ok(())
+                }));
+            }
+        }
         let deadline = own.deadline();
-        let line = tokio::select! {
+        let written = async {
+            match writing.as_mut() {
+                Some(writing) => writing.await,
+                None => std::future::pending().await,
+            }
+        };
+        let next = tokio::select! {
             biased;
-            () = own.wake.notified() => continue,
-            () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+            () = own.wake.notified() => Next::Woken,
+            written = written => Next::Written(written),
+            () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => Next::Quiet,
+            line = lines.next_line() => Next::Line(line),
+        };
+        let line = match next {
+            Next::Woken => continue,
+            Next::Written(written) => {
+                *writing = None;
+                written?;
+                continue;
+            }
+            Next::Quiet => {
                 own.expire();
                 continue;
             }
-            line = lines.next_line() => line?,
+            Next::Line(line) => line?,
         };
         let Some(line) = line else { return Ok(None) };
         if let Some(line) = own.received(line) {
@@ -308,7 +403,8 @@ mod tests {
 
     /// An ACP harness answering its first prompt `Started`, then, once `done` exists in its directory, running a turn
     /// of its own as claude-agent-acp 0.106.0 was seen to as a background command ends: context use, the answer
-    /// `Finished`, and, once `ended` exists, the `usage_update` with `_claude/origin` ending it. Its later prompts
+    /// `Finished`, a permission request, and, once `ended` exists, the `usage_update` with `_claude/origin` ending it.
+    /// Its later prompts
     /// answer `Prompt<n>`; each line it reads is appended to `received`.
     const ADAPTER: &str = r#"#!/bin/sh
 d=$(dirname "$0")
@@ -341,6 +437,7 @@ while read -r line; do
                 waiting done
                 update '{"sessionUpdate":"usage_update","used":12,"size":100}'
                 chunk Finished
+                printf '%s\n' '{"jsonrpc":"2.0","id":"ask","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c1"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}'
                 waiting ended
                 update '{"sessionUpdate":"usage_update","used":12,"size":100,"cost":{"amount":0.3,"currency":"USD"},"_meta":{"_claude/origin":{"kind":"task-notification","producer":"session-task"}}}'
             ) &
@@ -412,22 +509,61 @@ done
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Whether the adapter in `dir` read the answer to its permission request.
+    fn answered(dir: &Path) -> bool {
+        let received = std::fs::read_to_string(dir.join("received")).unwrap_or_default();
+        received.lines().any(|line| line.contains("\"ask\"") && line.contains("\"allow\""))
+    }
+
     #[tokio::test]
-    async fn a_prompt_coming_while_an_acp_harness_runs_a_turn_of_its_own_is_sent_and_leaves_what_came_to_be_taken() {
+    async fn a_prompt_coming_while_an_acp_harness_runs_a_turn_of_its_own_waits_for_its_end_and_leaves_it_to_be_taken() {
         let (dir, launch, mut own) = adapter("acp-own-turn-first", true);
         let session = Session::start(&launch, None).await.unwrap();
         assert_eq!(run(&session, Prompt::new("sleep in the background")).await.0.unwrap(), "Started");
         std::fs::write(dir.join("done"), "").unwrap();
         let turn = reported(&mut own).await;
+        {
+            let next = run(&session, Prompt::new("next"));
+            tokio::pin!(next);
+            let waiting = tokio::time::timeout(std::time::Duration::from_millis(300), &mut next).await;
+            assert!(waiting.is_err(), "waiting for the turn's end");
+            ants_test_support::eventually_within(
+                std::time::Duration::from_secs(10),
+                "the permission answer",
+                async || answered(&dir),
+            )
+            .await;
+            assert_eq!(prompts(&dir).len(), 1, "the message would join the adapter's own turn: not written yet");
+            std::fs::write(dir.join("ended"), "").unwrap();
+            assert_eq!(next.await.0.unwrap(), "Prompt2", "sent to the harness once the turn ended");
+        }
+        assert!(prompts(&dir)[1].contains("next"));
 
-        assert_eq!(run(&session, Prompt::new("next")).await.0.unwrap(), "Prompt2", "sent to the harness");
-        std::fs::write(dir.join("ended"), "").unwrap();
         let taking = Prompt { own_turn: Some(turn.id), ..Prompt::new(turn.text) };
-        assert_eq!(run(&session, taking).await.0.unwrap(), "Finished", "what came of the turn before the prompt");
+        let (reply, _, spends) = run(&session, taking).await;
+        assert_eq!(reply.unwrap(), "Finished", "kept for the prompt taking it");
+        assert!(spends.contains(&Spend::Cost { session: session.id(), total: 0.3 }), "{spends:?}");
         assert_eq!(prompts(&dir).len(), 2);
         session.close().await;
-        assert!(own.try_recv().is_err(), "the turn's end went to the prompt that came");
+        assert!(own.try_recv().is_err(), "the prompts' turns are none of the adapter's own");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_prompt_held_for_a_turn_of_an_acp_harness_s_own_and_cancelled_is_answered_and_never_sent() {
+        let report = super::OwnTurnReport::new("t1".parse().unwrap(), Arc::new(|_: &ThreadId, _: OwnTurn| true));
+        let own = super::OwnTurns::new("acp", report);
+        let chunk = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}}"#;
+        assert_eq!(own.received(chunk.to_owned()), None, "kept for the turn");
+        let prompt = r#"{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}"#;
+        assert_eq!(own.sent(prompt), super::Sent::Later, "held");
+        assert!(own.released().is_empty(), "the turn runs");
+        let cancel = r#"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}"#;
+        assert_eq!(own.sent(cancel), super::Sent::Later, "the cancel of a prompt held is for no harness");
+        assert_eq!(own.queued().unwrap(), r#"{"jsonrpc":"2.0","id":7,"result":{"stopReason":"cancelled"}}"#);
+        let end = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"usage_update","used":1,"size":2,"_meta":{"_claude/origin":{}}}}}"#;
+        assert_eq!(own.received(end.to_owned()), None);
+        assert!(own.released().is_empty(), "nothing to send once the turn ended");
     }
 
     #[tokio::test]

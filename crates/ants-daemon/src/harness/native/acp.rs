@@ -22,7 +22,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 
-use self::own_turns::OwnTurns;
+use self::own_turns::{OwnTurns, Sent};
 use super::leftovers::Runs;
 use super::{Cli, Process};
 use crate::harness::background;
@@ -88,9 +88,10 @@ impl ConnectTo<Client> for Acp {
     }
 }
 
-/// The JSON-RPC lines of a harness's stdio, its `turns` followed, and those of its `own`, if it reports them. The end
-/// of its output waits, up to [`SETTLE_LIMIT`], until `settling` tells that its exit, if it exited, was told: a harness
-/// failing at its start then fails its connection with why, before the client sees only its output closed.
+/// The JSON-RPC lines of a harness's stdio, its `turns` followed, and those of its `own`, if it reports them, the
+/// prompts held for them written as its output is read ([`own_turns::next`]). The end of its output waits, up to
+/// [`SETTLE_LIMIT`], until `settling` tells that its exit, if it exited, was told: a harness failing at its start then
+/// fails its connection with why, before the client sees only its output closed.
 fn lines(
     stdin: ChildStdin,
     stdout: ChildStdout,
@@ -101,9 +102,10 @@ fn lines(
     impl futures::Sink<String, Error = io::Error> + Send + 'static,
     impl futures::Stream<Item = io::Result<String>> + Send + 'static,
 > {
-    let state = (BufReader::new(stdout).lines(), turns.clone(), own.clone(), settling);
-    let incoming = futures::stream::unfold(state, |(mut lines, turns, own, settling)| async move {
-        let line = match own_turns::next(own.as_deref(), &mut lines).await.transpose() {
+    let stdin = Stdin(Arc::new(tokio::sync::Mutex::new(stdin)));
+    let state = (BufReader::new(stdout).lines(), turns.clone(), own.clone(), None, stdin.clone(), settling);
+    let incoming = futures::stream::unfold(state, |(mut lines, turns, own, mut writing, stdin, settling)| async move {
+        let line = match own_turns::next(own.as_deref(), &mut lines, &mut writing, &stdin, &turns).await.transpose() {
             Some(Ok(line)) => Ok(turns.received(line).await),
             Some(Err(e)) => Err(e),
             None => {
@@ -111,19 +113,34 @@ fn lines(
                 return None;
             }
         };
-        Some((line, (lines, turns, own, settling)))
+        Some((line, (lines, turns, own, writing, stdin, settling)))
     });
-    let outgoing = futures::sink::unfold((stdin, turns, own), |(mut stdin, turns, own), line: String| async move {
-        turns.sent(&line);
-        if own.as_ref().is_none_or(|own| own.sent(&line)) {
-            let mut line = line.into_bytes();
-            line.push(b'\n');
-            stdin.write_all(&line).await?;
-            stdin.flush().await?;
+    let outgoing = futures::sink::unfold((stdin, turns, own), |(stdin, turns, own), line: String| async move {
+        let sent = own.as_ref().map_or(Sent::Harness, |own| own.sent(&line));
+        if sent != Sent::Later {
+            turns.sent(&line);
+        }
+        if sent == Sent::Harness {
+            stdin.write(line).await?;
         }
         Ok::<_, io::Error>((stdin, turns, own))
     });
     Lines::new(Box::pin(outgoing), Box::pin(incoming))
+}
+
+/// The stdin of a harness, written by the daemon's lines and by the prompts held for a turn of the harness's own
+/// ([`own_turns`]) as it ends.
+#[derive(Clone)]
+struct Stdin(Arc<tokio::sync::Mutex<ChildStdin>>);
+
+impl Stdin {
+    async fn write(&self, line: String) -> io::Result<()> {
+        let mut line = line.into_bytes();
+        line.push(b'\n');
+        let mut stdin = self.0.lock().await;
+        stdin.write_all(&line).await?;
+        stdin.flush().await
+    }
 }
 
 /// The turns of a harness: the prompts sent to it not answered yet, by their JSON-RPC ids, and the runs of its
