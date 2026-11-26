@@ -123,7 +123,7 @@ pub(crate) struct Env {
 }
 
 impl Env {
-    fn current() -> Option<Self> {
+    pub(crate) fn current() -> Option<Self> {
         let bd_db = std::env::var("BD_DB").ok();
         Some(Self { home: std::env::home_dir()?, bd: "bd".into(), bd_db })
     }
@@ -168,6 +168,26 @@ pub(crate) async fn read(ant: &Ant, harness: Option<&Harness>, env: &Env, provid
         provider,
         skipped,
     }
+}
+
+/// The harness memories of an ant whose workdir is `workdir` and home `ant_home`, within the caps of a memories read:
+/// the files `globs` match, as [`read`] reads them, and the bd memories of the database `bd_db`, when named; with what
+/// was left out, as sense's import of them takes them ([`crate::sense`]).
+pub(crate) async fn harness(
+    globs: &[String],
+    workdir: &Path,
+    ant_home: &Path,
+    env: &Env,
+    bd_db: Option<&str>,
+) -> (Vec<MemoryFile>, Option<BdMemories>, Vec<Skipped>) {
+    let mut budget = Budget(MEMORIES_CAP);
+    let mut skipped = Vec::new();
+    let files = files(globs, workdir, ant_home, &env.home, &mut budget, &mut skipped);
+    let bd = match bd_db.filter(|db| !db.is_empty()) {
+        Some(db) => Some(bd_memories(&env.bd, db, workdir, &mut budget, &mut skipped).await),
+        None => None,
+    };
+    (files, bd, skipped)
 }
 
 /// The memories view of the provider `of`, of `ant`: none when it shows none.

@@ -369,6 +369,32 @@ A thread voting again replaces its vote, so each thread counts once. A thread a 
 longer live, naming what superseded it). The answer gives the counts, the vote replaced and
 the memory's new status.
 
+### Imported harness memories
+
+On first use of an ant's sense data in a daemon serving it, when the ant's schedule first reads its items, sense
+imports the ant's harness memories: the files its harness's `memory_files` match and the bd memories of the database
+its `BD_DB` names, read as `ants ant memories` reads them, within the same caps ([config.md](config.md#memory-files)).
+The import runs once per ant: it ends by writing its record (an item of kind `import` named `harness`, holding when,
+from how many sources, and how many memories it wrote and left out), and an ant whose sense data hold the record is
+imported never again, even after its files change. An import stopped halfway runs again at the next start, the
+memories it wrote already left out as duplicates. A clone inherits no record, so its first use imports again, its
+inherited memories counting as duplicates.
+
+- Each section of a markdown file under its ATX headings is a memory titled with its path and headings
+  (`AGENTS.md: Guide > Build`); the text before the first heading takes the bare path. A `#` inside a fenced code block
+  starts no section. Each bd memory is one memory titled `bd memory <key>`.
+- A text over 4 KiB is split at paragraphs into parts, titled `(part n of m)`.
+- A file under the ant's workdir is named by its path there, and its memories, as the bd memories, are of the
+  workdir's repository (`repo:<remote>`); a file under the home directory is named under `~/`, and its memories are
+  `self`, as are all of an ant whose workdir has no git remote.
+- Each is a `fact` of importance 3, never core, so the core cap of 2,000 bytes stays the ant's own, and `untrusted`:
+  the text is outside content, not the ant's. Its full read names its source (`Imported from the harness's memory
+  file AGENTS.md`, `Imported from bd memory <key> of <db>`).
+- The text passes the sanitizer as any memory's does, its secrets redacted.
+- An exact or near duplicate (as `sense_remember` checks them) of a live memory of its scope, or of one imported before
+  it in the same import, is left out.
+- At most 100 memories are imported; the rest are counted in the record as over the cap.
+
 ## Memory maintenance
 
 Once a day, the active daemon maintains each ant's memories, needing no ant: it rechecks the citations of the

@@ -480,6 +480,9 @@ impl MemoryItem {
         if let Some(from) = &memory.inherited {
             let _ = write!(text, "\nInherited from sense identity {from} on clone.");
         }
+        if let Some(from) = &memory.imported {
+            let _ = write!(text, "\nImported from {from}.");
+        }
         text
     }
 }

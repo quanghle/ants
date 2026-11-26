@@ -49,6 +49,7 @@ pub mod held;
 pub mod mcp;
 mod memories;
 pub use memories::files_under;
+pub(crate) use memories::{Env as MemoriesEnv, harness as harness_memories};
 mod pause;
 pub mod payload;
 pub mod restart;

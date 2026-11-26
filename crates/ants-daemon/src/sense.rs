@@ -2,11 +2,11 @@
 //! gets, sense gets through [`crate::provider`] like the others: its tools, briefs, events, wake requests and export.
 //! The rest is sense's alone, behind [`Sense`]: the data it keeps of the ants a process serves (`stores`), over their
 //! event logs in the hub's stream ([`log`]); each ant's schedule of reminders, memory maintenance and dreams
-//! (`scheduler`); its sage's answers to the reviews of its dreams; the skills it offers the ant's harness; the
-//! workdirs of the ant's threads, through which it reaches the ant's files (`workdirs`); the ant's dreams as the
-//! trails it saves answer them (`dreams`); and what its colony entry shows of it: the profile the ant publishes, or
-//! why sense keeps none of its data (`published`). A home an ant takes over keeps the sense data in it
-//! ([`take_over`]).
+//! (`scheduler`), which also imports the ant's harness memories into its sense data once (`imports`); its sage's
+//! answers to the reviews of its dreams; the skills it offers the ant's harness; the workdirs of the ant's threads,
+//! through which it reaches the ant's files (`workdirs`); the ant's dreams as the trails it saves answer them
+//! (`dreams`); and what its colony entry shows of it: the profile the ant publishes, or why sense keeps none of its
+//! data (`published`). A home an ant takes over keeps the sense data in it ([`take_over`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use ants_sense::store::{Items, StoreError};
 use anyhow::{Context as _, Result};
 
 mod dreams;
+mod imports;
 pub mod log;
 mod published;
 mod scheduler;

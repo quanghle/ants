@@ -3,7 +3,8 @@
 //! can be read back ([`chain`]). Core memories ([`core()`]) appear in every brief, within [`CORE_BUDGET`].
 //!
 //! [`remember()`] answers `sense_remember`, [`recall()`] `sense_recall` (ranked by [`score`]) and [`vote()`]
-//! `sense_vote`; [`maintain()`] is the daemon's daily maintenance.
+//! `sense_vote`; [`maintain()`] is the daemon's daily maintenance, and [`import::import`] its import of the ant's
+//! harness memories.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -19,6 +20,7 @@ use crate::items::{Item, ItemId, ItemValues};
 use crate::store::{Items, StoreError, Write};
 
 mod citations;
+pub mod import;
 mod maintain;
 mod recall;
 mod remember;
@@ -288,6 +290,9 @@ pub struct Memory {
     /// The sense identity a clone inherited it from (`crate::fork`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited: Option<SenseId>,
+    /// Where it was imported from, the ant's harness memories ([`import`]), when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<import::Imported>,
 }
 
 /// How often a memory was read in full (`sense_recall` with its id, in a thread a webhook did not start): on how
@@ -335,6 +340,7 @@ impl Memory {
             votes: Votes::default(),
             access: None,
             inherited: None,
+            imported: None,
         }
     }
 
