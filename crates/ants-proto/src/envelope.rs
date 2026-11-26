@@ -21,6 +21,7 @@ mod mention;
 mod notes;
 mod notice;
 mod review;
+mod watcher;
 
 pub use mention::{Mention, Quote, one_recipient, parse_mentions, several_mentions};
 pub use notes::NotesPost;
@@ -28,6 +29,7 @@ pub use notice::NoticeKind;
 pub use review::{
     FindingOutcome, FindingVerdict, MAX_OUTCOME_REASON, MAX_REVIEW_FINDINGS_BYTES, ReviewCommit, ReviewOutcomes,
 };
+pub use watcher::{MAX_WATCH_OUTPUT, WatchWake};
 
 /// One message between ants, or between an ant and a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +101,11 @@ pub struct Envelope {
     /// ([`Envelope::wake_provider`]). Never copied by [`Envelope::reply`] or [`Envelope::follow_up`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// What a watcher's wake carries beside its text ([`WatchWake`]): the watcher, its check's output, and the
+    /// watcher's earlier wake it withdrew. It holds only on a provider's wake ([`Envelope::wake_watcher`]). Never
+    /// copied by [`Envelope::reply`] or [`Envelope::follow_up`]: the ant's daemon sets it with [`Envelope::watching`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watcher: Option<Box<WatchWake>>,
     /// A message that waits its turn behind the prompt running on its thread rather than steering it, as
     /// `ants ask --queue` and the chat's `/later` send it. Never copied by [`Envelope::reply`] or
     /// [`Envelope::follow_up`].
@@ -274,6 +281,7 @@ impl Envelope {
             on_behalf_of: None,
             webhook: false,
             provider: None,
+            watcher: None,
             queue: false,
             allow: None,
             mention: None,
@@ -362,6 +370,17 @@ impl Envelope {
     /// The provider whose wake request the envelope is: none unless it is a message from the ant to itself.
     pub fn wake_provider(&self) -> Option<&str> {
         self.provider.as_deref().filter(|_| self.from == self.to)
+    }
+
+    /// The envelope as the wake of a watcher, `watcher` ([`Envelope::watcher`]).
+    #[must_use]
+    pub fn watching(self, watcher: Option<WatchWake>) -> Self {
+        Self { watcher: watcher.map(Box::new), ..self }
+    }
+
+    /// The watcher whose wake the envelope is: none unless it is a provider's wake ([`Envelope::wake_provider`]).
+    pub fn wake_watcher(&self) -> Option<&WatchWake> {
+        self.watcher.as_deref().filter(|_| self.wake_provider().is_some())
     }
 
     /// The role of the sender, given the `humans`: an ant's for a webhook's message, else as `humans` says.
@@ -481,6 +500,7 @@ impl Envelope {
             on_behalf_of: None,
             webhook: false,
             provider: None,
+            watcher: None,
             queue: false,
             allow: self.allow.clone(),
             mention: None,
@@ -532,6 +552,26 @@ mod tests {
         assert_eq!(claimed.wake_provider(), None);
         assert_eq!(wake.reply(p("dev-a"), "done", Role::Human).unwrap().provider, None);
         assert_eq!(wake.follow_up(p("dev-a"), p("dev-b"), "on").provider, None);
+    }
+
+    #[test]
+    fn a_watcher_s_wake_holds_only_as_a_provider_s_on_the_ant_s_own_inbox_and_is_never_copied() {
+        let watcher = WatchWake {
+            id: "rem-1".into(),
+            title: "CI of #7".into(),
+            done: false,
+            output: Some("red".into()),
+            cut: false,
+            replaces: Some(Uuid::from_u128(1)),
+        };
+        let wake = Envelope::new(p("dev-a"), p("dev-a"), "changed").woken_by("sense").watching(Some(watcher.clone()));
+        assert_eq!(wake.wake_watcher(), Some(&watcher));
+        let claimed = Envelope { from: p("dev-b"), ..wake.clone() };
+        assert_eq!(claimed.wake_watcher(), None, "from another sender");
+        let unwoken = Envelope { provider: None, ..wake.clone() };
+        assert_eq!(unwoken.wake_watcher(), None, "no provider's wake");
+        assert_eq!(wake.reply(p("dev-a"), "done", Role::Human).unwrap().watcher, None);
+        assert_eq!(wake.follow_up(p("dev-a"), p("dev-b"), "on").watcher, None);
     }
 
     #[test]

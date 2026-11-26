@@ -402,6 +402,7 @@ async fn a_paused_ant_s_reminders_wait_and_fire_once_on_resuming() {
     let requests = host.requests.locked().clone();
     assert_eq!(requests.iter().map(|request| request.id.clone()).collect::<Vec<_>>(), [format!("{id}:1")]);
     assert!(requests[0].replaces.is_none());
+    assert!(requests.iter().all(|request| request.watcher.is_none()), "no watcher's wake");
     scheduler.stop().await;
 }
 

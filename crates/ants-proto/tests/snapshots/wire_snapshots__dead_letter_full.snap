@@ -44,6 +44,14 @@ expression: value
     "on_behalf_of": "alice",
     "webhook": true,
     "provider": "sense",
+    "watcher": {
+      "id": "rem-2",
+      "title": "CI of #7",
+      "done": true,
+      "output": "build: fail",
+      "cut": true,
+      "replaces": "019a7d2e-0000-7000-8000-000000000002"
+    },
     "queue": true,
     "allow": [
       "read:*",

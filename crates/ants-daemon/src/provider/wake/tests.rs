@@ -1,5 +1,6 @@
 //! Tests of providers' wake requests: messages on the ant's threads or a new one, repeats sent once, retries under the
-//! same id, refusals, the hourly cap, only ants served here woken, and a wake replacing another withdrawing it.
+//! same id, refusals, the hourly cap, only ants served here woken, and a wake replacing another withdrawing it, a
+//! watcher's wake naming the wake it withdrew only when it did.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -76,6 +77,7 @@ fn request(ant: &UserId, thread: Option<&ThreadId>, id: &str) -> WakeRequest {
         text: "standup in 5".to_owned(),
         id: id.to_owned(),
         replaces: None,
+        watcher: None,
     }
 }
 
@@ -222,4 +224,94 @@ async fn a_wake_replacing_another_withdraws_its_message_while_it_waits() {
     assert!(matches!(&found, Some(ants_proto::MessageMark::Withdrawn { by, .. }) if by == &ant), "{found:?}");
     let found = crate::delivery::attempts::withdraw(&marks, &ant, &second.id, &ant, None).await.unwrap();
     assert_eq!(found, None, "the replacing wake waits on");
+}
+
+/// The part of watcher `w`'s wake whose output is `output`, as a provider asks for it.
+fn watched(output: &str, replaces: Option<Uuid>) -> WatchWake {
+    WatchWake {
+        id: "w".to_owned(),
+        title: "CI of #7".to_owned(),
+        done: false,
+        output: Some(output.to_owned()),
+        cut: false,
+        replaces,
+    }
+}
+
+/// Watcher `w`'s wake request `id`, replacing its request `replaces`.
+fn watcher_request(ant: &UserId, id: &str, replaces: Option<&str>, output: &str) -> WakeRequest {
+    let watcher = Some(watched(output, None));
+    WakeRequest { replaces: replaces.map(str::to_owned), watcher, ..request(ant, None, id) }
+}
+
+#[tokio::test]
+async fn a_watcher_s_wake_names_the_wake_it_withdrew_and_a_retry_names_it_again() {
+    let Some(setup) = Setup::start().await else { return };
+    let ant = p("wake-watcher");
+    let waker = setup.waker(&ant).await;
+    waker.wake("clock", watcher_request(&ant, "w:1", None, "red")).await.unwrap();
+    setup.fail_after_storing.store(true, Ordering::SeqCst);
+    let replacing = watcher_request(&ant, "w:2", Some("w:1"), "green");
+    waker.wake("clock", replacing.clone()).await.unwrap_err();
+    waker.wake("clock", replacing).await.unwrap();
+    let [first, second, retried] = setup.sent().try_into().unwrap();
+    assert_eq!(first.wake_watcher(), Some(&watched("red", None)), "the first replaces none");
+    assert_eq!(second.wake_watcher(), Some(&watched("green", Some(first.id))), "it withdrew the first");
+    assert_eq!(Envelope { sent_at: second.sent_at, ..retried }, second, "the same message again");
+    assert_eq!(setup.stored().await, 2, "the stream keeps one of each");
+}
+
+#[tokio::test]
+async fn a_watcher_s_wake_names_no_wake_the_ant_took_up_already() {
+    let Some(setup) = Setup::start().await else { return };
+    let ant = p("wake-taken");
+    let waker = setup.waker(&ant).await;
+    waker.wake("clock", watcher_request(&ant, "w:1", None, "red")).await.unwrap();
+    let first = setup.sent()[0].clone();
+    let marks = bus::ensure_attempts(&setup.js, None, &ant).await.unwrap();
+    let started = MessageMark::Started { thread_id: first.thread_id.clone(), at: chrono::Utc::now() };
+    let key = ants_proto::message_mark_key(&ant, &first.id);
+    marks.put(&key, serde_json::to_vec(&started).unwrap()).await.unwrap();
+
+    setup.fail_after_storing.store(true, Ordering::SeqCst);
+    let replacing = watcher_request(&ant, "w:2", Some("w:1"), "green");
+    waker.wake("clock", replacing.clone()).await.unwrap_err();
+    // Had the retry withdrawn anew, it would win on a mark gone, as of a message held back to wait.
+    marks.delete(&key).await.unwrap();
+    waker.wake("clock", replacing).await.unwrap();
+    let [_, second, retried] = setup.sent().try_into().unwrap();
+    assert_eq!(second.wake_watcher(), Some(&watched("green", None)), "the first goes on");
+    assert_eq!(retried.wake_watcher(), second.wake_watcher(), "a retry keeps what the first try found");
+}
+
+#[tokio::test]
+async fn a_watcher_s_wake_names_no_wake_its_provider_claims_or_another_withdrew() {
+    let Some(setup) = Setup::start().await else { return };
+    let ant = p("wake-claims");
+    let waker = setup.waker(&ant).await;
+    waker.wake("clock", watcher_request(&ant, "w:1", None, "red")).await.unwrap();
+    let first = setup.sent()[0].clone();
+    let claimed = Some(watched("green", Some(first.id)));
+    waker.wake("clock", WakeRequest { watcher: claimed, ..request(&ant, None, "w:2") }).await.unwrap();
+    assert_eq!(setup.sent()[1].wake_watcher(), Some(&watched("green", None)), "no request replaced, none withdrawn");
+
+    let marks = bus::ensure_attempts(&setup.js, None, &ant).await.unwrap();
+    crate::delivery::attempts::withdraw(&marks, &ant, &first.id, &p("alice"), None).await.unwrap();
+    waker.wake("clock", watcher_request(&ant, "w:3", Some("w:1"), "amber")).await.unwrap();
+    assert_eq!(setup.sent()[2].wake_watcher(), Some(&watched("amber", None)), "a human withdrew it");
+}
+
+#[tokio::test]
+async fn a_watcher_s_wake_with_more_output_than_a_wake_carries_is_refused() {
+    let Some(setup) = Setup::start().await else { return };
+    let ant = p("wake-long-output");
+    let waker = setup.waker(&ant).await;
+    let long = watcher_request(&ant, "w:1", None, &"x".repeat(MAX_WATCH_OUTPUT + 1));
+    assert_eq!(waker.wake("clock", long).await.unwrap_err().code, RpcError::INVALID_PARAMS);
+    let untitled = WakeRequest {
+        watcher: Some(WatchWake { title: " ".to_owned(), ..watched("red", None) }),
+        ..request(&ant, None, "w:1")
+    };
+    assert_eq!(waker.wake("clock", untitled).await.unwrap_err().code, RpcError::INVALID_PARAMS);
+    assert!(setup.sent().is_empty());
 }

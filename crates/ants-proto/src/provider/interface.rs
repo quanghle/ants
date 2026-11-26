@@ -213,6 +213,7 @@ mod tests {
                 text: "x".into(),
                 id: "1".into(),
                 replaces: None,
+                watcher: None,
             };
             ready(host.wake(request))
         }

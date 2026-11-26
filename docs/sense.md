@@ -627,7 +627,11 @@ A watch trigger stays armed and checks something on an interval, waking the ant 
 Only the digest of each check's result is kept, never the result. A changed result wakes the ant with the watcher's
 title and the check's output, redacted and cut to its first 4 KiB with a note, as data and not instructions; the
 output stays in the daemon's memory alone, so a wake delivered after a restart says it was not kept. The wake replaces
-the watcher's previous wake: one still waiting in the ant's queue is withdrawn, one taken up goes on. A command exiting
+the watcher's previous wake: one still waiting in the ant's queue is withdrawn, one taken up goes on. Beside its text,
+the wake carries a typed `watcher` part (`{id, title, done?, output?, cut?, replaces?}`: the watcher's id and title,
+whether it is the last wake, the output as the text shows it, absent when not kept, and whether it was cut), whose
+`replaces` names the message of the previous wake only when the daemon withdrew it; `ants chat` hides that wake, and
+keeps any wake the ant took up ([architecture.md](architecture.md#wake-requests)). A command exiting
 with status 3, or a trail returning `"done": true`, reports the watcher done: it wakes the ant a last time, whatever
 the result, and retires as `done`. A check that cannot run, fails, or passes its time wakes no one; the failures count
 toward the backoff, and the memories view and `ants doctor` show a watcher failing its checks.

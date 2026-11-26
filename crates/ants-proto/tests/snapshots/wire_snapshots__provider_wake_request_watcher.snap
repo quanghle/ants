@@ -1,0 +1,18 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "ant": "dev-a",
+  "thread": "019a7d2c-0000-7000-8000-000000000001",
+  "text": "CI of #7\n\nThe watcher's result changed.",
+  "id": "rem-2:4",
+  "replaces": "rem-2:3",
+  "watcher": {
+    "id": "rem-2",
+    "title": "CI of #7",
+    "done": true,
+    "output": "build: fail",
+    "cut": true
+  }
+}

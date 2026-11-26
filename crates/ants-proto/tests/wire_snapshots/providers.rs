@@ -133,6 +133,7 @@ fn provider_wake_requests() {
             text: "The reminder is due.".into(),
             id: "rem-1".into(),
             replaces: None,
+            watcher: None,
         },
     );
     snap(
@@ -143,6 +144,18 @@ fn provider_wake_requests() {
             text: "The watcher's result changed.".into(),
             id: "rem-2:3".into(),
             replaces: Some("rem-2:2".into()),
+            watcher: None,
+        },
+    );
+    snap(
+        "provider_wake_request_watcher",
+        &WakeRequest {
+            ant: user("dev-a"),
+            thread: Some(thread()),
+            text: "CI of #7\n\nThe watcher's result changed.".into(),
+            id: "rem-2:4".into(),
+            replaces: Some("rem-2:3".into()),
+            watcher: Some(WatchWake { replaces: None, ..watch_wake() }),
         },
     );
 }

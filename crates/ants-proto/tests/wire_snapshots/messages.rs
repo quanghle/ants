@@ -48,6 +48,16 @@ fn envelopes() {
         &Envelope { from: user("dev-a"), to: user("dev-a"), provider: Some("sense".to_owned()), ..message.clone() },
     );
     snap(
+        "envelope_watcher_wake",
+        &Envelope {
+            from: user("dev-a"),
+            to: user("dev-a"),
+            provider: Some("sense".to_owned()),
+            watcher: Some(Box::new(WatchWake { done: false, cut: false, replaces: None, ..watch_wake() })),
+            ..message.clone()
+        },
+    );
+    snap(
         "envelope_mention_notice",
         &Envelope { from: user("dev-b"), to: user("alice"), mention: Some(mention()), ..message.clone() },
     );

@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ants_proto::UserId;
 use ants_proto::provider::{Host, RpcError, WakeRequest};
+use ants_proto::{UserId, WatchWake};
 use ants_sense::Sense;
 use ants_sense::memory;
 use ants_sense::remind::{self, ConditionCheck, Firing, WatchCheck};
@@ -51,7 +51,7 @@ struct Settings {
     /// The ant's home, where the watchers' status is kept for `ants doctor`; none in tests leaving it out.
     home: Option<PathBuf>,
     /// The output of each watcher firing prepared and not delivered yet, by firing id, redacted and cut.
-    outputs: std::sync::Mutex<HashMap<String, String>>,
+    outputs: std::sync::Mutex<HashMap<String, watchers::Output>>,
     /// Whether the ant is paused: then nothing fires, as for a dormant ant.
     pause: crate::pause::Pause,
 }
@@ -322,7 +322,7 @@ async fn watch(sense: &Sense, items: &dyn Items, settings: &Settings, check: &Wa
     let now = since(check.at, started);
     let firing = remind::complete_watch(items, check, now, seen.checked).await?;
     if let (Some(firing), Some(output)) = (&firing, seen.output) {
-        let output = watchers::wake_output(&settings.redactor.redact(&output));
+        let output = watchers::Output::of(&settings.redactor.redact(&output));
         settings.outputs.lock().expect("unpoisoned").insert(firing.id.clone(), output);
     }
     Ok(firing)
@@ -368,9 +368,20 @@ fn since(at: DateTime<Utc>, started: tokio::time::Instant) -> DateTime<Utc> {
 
 async fn deliver(items: &dyn Items, host: &dyn Host, settings: &Settings, firing: &Firing) -> Result<()> {
     let mut text = format!("{}\n\n{}", firing.text, firing.reason);
+    let mut watcher = None;
     if firing.watched() {
         let output = settings.outputs.lock().expect("unpoisoned").get(&firing.id).cloned();
-        text.push_str(output.as_deref().unwrap_or(watchers::OUTPUT_LOST));
+        text.push_str(
+            output.as_ref().map_or_else(|| watchers::OUTPUT_LOST.to_owned(), watchers::Output::wake_text).as_str(),
+        );
+        watcher = Some(WatchWake {
+            id: firing.reminder.to_string(),
+            title: firing.text.clone(),
+            done: firing.last,
+            cut: output.as_ref().is_some_and(watchers::Output::cut),
+            output: output.map(|output| output.shown),
+            replaces: None,
+        });
     }
     let mut request = WakeRequest {
         ant: settings.ant.clone(),
@@ -378,6 +389,7 @@ async fn deliver(items: &dyn Items, host: &dyn Host, settings: &Settings, firing
         text,
         id: firing.id.clone(),
         replaces: firing.replaces.clone(),
+        watcher,
     };
     match host.wake(request.clone()).await {
         Err(error) if request.thread.is_some() && error.code == RpcError::UNKNOWN_THREAD => {

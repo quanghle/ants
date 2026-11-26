@@ -71,6 +71,7 @@ pub fn as_envelope(post: &ChannelPost, ant: &UserId) -> Envelope {
         on_behalf_of: post.on_behalf_of.clone(),
         webhook: post.webhook,
         provider: None,
+        watcher: None,
         queue: post.queue,
         allow: post.allow.clone(),
         mention: None,
