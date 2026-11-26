@@ -262,9 +262,10 @@ reached and when it stops serving the ant (`growth`). The brief shows it first (
 Each thread of the ant has a record, written by sense alone, as the card is, from the thread's lifecycle events, never
 from what its messages say: who started it and from which channel, the repository of the ant's working directory, when
 it first started and when it last started again, its session gone, and when it was last marked done and its session
-last expired. Each event changes the record once and a repeat nothing, so a thread takes about two changes of the log,
-its start and its end, none per prompt. An end of a thread sense never saw start records nothing. A clone inherits no
-thread record; an export carries them with the log.
+last expired, and the plan its harness last reported ([Resume registers and handoffs](#resume-registers-and-handoffs)).
+Each event changes the record once and a repeat nothing, so a thread takes about two changes of the log, its start and
+its end, and one more for each prompt ending with a plan other than the record's. An end, or a plan, of a thread sense
+never saw start records nothing. A clone inherits no thread record; an export carries them with the log.
 
 The brief's identity counts the ant's experience from the records of its threads of work each time it is composed,
 keeping no counter (`ants_sense::thread::experience`). The threads of dreams and reviews are not work: neither the
@@ -376,6 +377,32 @@ A thread voting again replaces its vote, so each thread counts once. A thread a 
 (`untrusted`): outside content could steer its votes. Other refusals: `too_long`, `not_found`, `conflict` (a memory no
 longer live, naming what superseded it). The answer gives the counts, the vote replaced and
 the memory's new status.
+
+### Imported harness memories
+
+On first use of an ant's sense data in a daemon serving it, when the ant's schedule first reads its items, sense
+imports the ant's harness memories: the files its harness's `memory_files` match and the bd memories of the database
+its `BD_DB` names, read as `ants ant memories` reads them, within the same caps ([config.md](config.md#memory-files)).
+The import runs once per ant: it ends by writing its record (an item of kind `import` named `harness`, holding when,
+from how many sources, and how many memories it wrote and left out), and an ant whose sense data hold the record is
+imported never again, even after its files change. An import stopped halfway runs again at the next start, the
+memories it wrote already left out as duplicates. A clone inherits no record, so its first use imports again, its
+inherited memories counting as duplicates.
+
+- Each section of a markdown file under its ATX headings is a memory titled with its path and headings
+  (`AGENTS.md: Guide > Build`); the text before the first heading takes the bare path. A `#` inside a fenced code block
+  starts no section. Each bd memory is one memory titled `bd memory <key>`.
+- A text over 4 KiB is split at paragraphs into parts, titled `(part n of m)`.
+- A file under the ant's workdir is named by its path there, and its memories, as the bd memories, are of the
+  workdir's repository (`repo:<remote>`); a file under the home directory is named under `~/`, and its memories are
+  `self`, as are all of an ant whose workdir has no git remote.
+- Each is a `fact` of importance 3, never core, so the core cap of 2,000 bytes stays the ant's own, and `untrusted`:
+  the text is outside content, not the ant's. Its full read names its source (`Imported from the harness's memory
+  file AGENTS.md`, `Imported from bd memory <key> of <db>`).
+- The text passes the sanitizer as any memory's does, its secrets redacted.
+- An exact or near duplicate (as `sense_remember` checks them) of a live memory of its scope, or of one imported before
+  it in the same import, is left out.
+- At most 100 memories are imported; the rest are counted in the record as over the cap.
 
 ## Memory maintenance
 
@@ -500,8 +527,18 @@ Each thread has one resume register: its `goal`, current `step`, `next` action, 
 (from the brief or the last checkpoint), none for the thread's first. A checkpoint without a revision on an existing
 register is refused with `revision_required`, one from another revision with `conflict`, and one with a revision on a
 thread without a register with `not_found`; the refusals carry the current register, to merge what still holds and
-checkpoint again. A call changing nothing writes nothing: it answers the thread's register and every unacknowledged
-handoff of the ant, newest first, what the brief cuts when over its budget.
+checkpoint again. A call changing nothing writes nothing: it answers the thread's register, the plan the harness last
+reported on the thread (`plan` in JSON) and every unacknowledged handoff of the ant, newest first, what the brief cuts
+when over its budget.
+
+The plan comes from the harness, not from the ant's calls: as each prompt ends with a plan the harness reported (an ACP
+`plan` update, or a native protocol's to-do list), the daemon tells sense its steps as last reported, redacted and cut
+as the timeline keeps them (50 steps, 200 characters each), in a `thread_planned` event
+([Lifecycle events](architecture.md#lifecycle-events)). Sense keeps the plan in the thread's record
+([Identity](#identity)), sanitized, with when it was reported, and replaces it only with a plan of other steps. It stays
+out of the resume register, which the ant alone replaces by compare-and-set: a write of sense's there would refuse the
+ant's next checkpoint. The brief and a checkpoint changing nothing show it after the register, a step a line, `[x]`
+done, `[>]` in progress and `[ ]` pending.
 
 `sense_handoff` records the work as the thread hands it over, as its last write: lists of what is `done`, `in_flight`,
 `next`, `promises`, `decisions` and `files`, kept with an episode memory of the same entries ([Memories](#memories)),
@@ -970,7 +1007,8 @@ Sense's brief ([Briefs](architecture.md#briefs)) holds, in order, the sections i
    section after the unacknowledged handoffs;
 3. `## Persona`: the persona's fields, or how to propose one;
 4. `## Self-model`: the self-model, its id and revision, inside the block of recalled memories, or how to start one;
-5. `## This thread`: the thread's resume register, its revision first, or how to start one;
+5. `## This thread`: the thread's resume register, its revision first, or how to start one, then the plan the harness
+   last reported on the thread;
 6. `## Unacknowledged handoffs`: the last 5 of any thread, newest first, each with its episode memory's id;
 7. `## Open commitments`: all open commitments across the ant's threads, overdue first;
 8. `## Fired reminders`, then `## Upcoming reminders`;

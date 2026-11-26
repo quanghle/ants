@@ -52,6 +52,7 @@ fn settings() -> Settings {
         home: None,
         outputs: Mutex::default(),
         pause: crate::pause::Pause::new(false),
+        harness_memories: None,
     }
 }
 

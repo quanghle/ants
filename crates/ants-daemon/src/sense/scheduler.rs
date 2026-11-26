@@ -2,9 +2,11 @@
 //! delivery; a replacement daemon therefore resumes pending work with the same wake id. Nothing fires while the ant's
 //! sense identity is dormant ([`ants_sense::identity::Card::active`]) or the ant is paused ([`crate::pause`]); its
 //! revival changes the card and its resuming the pause, either waking the scheduler, so each trigger due meanwhile
-//! fires once. It also runs sense's daily memory maintenance and begins the ant's dreams ([`dreams`]), whose last ones
-//! are kept in sense data, so a replacement daemon runs them no sooner either. Each read of the ant's items also
-//! publishes the profile of its confirmed persona ([`super::published::profile`]), dormant or not.
+//! fires once. As it first reads the ant's items, it imports the ant's harness memories into them unless imported
+//! before ([`super::imports`]). It also runs sense's daily memory maintenance and begins the ant's dreams
+//! ([`dreams`]), whose last ones are kept in sense data, so a replacement daemon runs them no sooner either. Each read
+//! of the ant's items also publishes the profile of its confirmed persona ([`super::published::profile`]), dormant or
+//! not.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -54,6 +56,9 @@ struct Settings {
     outputs: std::sync::Mutex<HashMap<String, watchers::Output>>,
     /// Whether the ant is paused: then nothing fires, as for a dormant ant.
     pause: crate::pause::Pause,
+    /// Where the ant's harness memories are read from, imported once as the schedule first reads its items; none in
+    /// tests leaving them out.
+    harness_memories: Option<super::imports::HarnessMemories>,
 }
 
 /// Whether the commands of an ant's triggers run, as its scheduler decides it: unasked on a harness running its tools
@@ -148,6 +153,7 @@ pub(super) fn serve(
         home: Some(config.storage.home.clone()),
         outputs: std::sync::Mutex::default(),
         pause: config.pause.clone(),
+        harness_memories: super::imports::HarnessMemories::of(config),
     };
     start(sense, Arc::new(host), settings)
 }
@@ -157,10 +163,15 @@ fn start(sense: Arc<Sense>, host: Arc<dyn Host>, settings: Settings) -> Serving 
         // Subscribe first: a call changing the ant's items during a schedule read must wake the following sleep.
         let mut changes = sense.changes(&settings.ant);
         let mut paused = settings.pause.subscribe();
+        let mut imported = false;
         loop {
             paused.mark_unchanged();
             let result = async {
                 let items = sense.synced(&settings.ant).await?;
+                if let Some(from) = settings.harness_memories.as_ref().filter(|_| !imported) {
+                    super::imports::import(&*items, from, &settings.ant, &settings.machine).await?;
+                    imported = true;
+                }
                 super::published::profile(&*items, &settings.ant, &settings.workload).await;
                 cycle(&sense, &*items, &*host, &settings, Utc::now()).await
             }

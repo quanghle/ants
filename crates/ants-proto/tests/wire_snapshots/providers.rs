@@ -93,6 +93,9 @@ fn provider_protocol() {
         EventKind::ThreadExpired,
         EventKind::SessionLost,
         EventKind::SessionRebuilt { reason: Rebuilt::Overflow },
+        EventKind::ThreadPlanned {
+            steps: vec![PlanStep { content: "Write the tests".into(), status: "in_progress".into() }],
+        },
     ];
     let events: Vec<Event> = kinds
         .into_iter()

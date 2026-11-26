@@ -132,6 +132,43 @@ async fn a_thread_is_told_started_in_the_repository_of_the_workdir_by_its_first_
     std::fs::remove_dir_all(home).unwrap();
 }
 
+#[tokio::test]
+async fn a_prompt_ending_with_a_plan_tells_the_plan_as_last_reported_and_one_without_tells_none() {
+    use ants_proto::PlanStep;
+    use ants_proto::provider::EventKind;
+
+    use crate::provider::events::{Lifecycle, tests};
+    let Some((mut bus, _)) = Bus::start().await else { return };
+    let provider = tests::Recording::taking_events();
+    let outbox = tests::outbox_to(provider.clone()).await;
+    let home = ants_test_support::scratch_dir("handling-plan");
+    bus.lifecycle = Lifecycle::open(&outbox, &bus.dev, "id-1", &home).await;
+    let mut replies = bus.replies().await;
+    let (launch, _, _) = fake::launch();
+    let pool = Pool::new(launch, SessionStore::memory(), 2, IDLE);
+    let thread = ThreadId::generate();
+    bus.send(&thread, "plans").await;
+    bus.send(&thread, "no plan").await;
+
+    let ctrl_c = Arc::new(Semaphore::new(0));
+    let check = async {
+        for _ in 0..2 {
+            next_reply(&mut replies).await;
+        }
+        ctrl_c.add_permits(1);
+    };
+    tokio::join!(bus.serve(&pool, &ctrl_c), check);
+    tests::took(&provider, 3).await;
+    // Both prompts ended before the daemon stopped, their events queued: a fourth would be in flight by now.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let told: Vec<_> = provider.got.locked().iter().map(|event| event.kind.clone()).collect();
+    let step = |content: &str, status: &str| PlanStep { content: content.into(), status: status.into() };
+    let steps = vec![step("Read the code", "completed"), step("Write the fix", "in_progress")];
+    assert!(matches!(told[..], [EventKind::AntAdded, EventKind::ThreadStarted { .. }, _]), "{told:?}");
+    assert_eq!(told[2..], [EventKind::ThreadPlanned { steps }]);
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Ask the daemon which messages it holds until it answers, as the daemon may not listen yet.
 async fn queue(bus: &Bus) -> ants_proto::QueueReply {
     queue_with(bus, QueueRequest::new(bus.dev.clone(), ants_test_support::human())).await

@@ -154,6 +154,34 @@ async fn an_empty_ant_is_told_to_start_a_register_and_the_tool_shows_the_brief_a
     assert_eq!(output, Output::Text(brief));
 }
 
+/// The plan the harness last reported on the thread shows after its register, in the brief and in a checkpoint
+/// changing nothing, also with no register yet; another thread's plan shows in neither.
+#[tokio::test]
+async fn the_plan_last_reported_on_the_thread_shows_after_its_register() {
+    let (sense, _) = sense().await;
+    worked(&sense).await;
+    let steps = |content: &str| vec![ants_proto::PlanStep { content: content.into(), status: "in_progress".into() }];
+    for (thread, content) in [(THREAD, "Write the parser"), (OTHER, "Fix the lexer")] {
+        let kind = EventKind::ThreadPlanned { steps: steps(content) };
+        sense
+            .event(Event { thread: Some(thread.parse().unwrap()), ..lifecycle(kind, "2025-01-03T09:00:00Z") })
+            .await
+            .unwrap();
+    }
+    let brief = session_brief(&sense, 8_000).await;
+    let this = &brief[position(&brief, "## This thread")..];
+    assert!(position(this, "No resume register yet") < position(this, "[>] Write the parser"), "{brief}");
+    assert!(!brief.contains("Fix the lexer"), "{brief}");
+
+    call(&sense, thread::checkpoint, THREAD, json!({"goal": "Ship the parser"})).await;
+    let brief = session_brief(&sense, 8_000).await;
+    let this = &brief[position(&brief, "## This thread")..];
+    assert!(position(this, "Goal: Ship the parser") < position(this, "Plan the harness last reported"), "{brief}");
+    let read = call(&sense, thread::checkpoint, THREAD, json!({})).await;
+    position(&read.text, "- [>] Write the parser");
+    assert_eq!(read.json["plan"]["steps"][0]["content"], "Write the parser");
+}
+
 #[tokio::test]
 async fn a_call_writing_wakes_the_schedule_of_its_ant_alone_and_one_reading_none() {
     let (sense, _) = sense().await;

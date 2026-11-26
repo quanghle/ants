@@ -690,6 +690,9 @@ impl Inbox<'_> {
             streamed.take(update);
         }
         measured.end(&streamed.calls);
+        if let (Some(lifecycle), Some(plan)) = (self.provider.lifecycle, streamed.calls.plan()) {
+            lifecycle.thread_planned(thread, plan).await;
+        }
         streamed.status.flush();
         while let Some(record) = streamed.calls.take() {
             crate::monitoring::timeline::store(self.js, record);

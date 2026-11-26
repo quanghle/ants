@@ -152,6 +152,11 @@ impl<'a> Collector<'a> {
         (counts, sense_calls)
     }
 
+    /// The plan the harness last reported in the prompt, redacted; none when it reported none.
+    pub fn plan(&self) -> Option<&[PlanStep]> {
+        self.plan.as_deref()
+    }
+
     /// Whether anything changed since the last record.
     pub fn pending(&self) -> bool {
         !self.changed.is_empty() || self.plan_changed || self.left_out_changed

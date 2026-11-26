@@ -15,8 +15,9 @@
 //!
 //! Every text passes the sanitizer, and each item carries its writer, taken from the call's context, never from text.
 //!
-//! Beside what the ant keeps, sense records each thread from its lifecycle events: who started it, where, and when it
-//! started and ended ([`record`]), and counts the ant's experience from those records ([`experience`]) and the calls of
+//! Beside what the ant keeps, sense records each thread from its lifecycle events: who started it, where, when it
+//! started and ended, and the plan the harness last reported on it, which the brief and a checkpoint changing nothing
+//! show after the register ([`record`]); and it counts the ant's experience from those records ([`experience`]) and the calls of
 //! its tools from what they wrote ([`calls`]).
 
 use std::fmt::Write as _;
@@ -359,11 +360,15 @@ async fn checkpoint_call(sense: &Sense, call: &ToolCall) -> Result<Answer, Answe
 async fn read(sense: &Sense, context: &CallContext) -> Result<Answer, Answer> {
     let items = sense.items(&context.ant).await?;
     let register = register(&*items, &context.thread).await?;
+    let plan = record::record(&*items, &context.thread).await?.and_then(|record| record.plan);
     let handoffs = unacknowledged(&*items, usize::MAX).await?;
     let mut text = match &register {
         Some(register) => register.text(),
         None => "This thread has no resume register yet: checkpoint without a revision to start one.\n".to_owned(),
     };
+    if let Some(plan) = &plan {
+        text.push_str(&plan.text());
+    }
     if handoffs.is_empty() {
         text.push_str("\nNo unacknowledged handoffs.");
     } else {
@@ -376,7 +381,7 @@ async fn read(sense: &Sense, context: &CallContext) -> Result<Answer, Answer> {
             let _ = write!(text, "\n{}", handoff.text());
         }
     }
-    let json = json!({"register": register, "handoffs": handoffs});
+    let json = json!({"register": register, "plan": plan, "handoffs": handoffs});
     Ok(Answer { text: text.trim_end().to_owned(), json, is_error: false })
 }
 
