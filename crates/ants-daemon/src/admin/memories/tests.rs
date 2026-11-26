@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use ants_proto::provider::{
     Ack, BoxFuture, Capabilities, Export, Host, ImportRequest, Info, InitializeParams, InitializeResult, MemoriesView,
-    MemoryEntry, Provider, RpcError,
+    MemoryEntry, MemoryFields, Provider, RpcError, TriggerRow,
 };
 use ants_proto::{AdminOp, OrderState};
 use serde_json::Value;
@@ -187,9 +187,10 @@ async fn memories_are_cut_at_each_file_s_cap_and_at_the_total_cap() {
     assert!(serde_json::to_vec(&memories).unwrap().len() < MEMORIES_CAP + 8 * 1024, "the result fits a KV value");
 
     let mut budget = Budget(10);
-    assert_eq!(budget.take("a\"b", false), Some(("a\"b".to_owned(), false)), "6 bytes as JSON");
-    assert_eq!(budget.take("\n\n\n", false), Some(("\n".to_owned(), true)), "4 bytes left");
-    assert_eq!(budget.take("more", false), None);
+    assert_eq!(budget.take("a\"b", MEMORY_FILE_CAP, false), Some(("a\"b".to_owned(), false)), "6 bytes as JSON");
+    assert_eq!(budget.take("\n\n\n", MEMORY_FILE_CAP, false), Some(("\n".to_owned(), true)), "4 bytes left");
+    assert_eq!(budget.take("more", MEMORY_FILE_CAP, false), None);
+    assert_eq!(Budget(10).take("abcd", 2, false), Some(("ab".to_owned(), true)), "a cap of its own");
 }
 
 /// The memories view of the ant's provider, asked by the ant's name and identity, comes right after the core memories
@@ -200,8 +201,8 @@ async fn the_provider_s_memories_are_shown_within_the_caps() {
     write(&workdir.join("AGENTS.md"), "be brief");
     let mut fake = Fake::new("brain", MEMORIES_AND_EXPORT);
     let big = "y".repeat(MEMORY_FILE_CAP + 1);
-    fake.memories = (0..8).map(|n| MemoryEntry { key: format!("k{n}"), content: big.clone() }).collect();
-    fake.memories.insert(0, MemoryEntry { key: "style".to_owned(), content: "terse".to_owned() });
+    fake.memories = (0..8).map(|n| MemoryEntry::new(format!("k{n}"), big.clone())).collect();
+    fake.memories.insert(0, MemoryEntry::new("style", "terse"));
     let (fake, connected) = fake.connect().await;
     let ant = Ant::new("dev-a".parse().unwrap(), workdir.clone());
     let of = Of { connected: &connected, identity: Some("1f") };
@@ -211,7 +212,12 @@ async fn the_provider_s_memories_are_shown_within_the_caps() {
     assert_eq!(asked, [AntRef { ant: ant.name.clone(), identity: "1f".to_owned() }]);
     let provider = memories.provider.expect("the provider shows memories");
     assert_eq!((provider.provider.as_str(), provider.error), ("brain", None));
-    let style = BdMemory { key: "style".to_owned(), content: "terse".to_owned(), truncated: false };
+    let style = ProviderMemory {
+        key: "style".to_owned(),
+        content: "terse".to_owned(),
+        fields: MemoryFields::default(),
+        truncated: false,
+    };
     assert_eq!(provider.memories[0], style);
     assert_eq!((provider.memories[1].content.len(), provider.memories[1].truncated), (MEMORY_FILE_CAP, true));
     assert!(provider.memories.len() < 9, "the total cap leaves some out");
@@ -220,6 +226,63 @@ async fn the_provider_s_memories_are_shown_within_the_caps() {
     let agents = workdir.join("AGENTS.md").display().to_string();
     assert!(skipped.contains(&agents.as_str()), "the harness's files come after the provider's: {skipped:?}");
     assert!(serde_json::to_vec(&provider.memories).unwrap().len() < MEMORIES_CAP + 1024);
+}
+
+fn row(n: usize, title: String) -> TriggerRow {
+    TriggerRow {
+        id: format!("reminder-{n}"),
+        revision: Some(1),
+        kind: "watcher".to_owned(),
+        title,
+        status: "upcoming".to_owned(),
+        thread: None,
+        trigger: Some("watch command gh run list, every 60 s".to_owned()),
+        next_due: None,
+        last_fired: None,
+        commitment: None,
+        failing_checks: Some(3),
+        last_error: Some("exit 1".to_owned()),
+    }
+}
+
+/// The typed fields of the provider's memories pass through, counted within the caps: an entry's rows past
+/// [`MEMORY_FILE_CAP`] are dropped from the last, and its content cut to what the rows leave.
+#[tokio::test]
+async fn the_provider_s_typed_fields_pass_within_the_caps() {
+    let (home, workdir, _) = dirs("memories-provider-typed");
+    let mut fake = Fake::new("brain", MEMORIES_AND_EXPORT);
+    let typed = MemoryFields {
+        section: Some("memories".to_owned()),
+        id: Some("lesson-1".to_owned()),
+        kind: Some("lesson".to_owned()),
+        scope: Some("self".to_owned()),
+        trust: Some("self".to_owned()),
+        title: Some("t".repeat(1000)),
+        revision: Some(2),
+        core: true,
+        triggers: vec![],
+    };
+    let rows = (0..8).map(|n| row(n, "w".repeat(MEMORY_FILE_CAP / 6))).collect();
+    let reminders = MemoryFields { section: Some("work".to_owned()), triggers: rows, ..MemoryFields::default() };
+    fake.memories = vec![
+        MemoryEntry { fields: typed.clone(), ..MemoryEntry::new("lesson-1", "Tag first.") },
+        MemoryEntry { fields: reminders, ..MemoryEntry::new("active reminders", "x".repeat(MEMORY_FILE_CAP)) },
+    ];
+    let (_, connected) = fake.connect().await;
+    let ant = Ant::new("dev-a".parse().unwrap(), workdir);
+    let of = Of { connected: &connected, identity: Some("1f") };
+    let provider = read(&ant, None, &env(&home), Some(of)).await.provider.unwrap();
+
+    let lesson = &provider.memories[0];
+    let title = Some("t".repeat(MAX_ERROR));
+    assert_eq!((&lesson.content[..], &lesson.fields.title, lesson.truncated), ("Tag first.", &title, false));
+    assert_eq!(lesson.fields, MemoryFields { title, ..typed }, "every typed field passes, its texts cut");
+    let reminders = &provider.memories[1];
+    let kept = reminders.fields.triggers.len();
+    assert!((1..8).contains(&kept), "the rows past the cap are dropped: {kept}");
+    assert_eq!(reminders.fields.triggers[0], row(0, "w".repeat(MEMORY_FILE_CAP / 6)));
+    assert!(reminders.truncated);
+    assert!(reminders.content.len() + reminders.fields.size() <= MEMORY_FILE_CAP);
 }
 
 /// A provider failing, or not asked as the order names no identity, is noted, the rest read all the same; one

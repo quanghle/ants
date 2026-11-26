@@ -193,7 +193,7 @@ Without a common version, the provider answers with error `-32002`. Both sides t
 | `tools/call` | ants → provider | `tools` | `{name, arguments, context, format}` | `{text}` or `{json}`, with `is_error: true` for a refusal |
 | `brief` | ants → provider | `context` | `{context, budget, reason}` | `{text}` |
 | `event` | ants → provider | `events` | `{id, ant, identity, thread?, at, kind, …}` | `{}` |
-| `memories` | ants → provider | `memories` | `{ant, identity}` | `{memories: [{key, content}]}` |
+| `memories` | ants → provider | `memories` | `{ant, identity}` | `{memories: [{key, content, section?, id?, kind?, scope?, trust?, title?, revision?, core?, triggers?}]}` |
 | `export` | ants → provider | `export` | `{ant, identity}` | `{provider, data}` |
 | `import` | ants → provider | `export` | `{ant, identity, export}` | `{}` |
 | `wake` | provider → ants | `wake` | `{ant, thread?, text, id}` | `{thread}` |
@@ -228,6 +228,13 @@ Calls and events:
   - `session_lost`;
   - `session_rebuilt` (`reason`: `lost` or `overflow`).
 - Events are sent in order per ant and at least once; a repeat carries the same `id`. A provider acks a kind it does not know.
+- A memories view entry's `key` names what it is and `content` holds its text, as `ants ant memories` shows them.
+  Its typed fields, each left out when unknown or not applying, tell the same for a client to show without reading
+  them out of the key: `section` (the part of the view), the `id`, `kind`, `scope`, `trust` (`self` or `untrusted`),
+  `title` and `revision` of the item it shows, `core: true` for a core memory, and `triggers`, the rows of an entry
+  listing reminders and watchers: each `id`, `kind` (`reminder` or `watcher`), `title` and `status`, and, when known,
+  `revision`, `thread`, `trigger` (when it fires, in a line), `next_due`, `last_fired`, `commitment`,
+  `failing_checks` and `last_error` ([sense.md](sense.md#what-an-operator-sees-and-configures)).
 - A wake request's `id` makes it idempotent; it names a thread, or none for a new one. Its optional `replaces` names
   the `id` of an earlier request of the provider's, whose message is withdrawn from the ant's queue unless taken up
   already.

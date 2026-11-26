@@ -538,12 +538,19 @@ async fn a_watcher_fires_on_each_change_replacing_its_last_firing_and_retires_on
     let first = check(&*items, &id, at, seen("b", false)).await.expect("changed");
     assert!(first.watched() && !first.last && first.replaces.is_none(), "{first:?}");
     assert!(reserve_watch(&*items, &id, at + Duration::hours(1)).await.unwrap().is_none(), "pending");
+    let [fired, _] = rows(&*items, at).await.unwrap();
+    assert_eq!((fired[0].1.status.as_str(), fired[0].1.last_fired), ("delivery_pending", Some(at)), "{fired:?}");
     confirm_delivered(&*items, &id, &first.id, at).await.unwrap();
     let reminder = Reminder::of(&get(&*items, &id).await.unwrap()).unwrap();
     assert_eq!((reminder.status, reminder.next_due), (Status::Active, Some(at + Duration::seconds(60))));
     let [fired, upcoming] = brief(&*items, at).await.unwrap();
     assert!(fired.lines.is_empty(), "{:?}", fired.lines);
     assert!(upcoming.lines[0].contains("; last fired "), "{}", upcoming.lines[0]);
+    let [_, upcoming] = rows(&*items, at).await.unwrap();
+    let row = &upcoming[0].1;
+    assert_eq!((row.id.as_str(), row.kind.as_str(), row.status.as_str()), (id.as_str(), "watcher", "upcoming"));
+    assert_eq!(row.trigger.as_deref(), Some("watch command gh pr checks 7, every 60 s"));
+    assert_eq!((row.next_due, row.last_fired, row.failing_checks), (reminder.next_due, Some(at), None));
     assert!(!remind(&sense, &call(at, json!({"action":"ack","id":id}))).await.is_error);
     assert_eq!(Reminder::of(&get(&*items, &id).await.unwrap()).unwrap().status, Status::Active, "ack keeps it");
 
@@ -582,6 +589,10 @@ async fn a_watcher_s_first_check_fires_when_asked_and_failed_checks_back_off_wit
         "{:?}",
         upcoming.lines
     );
+    let [_, upcoming] = rows(&*items, at).await.unwrap();
+    let row = &upcoming[0].1;
+    assert_eq!(row.failing_checks, Some(UNCHANGED_BEFORE_BACKOFF));
+    assert_eq!(row.last_error.as_deref(), Some("exit 127: gh: not found"));
     let at = reminder.next_due.unwrap();
     assert!(check(&*items, &id, at, seen("a", false)).await.is_none(), "the digest of before the failures");
     let reminder = Reminder::of(&get(&*items, &id).await.unwrap()).unwrap();

@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use ants_proto::ThreadId;
-use ants_proto::provider::{BoxFuture, CallContext, ToolCall};
+use ants_proto::provider::{BoxFuture, CallContext, ToolCall, TriggerRow};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -366,51 +366,89 @@ pub async fn active(items: &dyn Items, now: DateTime<Utc>) -> Result<Vec<(Item, 
 
 /// The brief's lines of the active reminders: those fired, then those upcoming.
 pub(crate) async fn brief(items: &dyn Items, now: DateTime<Utc>) -> Result<[Listing; 2], StoreError> {
+    let [fired, upcoming] = rows(items, now).await?;
+    let lines = |rows: Vec<(String, TriggerRow)>| rows.into_iter().map(|(line, _)| line).collect();
+    Ok([Listing { lines: lines(fired), more: LIST }, Listing { lines: lines(upcoming), more: LIST }])
+}
+
+/// The active reminders, those fired then those upcoming, each by its line of the brief and its row of the memories
+/// view.
+pub(crate) async fn rows(items: &dyn Items, now: DateTime<Utc>) -> Result<[Vec<(String, TriggerRow)>; 2], StoreError> {
     let (mut fired, mut upcoming) = (Vec::new(), Vec::new());
     for (item, reminder) in active(items, now).await? {
         let is_fired = reminder.occurrence_firings > 0;
-        let mut line = format!(
-            "- {} (revision {}, {}): {}",
-            item.id,
-            item.revision,
-            if is_fired { "fired" } else { "upcoming" },
-            reminder.title
-        );
+        let row = (line(&item, &reminder), row(&item, &reminder));
         if is_fired {
-            let pending = reminder.pending.as_ref().map(|firing| (&firing.id, firing.at));
-            if let Some((id, at)) =
-                pending.or_else(|| reminder.delivered.as_ref().map(|firing| (&firing.id, firing.at)))
-            {
-                let _ = write!(line, "; firing {id} at {}", stamp(at));
-            }
-            line.push_str(if pending.is_some() { "; delivery pending" } else { "; awaiting acknowledgement" });
-        }
-        if let Some(next) = reminder.next_due {
-            let _ = write!(line, "; next {}", stamp(next));
-        }
-        if !is_fired {
-            let _ = write!(line, "; trigger {}", json!(reminder.trigger));
-        }
-        if reminder.trigger.watch().is_some() {
-            if let Some(delivered) = &reminder.delivered {
-                let _ = write!(line, "; last fired {}", stamp(delivered.at));
-            }
-            if let Some(failed) = reminder.failed_checks {
-                let why = reminder.check_error.as_deref().unwrap_or("unknown");
-                let _ = write!(line, "; {failed} checks failed in a row, the latest because {why}");
-            }
-        }
-        let _ = write!(line, "; thread {}", reminder.thread.as_ref().map_or("", ThreadId::as_str));
-        if let Some(promise) = &reminder.promise {
-            let _ = write!(line, "; commitment {promise}");
-        }
-        if is_fired {
-            fired.push(line);
+            fired.push(row);
         } else {
-            upcoming.push(line);
+            upcoming.push(row);
         }
     }
-    Ok([Listing { lines: fired, more: LIST }, Listing { lines: upcoming, more: LIST }])
+    Ok([fired, upcoming])
+}
+
+/// The brief's line of the active `reminder` its `item` holds.
+fn line(item: &Item, reminder: &Reminder) -> String {
+    let is_fired = reminder.occurrence_firings > 0;
+    let mut line = format!(
+        "- {} (revision {}, {}): {}",
+        item.id,
+        item.revision,
+        if is_fired { "fired" } else { "upcoming" },
+        reminder.title
+    );
+    if is_fired {
+        let pending = reminder.pending.as_ref().map(|firing| (&firing.id, firing.at));
+        if let Some((id, at)) = pending.or_else(|| reminder.delivered.as_ref().map(|firing| (&firing.id, firing.at))) {
+            let _ = write!(line, "; firing {id} at {}", stamp(at));
+        }
+        line.push_str(if pending.is_some() { "; delivery pending" } else { "; awaiting acknowledgement" });
+    }
+    if let Some(next) = reminder.next_due {
+        let _ = write!(line, "; next {}", stamp(next));
+    }
+    if !is_fired {
+        let _ = write!(line, "; trigger {}", json!(reminder.trigger));
+    }
+    if reminder.trigger.watch().is_some() {
+        if let Some(delivered) = &reminder.delivered {
+            let _ = write!(line, "; last fired {}", stamp(delivered.at));
+        }
+        if let Some(failed) = reminder.failed_checks {
+            let why = reminder.check_error.as_deref().unwrap_or("unknown");
+            let _ = write!(line, "; {failed} checks failed in a row, the latest because {why}");
+        }
+    }
+    let _ = write!(line, "; thread {}", reminder.thread.as_ref().map_or("", ThreadId::as_str));
+    if let Some(promise) = &reminder.promise {
+        let _ = write!(line, "; commitment {promise}");
+    }
+    line
+}
+
+/// The memories view's row of the active `reminder` its `item` holds.
+fn row(item: &Item, reminder: &Reminder) -> TriggerRow {
+    let status = match (reminder.occurrence_firings > 0, reminder.pending.is_some()) {
+        (false, _) => "upcoming",
+        (true, true) => "delivery_pending",
+        (true, false) => "awaiting_acknowledgement",
+    };
+    let watcher = reminder.trigger.watch().is_some();
+    let last_fired = reminder.pending.as_ref().map(|firing| firing.at).or(reminder.delivered.as_ref().map(|d| d.at));
+    TriggerRow {
+        id: item.id.to_string(),
+        revision: Some(item.revision),
+        kind: if watcher { "watcher" } else { KIND }.to_owned(),
+        title: reminder.title.clone(),
+        status: status.to_owned(),
+        thread: reminder.thread.clone(),
+        trigger: Some(reminder.trigger.summary()),
+        next_due: reminder.next_due,
+        last_fired,
+        commitment: reminder.promise.as_ref().map(ToString::to_string),
+        failing_checks: reminder.failed_checks.filter(|_| watcher),
+        last_error: reminder.check_error.clone().filter(|_| watcher),
+    }
 }
 
 /// The ant's active watchers, as `ants doctor` reads them ([`watch::WatcherStatus`]).

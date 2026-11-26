@@ -89,6 +89,19 @@ async fn the_view_lists_open_findings_commitments_reminders_and_tasks_writing_no
     let reminders: Vec<_> = entry(&entries, REMINDERS).lines().collect();
     assert!(reminders[0].ends_with(&format!("; commitment {commitment}")), "{reminders:#?}");
     assert!(reminders[1].starts_with(&format!("- {reminder} (revision 1, upcoming): Check CI")), "{reminders:#?}");
+    for (entry, kind) in entries.iter().zip(["findings", "commitments", "reminders", "tasks"]) {
+        assert_eq!((entry.fields.section.as_deref(), entry.fields.kind.as_deref()), (Some("work"), Some(kind)));
+    }
+    let rows = &entries[2].fields.triggers;
+    assert_eq!(rows.len(), reminders.len(), "a row for each line: {rows:#?}");
+    assert_eq!(rows[0].commitment.as_deref(), Some(commitment.as_str()), "{rows:#?}");
+    let row = &rows[1];
+    assert_eq!((row.id.as_str(), row.revision, row.title.as_str()), (reminder.as_str(), Some(1), "Check CI"));
+    assert_eq!((row.kind.as_str(), row.status.as_str()), ("reminder", "upcoming"));
+    assert_eq!((row.trigger.as_deref(), row.last_fired, row.commitment.as_ref()), (Some("after 600 s"), None, None));
+    assert_eq!(row.next_due, Some(now + chrono::Duration::seconds(600)));
+    assert_eq!(row.thread, Some(context(human()).thread));
+    assert!(entries.iter().filter(|entry| entry.key != REMINDERS).all(|entry| entry.fields.triggers.is_empty()));
     let tasks = entry(&entries, TASKS);
     let lines: Vec<_> = tasks.lines().collect();
     assert_eq!(lines.len(), 2, "{tasks}");
@@ -104,14 +117,40 @@ async fn an_ant_without_open_work_shows_no_entry_of_it() {
 
 #[test]
 fn lists_past_their_caps_are_cut_and_counted() {
-    let lines = |count: usize, bytes: usize| (0..count).map(|n| format!("- {n} {}", "x".repeat(bytes))).collect();
-    let many = listed(TASKS, String::new(), lines(LISTED + 5, 10)).unwrap().content;
+    let lines =
+        |count: usize, bytes: usize| plain((0..count).map(|n| format!("- {n} {}", "x".repeat(bytes))).collect());
+    let many = listed(TASKS, "tasks", String::new(), lines(LISTED + 5, 10)).unwrap().content;
     assert_eq!(many.lines().count(), LISTED + 1, "{many}");
     assert!(many.ends_with("\n5 more left out."), "{many}");
-    let long = listed(TASKS, "Head.".into(), lines(5, MEMORY_FILE_CAP / 3)).unwrap().content;
+    let long = listed(TASKS, "tasks", "Head.".into(), lines(5, MEMORY_FILE_CAP / 3)).unwrap().content;
     assert!(long.len() <= MEMORY_FILE_CAP, "{}", long.len());
     assert!(long.starts_with("Head.\n- 0 "), "{}", &long[..20]);
     assert!(long.ends_with("\n3 more left out."), "{}", &long[long.len() - 20..]);
-    assert_eq!(listed(TASKS, "Head.".into(), lines(1, 10)).unwrap().content, "Head.\n- 0 xxxxxxxxxx");
-    assert_eq!(listed(TASKS, "Head.".into(), Vec::new()), None);
+    assert_eq!(listed(TASKS, "tasks", "Head.".into(), lines(1, 10)).unwrap().content, "Head.\n- 0 xxxxxxxxxx");
+    assert_eq!(listed(TASKS, "tasks", "Head.".into(), Vec::new()), None);
+}
+
+#[test]
+fn the_rows_of_a_list_count_within_its_cap() {
+    let row = |n: usize| TriggerRow {
+        id: format!("reminder-{n}"),
+        revision: Some(1),
+        kind: "reminder".into(),
+        title: "t".repeat(MEMORY_FILE_CAP / 8),
+        status: "upcoming".into(),
+        thread: None,
+        trigger: Some("after 600 s".into()),
+        next_due: None,
+        last_fired: None,
+        commitment: None,
+        failing_checks: None,
+        last_error: None,
+    };
+    let lines = (0..10).map(|n| (format!("- reminder-{n}: {}", "x".repeat(MEMORY_FILE_CAP / 8)), Some(row(n))));
+    let entry = listed(REMINDERS, "reminders", String::new(), lines.collect()).unwrap();
+    let shown = entry.content.lines().count() - 1;
+    assert_eq!(entry.fields.triggers.len(), shown, "a row for each line shown");
+    assert!((2..5).contains(&shown), "the rows take their share of the cap: {shown}");
+    assert!(entry.content.ends_with(&format!("\n{} more left out.", 10 - shown)), "{}", entry.content);
+    assert!(entry.content.len() + entry.fields.size() <= MEMORY_FILE_CAP);
 }
