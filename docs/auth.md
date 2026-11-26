@@ -147,6 +147,7 @@ Everything else is refused, among it all else a human's credentials allow: strea
 - Credentials issued by `ants auth user --web` do not expire, as others it issues; those `ants signer` signs for a registration last the `web_ttl` of `[registration]` (see [Lifetime and renewal](#lifetime-and-renewal)).
 - Renewal (`ants renew`, `ants enroll renew`, the signer's) keeps the device, the tag, the rights of this ants version and the lifetime, and refuses an encryption key.
 - `ants auth devices` marks them `web` (`"web": true` with `--json`), `ants auth issued` shows the kind as `human (web)`, and `issued.jsonl` records `web`.
+- They are the page's, not the CLI's: a command connecting with them (`--creds`, `ANTS_CREDS` or `[cli]` `creds`), whose stream infos, consumers and bucket bindings they do not allow, exits `1` naming them as web credentials and the human's credentials to give instead (`ants login --hub URL`, or `ants auth user NAME --human`). `ants doctor` and `ants renew` take them: `ants doctor` reports them as a web device's (`credentials`, `warn`) and skips the checks needing more. A web device a registration granted is renewed by its page while open, `ants signer` answering, and registered anew by signing in on the page once its credentials expired.
 
 A view added to the web client adds the rights it needs to web credentials under a new [permissions version](#credentials-across-upgrades).
 
