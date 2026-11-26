@@ -132,6 +132,8 @@ pub struct Setup {
     /// The local hub's nats-server configuration of `ants setup`, whose service is checked when it is there and the
     /// leaf node configuration is not.
     pub hub_config: PathBuf,
+    /// A nats-server configuration elsewhere, `--nats-conf`, whose WebSocket listener is checked too.
+    pub nats_conf: Option<PathBuf>,
     /// Whether to start each harness for an ACP handshake.
     pub harnesses: bool,
     /// The auth directory of `ants auth`, whose system account key, when it is there, asks the hub how it keeps

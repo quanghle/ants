@@ -49,6 +49,7 @@ fn setup(server: &Server, creds: Option<PathBuf>) -> Setup {
         config: server.dir().join("no-config.toml"),
         leaf_config: server.dir().join("no-leaf.conf"),
         hub_config: server.dir().join("no-nats.conf"),
+        nats_conf: None,
         harnesses: false,
         team: server.dir().join("no-team"),
         webhooks: server.dir().join("no-webhooks.toml"),

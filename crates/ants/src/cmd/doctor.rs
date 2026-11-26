@@ -30,10 +30,14 @@ pub(crate) struct DoctorArgs {
     /// Config file of `ants webhook serve` (default: ~/.ants/webhooks.toml), checked when it is there.
     #[arg(long)]
     pub(crate) webhook_config: Option<PathBuf>,
+    /// A nats-server configuration kept outside ants' directories, such as a hub's in /etc or a container's, whose
+    /// websocket listener is checked too.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) nats_conf: Option<PathBuf>,
 }
 
 pub(crate) async fn run(conn: &Connection<'_>, args: DoctorArgs) -> Result<()> {
-    let DoctorArgs { config, leaf_config, no_harness, json, team, webhook_config } = args;
+    let DoctorArgs { config, leaf_config, no_harness, json, team, webhook_config, nats_conf } = args;
     let setup = doctor::Setup {
         nats: conn.nats.to_owned(),
         creds: conn.creds.map(Path::to_path_buf),
@@ -48,6 +52,7 @@ pub(crate) async fn run(conn: &Connection<'_>, args: DoctorArgs) -> Result<()> {
             None => crate::node::leaf::default_path()?,
         },
         hub_config: auth::default_dir()?.with_file_name("nats.conf"),
+        nats_conf,
         harnesses: !no_harness,
         team: team_dir(team)?,
         webhooks: match webhook_config {

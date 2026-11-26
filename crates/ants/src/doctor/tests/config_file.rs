@@ -88,6 +88,7 @@ async fn a_cli_only_config_passes_and_its_ants_checks_skip() {
         config: config.clone(),
         leaf_config: dir.join("leaf.conf"),
         hub_config: dir.join("no-nats.conf"),
+        nats_conf: None,
         harnesses: true,
         team: dir.join("no-team"),
         webhooks: dir.join("no-webhooks.toml"),
