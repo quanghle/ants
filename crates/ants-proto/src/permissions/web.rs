@@ -32,9 +32,10 @@ impl Permissions {
     /// reads the colony's entries ([`COLONY_BUCKET`]) by batched direct gets of the last of each, as no consumer lists
     /// them; reads the team directory ([`TEAMS_BUCKET`]) by direct gets naming no subject and puts it by
     /// compare-and-set under its one key, [`TEAM_DIRECTORY_KEY`], reading the ants' identity records
-    /// ([`IDENTITIES_BUCKET`]) by direct gets naming no subject to check a team's members and name; and asks for its
-    /// own renewal. It hears its reply inboxes,
-    /// the messages to it and those sent under its name, every ant's status and the answers to its renewal.
+    /// ([`IDENTITIES_BUCKET`]) by direct gets naming no subject to check a team's members and name; asks for its
+    /// own renewal; and asks the daemon serving an ant for its core and provider memories ([`subject::memories`]), as
+    /// any human may, which is no admin order. It hears its reply inboxes, the messages to it and those sent under its
+    /// name, every ant's status, the answers to its renewal and those to memories requests ([`subject::memoried`]).
     ///
     /// It gets no stream info, creates, updates and purges no stream or bucket, deletes no message, creates no
     /// consumer, sets up no leaf outbox and publishes in none, writes no channel's, other human's or machine's
@@ -58,6 +59,7 @@ impl Permissions {
             subject::kv(TEAMS_BUCKET, TEAM_DIRECTORY_KEY),
             format!("$JS.API.DIRECT.GET.{}", kv_stream(IDENTITIES_BUCKET)),
             subject::renew(human.as_str()),
+            subject::ALL_MEMORIES_REQUESTS.to_owned(),
         ];
         let subscribe = vec![
             format!("{}.>", inbox_prefix(human)),
@@ -65,6 +67,7 @@ impl Permissions {
             subject::inbox_from(human),
             subject::ALL_STATUS.to_owned(),
             subject::renew_reply(human.as_str()),
+            subject::ALL_MEMORIES_REPLIES.to_owned(),
         ];
         Self { publish, subscribe }
     }
@@ -83,6 +86,19 @@ mod tests {
     use super::super::covers;
     use super::*;
     use crate::{JsDomain, Machine, Role, ThreadId, assistant_grant_key, p};
+
+    #[test]
+    fn web_credentials_hold_only_rights_of_a_human_s() {
+        let alice = p("alice");
+        let (web, human) = (Permissions::for_web(&alice), Permissions::for_user(&alice, Role::Human));
+        for right in &web.publish {
+            assert!(human.publish.iter().any(|have| covers(have, right)), "{right} is no right of a human's");
+        }
+        for right in &web.subscribe {
+            assert!(human.subscribe.iter().any(|have| covers(have, right)), "{right} is no right of a human's");
+        }
+        assert!(!crate::writes_human_entries(web.publish.iter().map(String::as_str)));
+    }
 
     #[test]
     fn web_credentials_allow_what_the_page_s_views_use_and_nothing_else() {
@@ -104,21 +120,20 @@ mod tests {
                 "$KV.ants_teams.directory",
                 "$JS.API.DIRECT.GET.KV_ants_identities",
                 "ants.renew.alice",
+                "ants.memories.*",
             ]
         );
         assert_eq!(
             web.subscribe,
-            ["_INBOX.alice.>", "ants.inbox.alice.>", "ants.inbox.*.alice", "ants.status.*.*", "ants.renew.alice.reply"]
+            [
+                "_INBOX.alice.>",
+                "ants.inbox.alice.>",
+                "ants.inbox.*.alice",
+                "ants.status.*.*",
+                "ants.renew.alice.reply",
+                "ants.memoried.*",
+            ]
         );
-        let human = Permissions::for_user(&alice, Role::Human);
-        for right in &web.publish {
-            assert!(human.publish.iter().any(|have| covers(have, right)), "{right} is no right of a human's");
-        }
-        for right in &web.subscribe {
-            assert!(human.subscribe.iter().any(|have| covers(have, right)), "{right} is no right of a human's");
-        }
-        assert!(!crate::writes_human_entries(web.publish.iter().map(String::as_str)));
-
         let (m1, thread): (Machine, ThreadId) = ("m1".parse().unwrap(), "t1".parse().unwrap());
         let (dev_a, bob) = (p("dev-a"), p("bob"));
         let refused = [
@@ -170,6 +185,8 @@ mod tests {
             subject::cancel(&dev_a, &thread),
             subject::renew("bob"),
             subject::renew("leaf-m1"),
+            subject::memoried(&dev_a),
+            format!("ants.memories.{dev_a}.{bob}"),
         ];
         for subject in &refused {
             assert!(!web.publish.iter().any(|have| covers(have, subject)), "{subject} is allowed");

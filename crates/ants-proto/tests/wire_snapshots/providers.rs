@@ -264,3 +264,25 @@ fn reminders() -> provider::MemoryEntry {
         },
     }
 }
+
+#[test]
+fn memories_read_by_any_human() {
+    let request = MemoriesRequest { id: id(1), ant: user("dev-a"), by: user("alice"), sent_at: at(0) };
+    snap("memories_request", &request);
+    // The provider's memories carry their typed fields as in an admin's read.
+    let typed = typed_memory();
+    let memory = ProviderMemory { key: typed.key, content: typed.content, fields: typed.fields, truncated: false };
+    let provider = ProviderMemories { provider: "sense".into(), memories: vec![memory], ..Default::default() };
+    let shown = MemoriesShown {
+        core: CoreMemories {
+            whoami: Some("A reviewer.".into()),
+            memory: Some("Tag first.".into()),
+            tasks: Some("Review the PRs.".into()),
+        },
+        provider: Some(provider),
+        skipped: vec![Skipped { what: "tasks".into(), why: "cut short: over the size cap".into() }],
+    };
+    snap("memories_reply_read", &request.answer(MemoriesOutcome::Read(shown)));
+    let refused = MemoriesOutcome::Refused { error: "the machine's config refuses remote admin".into() };
+    snap("memories_reply_refused", &request.answer(refused));
+}

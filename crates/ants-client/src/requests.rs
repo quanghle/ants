@@ -13,9 +13,9 @@
 use std::time::Duration;
 
 use ants_proto::{
-    COLONY_BUCKET, ColonyEntry, Envelope, HUMANS_BUCKET, JsDomain, OWNERS_BUCKET, PRESENCE_BUCKET, Presence,
-    READ_BUCKET, ReadMarker, STREAM, StatusEvent, ThreadId, UserId, assistant_grant_key, owner_key, owner_record_id,
-    subject,
+    COLONY_BUCKET, ColonyEntry, Envelope, HUMANS_BUCKET, JsDomain, MemoriesOutcome, MemoriesReply, MemoriesRequest,
+    OWNERS_BUCKET, PRESENCE_BUCKET, Presence, READ_BUCKET, ReadMarker, STREAM, StatusEvent, ThreadId, UserId,
+    assistant_grant_key, owner_key, owner_record_id, subject,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -395,6 +395,16 @@ pub(crate) fn heard(message: &Message) -> Option<Envelope> {
     crate::inbox::parse(&message.subject, &message.payload).ok()
 }
 
+/// The answer to `request` that `message`, heard on the ant's memories reply subject, carries; none for one a stream
+/// relayed, one that does not parse, one naming another ant than its subject and one to another request.
+pub(crate) fn memories_answer(request: &MemoriesRequest, message: &Message) -> Option<MemoriesOutcome> {
+    if relayed::heard_relayed(message.reply.as_deref(), message.header_names()) {
+        return None;
+    }
+    let reply = serde_json::from_slice::<MemoriesReply>(&message.payload).ok()?;
+    (reply.request_id == request.id && reply.check_subject(&message.subject).is_ok()).then_some(reply.outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,5 +592,19 @@ mod tests {
         let delivered = Message { reply: Some("$JS.ACK.ANTS.c.1.7.7.0.0".into()), ..live.clone() };
         assert_eq!(heard(&delivered), None, "a consumer's delivery");
         assert_eq!(heard(&Message::new(live.subject, r#"{"stream":"ANTS","seq":2}"#)), None, "no envelope");
+    }
+
+    #[test]
+    fn a_memories_answer_is_taken_only_for_its_request_on_its_ant_s_subject_and_never_from_a_stream() {
+        let request = MemoriesRequest::new(p("dev-a"), p("alice"));
+        let outcome = MemoriesOutcome::Refused { error: "no".into() };
+        let payload = serde_json::to_vec(&request.answer(outcome.clone())).unwrap();
+        let live = Message::new(request.reply_subject(), payload.clone());
+        assert_eq!(memories_answer(&request, &live), Some(outcome));
+        assert_eq!(memories_answer(&request, &Message::new("ants.memoried.dev-b", payload)), None, "another ant's");
+        assert_eq!(memories_answer(&request, &live.clone().header("Nats-Stream", "ANTS")), None, "a stream sent it");
+        let other = MemoriesRequest::new(p("dev-a"), p("bob"));
+        assert_eq!(memories_answer(&other, &live), None, "another request's");
+        assert_eq!(memories_answer(&request, &Message::new(live.subject, "not json")), None);
     }
 }

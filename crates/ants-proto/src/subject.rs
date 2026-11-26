@@ -491,6 +491,24 @@ pub fn queued(ant: &UserId) -> String {
     format!("ants.queued.{ant}")
 }
 
+/// Where a human asks the daemon serving `ant` for its core and provider memories
+/// ([`MemoriesRequest`](super::MemoriesRequest); core NATS, not stored). Only humans publish here, and only that ant's
+/// daemon listens.
+pub fn memories(ant: &UserId) -> String {
+    format!("ants.memories.{ant}")
+}
+
+/// Every memories request, of all ants.
+pub const ALL_MEMORIES_REQUESTS: &str = "ants.memories.*";
+
+/// Where the daemon serving `ant` answers a memories request ([`MemoriesReply`](super::MemoriesReply); core NATS).
+pub fn memoried(ant: &UserId) -> String {
+    format!("ants.memoried.{ant}")
+}
+
+/// The answers to memories requests, of all ants.
+pub const ALL_MEMORIES_REPLIES: &str = "ants.memoried.*";
+
 /// Where a human asks the daemon of `ant`, as a trail's conductor, to start, stop or resume a run
 /// ([`TrailRequest`](super::TrailRequest); core NATS, not stored). Only humans publish here, and only that ant's daemon
 /// listens.

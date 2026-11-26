@@ -135,6 +135,7 @@ pub use memories::{
     BdMemories, BdMemory, CoreMemories, MEMORIES_CAP, MEMORIES_FRESH, MEMORY_FILE_CAP, Memories, MemoryFile,
     ProviderMemories, ProviderMemory, Skipped,
 };
+pub use memories::{MemoriesOutcome, MemoriesReply, MemoriesRequest, MemoriesShown};
 pub use permissions::{
     Destination, LeafRole, PERMISSIONS_VERSION, Permissions, PermissionsVersion, WEB_TAG, is_web, js_domain_of,
 };

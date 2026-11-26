@@ -98,6 +98,7 @@ pub(super) fn settle_ant(
     ant.storage = file.storage;
     ant.memory_pressure = file.memory_pressure;
     ant.trail_workers = file.trails.workers;
+    ant.remote_admin = file.admin.remote;
     Ok(ant)
 }
 

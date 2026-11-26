@@ -129,3 +129,6 @@ pub struct Skipped {
     pub what: String,
     pub why: String,
 }
+
+mod shown;
+pub use shown::{MemoriesOutcome, MemoriesReply, MemoriesRequest, MemoriesShown};

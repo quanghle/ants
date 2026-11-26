@@ -1,0 +1,37 @@
+---
+source: crates/ants-proto/tests/wire_snapshots.rs
+expression: value
+---
+{
+  "request_id": "019a7d2e-0000-7000-8000-000000000001",
+  "ant": "dev-a",
+  "outcome": "read",
+  "core": {
+    "whoami": "A reviewer.",
+    "memory": "Tag first.",
+    "tasks": "Review the PRs."
+  },
+  "provider": {
+    "provider": "sense",
+    "memories": [
+      {
+        "key": "lesson-1a2b (lesson, self, importance 3, core), active, trust self, revision 2",
+        "content": "Tag first\nThe release job reads the tag.",
+        "section": "memories",
+        "id": "lesson-1a2b",
+        "kind": "lesson",
+        "scope": "self",
+        "trust": "self",
+        "title": "Tag first",
+        "revision": 2,
+        "core": true
+      }
+    ]
+  },
+  "skipped": [
+    {
+      "what": "tasks",
+      "why": "cut short: over the size cap"
+    }
+  ]
+}

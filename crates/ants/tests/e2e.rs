@@ -189,6 +189,22 @@ fn exercise_daemon(custom_tools: bool) {
         assert!(entry.get("whoami").is_none());
     }
 
+    // Without the admin role, here on a server without credentials or a host connection, the daemon serving the ant
+    // shows its core and provider memories, and no memory files or bd memories, which only an admin order reads.
+    let memories = run(ants(&["ant", "memories", "dev-a", "--json"]));
+    let stderr = String::from_utf8_lossy(&memories.stderr);
+    assert!(memories.status.success(), "ants ant memories: {stderr}\ndaemon log:\n{}", daemon_log());
+    let memories: serde_json::Value = serde_json::from_slice(&memories.stdout).unwrap();
+    if custom_tools {
+        assert_eq!(memories["core"]["whoami"], "Maintain the Rust backend.", "{memories}");
+        assert_eq!(memories["core"]["tasks"], "Use the ticket tool.", "{memories}");
+    }
+    let provider = &memories["provider"];
+    assert!(provider["provider"].is_string(), "the provider's view: {memories}");
+    assert!(!provider["error"].as_str().unwrap_or_default().contains("no identity"), "{memories}");
+    assert!(memories.get("files").is_none() && memories.get("bd").is_none(), "{memories}");
+    assert_eq!(memories["skipped"][0]["what"], "memory files and bd memories", "{memories}");
+
     // The identity record names the sense id the home keeps: an ant served alone (`--ant`) keeps one too, sense
     // linking on its own.
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

@@ -82,6 +82,9 @@ pub struct HarnessSettings {
     pub env: BTreeMap<String, String>,
     /// Role, memory and task instructions prepended to every prompt.
     pub instructions: String,
+    /// The role, memory and task instructions as set, which a human's read of the ant's memories shows
+    /// ([`ants_proto::MemoriesRequest`]).
+    pub core: ants_proto::CoreMemories,
     /// Limits on every prompt.
     pub limits: PromptLimits,
 }
@@ -128,6 +131,9 @@ pub struct Policy {
     /// The ant reviewing this one, its sage ([`crate::config::Ant::reviewed_by`]), published in its colony entry; none
     /// for a sage, which has none of its own, or where reviews are off.
     pub sage: Option<UserId>,
+    /// The config's `[admin] remote`: false refuses humans' reads of the ant's memories, as the machine refuses every
+    /// admin order.
+    pub remote_admin: bool,
 }
 
 /// What the ant may spend.
