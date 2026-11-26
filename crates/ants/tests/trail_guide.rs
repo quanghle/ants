@@ -1,7 +1,8 @@
 //! The examples of the trail authoring guide, contrib/skills/ants-trails/SKILL.md, and of docs/trails.md, each run to
 //! its end with the real worker and a fake host answering its steps, its gotos and trail() steps leading to the same
 //! document's other examples. The fake refuses gotos and trail() calls as the conductor does; the trail_daemon tests
-//! run the same examples through a conductor, which refuses them itself.
+//! run the same examples through a conductor, which refuses them itself. The watcher trail of
+//! contrib/skills/ants-pr-watch/SKILL.md runs as a watcher's check ([`pr_watch`]).
 
 use std::collections::{HashMap, VecDeque};
 
@@ -13,6 +14,8 @@ use host::{DOCS, GUIDE, answer, examples, hash};
 
 #[path = "trail_guide/host.rs"]
 mod host;
+#[path = "trail_guide/pr_watch.rs"]
+mod pr_watch;
 
 const FAILED: &str = "the fake host failed this step";
 

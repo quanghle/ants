@@ -632,6 +632,9 @@ A trail watcher's script prompts no ant, starts no run and writes no note of its
 Watchers count within the fifty active triggers and expire after thirty days unless renewed. Acknowledging one keeps it
 armed; postponing one moves its next check. Untrusted threads cannot create or change any watcher.
 
+[contrib/skills/ants-pr-watch/SKILL.md](../contrib/skills/ants-pr-watch/SKILL.md) teaches an ant to follow a pull
+request with the trail watcher `pr-blocked`, reading it through `gh` or a Forgejo API, and what to do on each wake.
+
 ## Dreams
 
 Once a day at most, the active daemon has its ant review its recent work in a dream. Sense runs no model: it gathers
