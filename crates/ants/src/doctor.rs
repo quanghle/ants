@@ -35,7 +35,7 @@ pub use self::trails::trail_worker;
 use self::trails::{check_runs, check_worker};
 use self::transports::{check_transports, installed_transports, same_address};
 use self::updates::{check_update, latest_release};
-use self::web::check_web_listeners;
+use self::web::{check_exported_page, check_web_listeners};
 use crate::auth;
 use crate::people::humans::{Me, Rights};
 use crate::service::Services;
@@ -132,6 +132,8 @@ pub struct Setup {
     /// The local hub's nats-server configuration of `ants setup`, whose service is checked when it is there and the
     /// leaf node configuration is not.
     pub hub_config: PathBuf,
+    /// A nats-server configuration elsewhere, `--nats-conf`, whose WebSocket listener is checked too.
+    pub nats_conf: Option<PathBuf>,
     /// Whether to start each harness for an ACP handshake.
     pub harnesses: bool,
     /// The auth directory of `ants auth`, whose system account key, when it is there, asks the hub how it keeps
@@ -151,6 +153,7 @@ pub struct Setup {
 /// workdir, reactions responder, trail saves and team changes, the trail worker and the runs of trails stuck, the team
 /// directory, the channels, the humans the config file names, the hub's account resolver and store account, the
 /// account keys' backup, the leaf node and outbox, the installed services, the WebSocket listeners' origins, the
+/// version of the page `ants web export` last wrote, the
 /// webhooks' config file and notification sinks, the config file's schedules (one firing no more or sending to an ant
 /// no daemon serves), the harnesses of the summary ant served here reporting the tokens `summaries = "ahead"` counts,
 /// and the Dev
@@ -250,6 +253,7 @@ pub async fn run(setup: &Setup) -> Vec<Check> {
     };
     checks.extend(services);
     checks.extend(check_web_listeners(setup, managed));
+    checks.extend(check_exported_page(&setup.config));
     checks.extend(check_webhooks(&setup.webhooks).await);
     checks.extend(check_transports(transports, now).await);
     checks

@@ -1,5 +1,5 @@
 //! Tests of the doctor's credentials checks: the backup of the keys issued, host credentials, stored seeds and
-//! encryption keys.
+//! encryption keys, and web credentials, which the CLI's other commands refuse.
 
 use super::*;
 
@@ -123,5 +123,52 @@ fn the_xkey_check_warns_of_a_human_device_binding_none_and_fails_on_a_lost_seed(
     let ant = auth::sign_user(&team, &"dev-a".parse().unwrap(), Role::Ant, None, &user.public_key()).unwrap();
     let finding = creds::Finding::from_jwt(&ant).unwrap();
     assert!(check_xkey("credentials xkey", &path, &finding, &store).is_none(), "an ant's bind none");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn web_credentials_are_a_web_device_s_which_other_commands_refuse() {
+    let dir = ants_test_support::scratch_dir("doctor-web-creds");
+    let team = dir.join("auth");
+    auth::init(&team).unwrap();
+    let alice: UserId = "alice".parse().unwrap();
+    let out = dir.join("alice-web.creds");
+    let web = auth::Registered { label: Some("browser"), web: true, ..auth::Registered::default() };
+    let permissions = ants_proto::Permissions::for_web(&alice);
+    auth::Issue::new(&team, &alice, issued::Kind::Human, permissions).with(&web).into_file(&out).unwrap().unwrap();
+
+    let refused = crate::connection::Nats::new("nats://127.0.0.1:4222", Some(&out), None, None).err().unwrap();
+    assert_eq!(refused.to_string(), crate::connection::web_refused(&out, &alice));
+    assert!(refused.to_string().contains("web credentials of alice") && refused.to_string().contains("ants login"));
+
+    let setup = Setup {
+        nats: "nats://127.0.0.1:4222".to_owned(),
+        creds: Some(out.clone()),
+        js_domain: None,
+        human: None,
+        config: dir.join("config.toml"),
+        leaf_config: dir.join("leaf.conf"),
+        hub_config: dir.join("nats.conf"),
+        nats_conf: None,
+        harnesses: false,
+        team,
+        webhooks: dir.join("webhooks.toml"),
+        home: None,
+        worker: None,
+    };
+    let mut checks = Vec::new();
+    let identity = super::super::credentials::check_cli_creds(&setup, auth::now().unwrap(), &mut checks).unwrap();
+    assert!(identity.finding.as_ref().is_some_and(|f| f.web));
+    let web = checks.iter().find(|c| c.status == Status::Warn && c.detail.contains("web credentials")).unwrap();
+    assert_eq!(
+        web.detail,
+        format!(
+            "human alice (web device) ({}): web credentials, for a page of the web client, allowing only what its \
+             views do: ants commands but `ants doctor` and `ants renew` refuse them, and the checks needing more are \
+             skipped",
+            out.display()
+        )
+    );
+    assert!(web.fix[0].starts_with("`ants login --hub URL` here, or `ants auth user alice --human`"), "{web}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

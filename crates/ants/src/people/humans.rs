@@ -150,6 +150,14 @@ impl Rights {
         Ok(Self { claims: Some(claims) })
     }
 
+    /// Whether they are web credentials, a page's of the web client ([`ants_proto::WEB_TAG`]).
+    pub fn web(&self) -> bool {
+        self.claims.as_ref().is_some_and(|claims| {
+            let tags = claims["nats"]["tags"].as_array().into_iter().flatten().filter_map(Value::as_str);
+            ants_proto::is_web(tags)
+        })
+    }
+
     /// Whether they allow publishing `subject`: listed as it is, or no publish allow list at all.
     pub fn may_publish(&self, subject: &str) -> bool {
         match &self.claims {

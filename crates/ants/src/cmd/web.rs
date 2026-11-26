@@ -69,7 +69,8 @@ enum WebCommand {
     /// Write the page into DIR for the reverse proxy fronting a hub, on the origin the hub's websocket block names
     /// in allowed_origins, with site.json naming the hub's WebSocket address and the bus's bootstrap credentials,
     /// public, with which the page registers its device. Files of the page already in DIR are replaced, others kept,
-    /// so that a page still open loads what it names. Prints the response headers to serve DIR with.
+    /// so that a page still open loads what it names. Prints the response headers to serve DIR with, and records DIR
+    /// as `web_export` of the config file's `[cli]`, whose page `ants doctor` checks to be of this ants version.
     Export {
         /// Directory to write the page into, created if missing.
         dir: PathBuf,
@@ -85,6 +86,9 @@ enum WebCommand {
         /// the hub's `[registration]` names one.
         #[arg(long, value_name = "URL", default_value = GITHUB_URL, requires = "bootstrap")]
         github_url: String,
+        /// Config file to record DIR in (default: ~/.ants/config.toml).
+        #[arg(long, env = "ANTS_CONFIG")]
+        config: Option<PathBuf>,
     },
 }
 
@@ -131,11 +135,20 @@ impl Page {
 pub(crate) async fn run(args: WebArgs, human: Option<&UserId>) -> Result<()> {
     let page = Page::embedded()?;
     match args.command {
-        Some(WebCommand::Export { dir, server, bootstrap, github_url }) => {
+        Some(WebCommand::Export { dir, server, bootstrap, github_url, config }) => {
             device_page(&github_url).map_err(|e| anyhow::anyhow!("--github-url {e}"))?;
             let bootstrap = bootstrap.as_deref().map(read_bootstrap).transpose()?;
             let github_url = bootstrap.is_some().then_some(github_url);
             print!("{}", export(page, &dir, Site { server: websocket(&server)?, bootstrap, github_url, human: None })?);
+            let config = match config {
+                Some(config) => config,
+                None => ants_daemon::config::default_path()?,
+            };
+            match record_export(&config, &std::path::absolute(&dir)?) {
+                Ok(Some(told)) => eprintln!("{told}"),
+                Ok(None) => {}
+                Err(e) => eprintln!("warning: {e:#}; `ants doctor` checks no version of the page"),
+            }
             Ok(())
         }
         None => serve_args(page, args.serve, human).await,
@@ -267,6 +280,21 @@ fn export(page: Page, dir: &Path, site: Site) -> Result<String> {
         site::FILE
     );
     Ok(out)
+}
+
+/// Record `dir`, absolute, as the directory `ants web export` last wrote, `web_export` of `[cli]` in the config file
+/// at `config`, for `ants doctor` to check the version of its page: what to tell of it, none when recorded already.
+fn record_export(config: &Path, dir: &Path) -> Result<Option<String>> {
+    let Some(text) = ants_daemon::config::with_web_export(config, dir)? else { return Ok(None) };
+    if let Some(parent) = config.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    ants_daemon::config::write(config, &text)?;
+    Ok(Some(format!(
+        "set web_export of [cli] in {} to {}: `ants doctor` warns once the page there is of another ants version",
+        config.display(),
+        dir.display()
+    )))
 }
 
 /// The caching of a file whose name changes with its contents.

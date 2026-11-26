@@ -137,14 +137,30 @@ pub fn authenticated(path: &Path) -> bool {
     names_auth(path, 4)
 }
 
+/// The first line of the server's answer to a WebSocket upgrade request sent to `addr` with the `origin` header.
+#[cfg(test)]
+pub(crate) fn upgrade(addr: &str, origin: Option<&str>) -> String {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let origin = origin.map_or_default(|origin| format!("Origin: {origin}\r\n"));
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin}\r\n"
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut answer = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !answer.ends_with(b"\r\n") && stream.read(&mut byte).unwrap() == 1 {
+        answer.push(byte[0]);
+    }
+    String::from_utf8_lossy(&answer).trim().to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     //! Tests of the WebSocket listener for pages: the block written and read back, a second addition changing
     //! nothing, the servers that ask for credentials, and a real nats-server taking the named origin only.
-
-    use std::io::{Read as _, Write as _};
-    use std::net::TcpStream;
-    use std::time::Duration;
 
     use ants_test_support::{NatsServer, free_port, scratch_dir};
 
@@ -205,24 +221,6 @@ mod tests {
         assert!(asks("include '/server.conf'\n"), "joined to the configuration's directory");
         assert!(!asks("include \"missing.conf\"\n"));
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The first line of the server's answer to a WebSocket upgrade request sent to `addr` with the `origin` header.
-    fn upgrade(addr: &str, origin: Option<&str>) -> String {
-        let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let origin = origin.map_or_default(|origin| format!("Origin: {origin}\r\n"));
-        let request = format!(
-            "GET / HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin}\r\n"
-        );
-        stream.write_all(request.as_bytes()).unwrap();
-        let mut answer = Vec::new();
-        let mut byte = [0_u8; 1];
-        while !answer.ends_with(b"\r\n") && stream.read(&mut byte).unwrap() == 1 {
-            answer.push(byte[0]);
-        }
-        String::from_utf8_lossy(&answer).trim().to_owned()
     }
 
     #[test]

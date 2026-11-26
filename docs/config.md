@@ -31,6 +31,7 @@ theme = "auto"                             # avatar palette: "dark", "light" or 
 animate = true                             # avatar heads and spinners in ants chat move (default true; false keeps heads still and spinners at a frame a second)
 mouse = true                               # mouse wheel and clicks in ants chat (default true; false leaves native terminal selection)
 notify = "bell"                            # new home items while chat is unfocused: "bell" (default), "terminal" or "off"
+web_export = "/srv/ants-web"               # the directory `ants web export` last wrote, which it sets; `ants doctor` checks its page's version
 
 [storage]                                  # JetStream capacity warnings (see docs/architecture.md, JetStream storage)
 warn_percent = 80                          # warn past this share of a store's limit (default 80; 0 disables)

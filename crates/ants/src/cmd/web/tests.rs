@@ -203,6 +203,27 @@ fn ants_web_export_writes_the_page_and_its_site_and_prints_the_headers_to_serve_
 }
 
 #[test]
+fn ants_web_export_records_its_directory_in_the_config_file_once() {
+    let home = scratch_dir("web-export-record");
+    let (config, dir) = (home.join(".ants/config.toml"), home.join("www"));
+    let told = record_export(&config, &dir).unwrap().unwrap();
+    assert_eq!(
+        told,
+        format!(
+            "set web_export of [cli] in {} to {}: `ants doctor` warns once the page there is of another ants version",
+            config.display(),
+            dir.display()
+        )
+    );
+    let read = ants_daemon::config::CliDefaults::load(&config).unwrap();
+    assert_eq!(read.web_export.as_deref(), Some(dir.as_path()));
+    assert_eq!(record_export(&config, &dir).unwrap(), None, "recorded already");
+    std::fs::write(&config, "[cli\n").unwrap();
+    assert!(record_export(&config, &dir).is_err());
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
 fn the_page_connects_to_a_websocket_address_only() {
     assert_eq!(websocket(" wss://hub.example/nats ").unwrap(), "wss://hub.example/nats");
     assert_eq!(websocket("ws://127.0.0.1:4281").unwrap(), "ws://127.0.0.1:4281");

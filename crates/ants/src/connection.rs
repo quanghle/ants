@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ants_daemon::{bus, hub};
 use ants_proto::{DeviceId, JsDomain, UserId};
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::people::{devices, humans};
 
@@ -76,6 +76,9 @@ impl<'a> Nats<'a> {
         let me = humans::Me::from_creds(creds, human)?;
         let device = humans::device(creds)?;
         let rights = humans::Rights::from_creds(creds)?;
+        if let Some(path) = creds.filter(|_| rights.web()) {
+            bail!(web_refused(path, &me.id));
+        }
         let account = devices::account_of(creds)?;
         let own_device = devices::Own::from_creds(creds)?;
         Ok(Self {
@@ -140,6 +143,18 @@ impl<'a> Nats<'a> {
         };
         bus::connect(self.url, self.creds, self.domain, &self.me.id, &name).await
     }
+}
+
+/// Why the CLI connects with no web credentials, those of `human` at `path`: they allow only what the page of the web
+/// client does, and every command needs more, a stream's info, a consumer, a bucket's binding.
+pub(crate) fn web_refused(path: &Path, human: &UserId) -> String {
+    format!(
+        "{} holds web credentials of {human} (user JWT tag ants-web), for a page of the web client, allowing only what \
+         its views do and not what ants commands need: give --creds (or `creds` of [cli]) a human's credentials of a \
+         device of its own, from `ants login --hub URL` here, or `ants auth user {human} --human` on the machine \
+         holding the account keys, and paste these into the page",
+        path.display()
+    )
 }
 
 /// Create the hub's stream and buckets that are missing, and deny the rollups of those allowing them, as `ants init`

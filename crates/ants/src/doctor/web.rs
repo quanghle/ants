@@ -1,24 +1,87 @@
 //! The WebSocket listeners of the machine's nats-server configurations: which pages each takes. A browser lets any
 //! page open in it connect to a listener on the machine, so one naming no origin, on a server asking for no
-//! credentials, lets any site read and send as the human.
+//! credentials, lets any site read and send as the human; on a server asking for credentials, as a hub does, it still
+//! takes pages of any site. And the page `ants web export` last wrote for a hub, whose version is to be this ants'.
 
 use std::path::Path;
+
+use ants_client::device::registration::GITHUB_URL;
+use ants_client::site::{self, Site};
 
 use super::{Check, Setup, same_file};
 use crate::node::web::{self, Listener};
 
+const CHECK: &str = "web listener";
+
 /// The WebSocket listener of each nats-server configuration of the machine with one: the leaf node's, the local
-/// hub's when there is no leaf node, and `managed`, the one `[nats_server]` of the config file names.
+/// hub's when there is no leaf node, `managed`, the one `[nats_server]` of the config file names, and the one
+/// `--nats-conf` names, checked even without a listener.
 pub(super) fn check_web_listeners(setup: &Setup, managed: Option<&Path>) -> Vec<Check> {
     let leaf = setup.leaf_config.as_path();
     let hub = (!leaf.exists()).then_some(setup.hub_config.as_path());
     let other = managed.filter(|m| !same_file(m, leaf) && !same_file(m, &setup.hub_config));
-    [Some(leaf), hub, other].into_iter().flatten().filter_map(check_listener).collect()
+    let mut checks: Vec<Check> = [Some(leaf), hub, other].into_iter().flatten().filter_map(check_listener).collect();
+    let named =
+        setup.nats_conf.as_deref().filter(|n| [Some(leaf), hub, other].into_iter().flatten().all(|c| !same_file(n, c)));
+    checks.extend(named.map(check_named));
+    checks
+}
+
+/// The check of the nats-server configuration `--nats-conf` names: its listener's, else that it has none or is
+/// unreadable.
+fn check_named(conf: &Path) -> Check {
+    let shown = conf.display();
+    match std::fs::read_to_string(conf) {
+        Err(e) => Check::fail(
+            CHECK,
+            format!("reading {shown}: {e}"),
+            vec!["give --nats-conf the path of the nats-server configuration, readable by this user".to_owned()],
+        ),
+        Ok(_) => check_listener(conf)
+            .unwrap_or_else(|| Check::ok(CHECK, format!("{shown} has no websocket listener: no page connects to it"))),
+    }
+}
+
+/// The page in the directory `ants web export` last wrote, `web_export` of `[cli]` in the config file at `config`:
+/// of this ants version, else a warning naming the export writing this version's; None without one recorded.
+pub(super) fn check_exported_page(config: &Path) -> Option<Check> {
+    let check = "web page";
+    let dir = ants_daemon::config::CliDefaults::load(config).ok()?.web_export?;
+    let shown = dir.display();
+    let ours = env!("CARGO_PKG_VERSION");
+    let site = std::fs::read_to_string(dir.join(site::FILE)).ok().and_then(|text| Site::from_json(&text).ok());
+    let export = {
+        let server = site.as_ref().map_or("URL", |site| site.server.as_str());
+        let bootstrap = match &site {
+            Some(Site { bootstrap: None, .. }) => String::new(),
+            _ => " --bootstrap FILE".to_owned(),
+        };
+        let github = match site.as_ref().and_then(|site| site.github_url.as_deref()) {
+            Some(url) if url != GITHUB_URL => format!(" --github-url {url}"),
+            _ => String::new(),
+        };
+        format!("ants web export {shown} --server {server}{bootstrap}{github}")
+    };
+    let recorded = format!("web_export of [cli] in {}", config.display());
+    let version = match std::fs::read_to_string(dir.join("ants-version")) {
+        Ok(version) => version.trim().to_owned(),
+        Err(e) => {
+            let detail = format!("no page in {shown}, which {recorded} names: reading its ants-version: {e}");
+            return Some(Check::warn(check, detail, vec![export, format!("or remove {recorded}")]));
+        }
+    };
+    if version == ours {
+        return Some(Check::ok(check, format!("the page in {shown} is of ants {ours}, as this binary")));
+    }
+    let detail = format!(
+        "the page in {shown} ({recorded}) is of ants {version}, this binary of {ours}: pages loading it run a client \
+         of another version than the hub's"
+    );
+    Some(Check::warn(check, detail, vec![export]))
 }
 
 /// The WebSocket listener of the nats-server configuration at `conf`; None without one.
 fn check_listener(conf: &Path) -> Option<Check> {
-    let check = "web listener";
     let listener = Listener::read(&std::fs::read_to_string(conf).ok()?)?;
     let shown = conf.display();
     let at = match listener.listen.as_str() {
@@ -28,13 +91,20 @@ fn check_listener(conf: &Path) -> Option<Check> {
     if !listener.origins.is_empty() {
         let detail =
             format!("the websocket listener{at} of {shown} takes pages of {} only", listener.origins.join(", "));
-        return Some(Check::ok(check, detail));
+        return Some(Check::ok(CHECK, detail));
     }
     if web::authenticated(conf) {
         let detail = format!(
-            "the websocket listener{at} of {shown} names no origin; its server asks every connection for credentials"
+            "the websocket listener{at} of {shown} names no origin: its server asks every connection for credentials, \
+             but takes pages of any site"
         );
-        return Some(Check::ok(check, detail));
+        let fix = format!(
+            "add `allowed_origins: [\"ORIGIN\"]`, ORIGIN the one the page is served on (the reverse proxy serving \
+             `ants web export` on a hub, {} for `ants web`), to the websocket block of {shown} and restart \
+             nats-server, which reloads no change of that block",
+            web::origin()
+        );
+        return Some(Check::warn(CHECK, detail, vec![fix]));
     }
     let detail = format!(
         "the websocket listener{at} of {shown} names no origin, and its server asks for no credentials: any page \
@@ -45,13 +115,14 @@ fn check_listener(conf: &Path) -> Option<Check> {
          {shown} and restart nats-server (`ants setup --web` writes such a listener), or remove the block",
         web::origin()
     );
-    Some(Check::fail(check, detail, vec![fix]))
+    Some(Check::fail(CHECK, detail, vec![fix]))
 }
 
 #[cfg(test)]
 mod tests {
     //! Tests of the WebSocket listener check: a listener naming no origin fails on a server asking for no
-    //! credentials, and one naming the page's origin passes.
+    //! credentials and warns on one asking for them, one naming the page's origin passes, and the configuration
+    //! `--nats-conf` names is checked beside the machine's; an exported page of another ants version warns.
 
     use ants_test_support::scratch_dir;
 
@@ -106,7 +177,119 @@ mod tests {
 
         std::fs::write(dir.join("server.conf"), "operator: \"eyJ0\"\n").unwrap();
         let hub = checked(&format!("{plain}websocket {{\n  port: 8080\n  no_tls: true\n}}\ninclude \"server.conf\"\n"));
-        assert_eq!(hub.unwrap().status, Status::Ok, "every connection signs in");
+        let hub = hub.unwrap();
+        assert_eq!(hub.status, Status::Warn, "every connection signs in, but from pages of any site");
+        assert_eq!(
+            hub.detail,
+            format!(
+                "the websocket listener of {} names no origin: its server asks every connection for credentials, but \
+                 takes pages of any site",
+                conf.display()
+            )
+        );
+        assert!(hub.fix[0].starts_with("add `allowed_origins: [\"ORIGIN\"]`"), "{:?}", hub.fix);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_exported_page_of_another_ants_version_warns_naming_the_export_to_run() {
+        let dir = scratch_dir("doctor-web-page").canonicalize().unwrap();
+        let (config, www) = (dir.join("config.toml"), dir.join("www"));
+        assert_eq!(check_exported_page(&config), None, "no config file");
+        std::fs::write(&config, "[cli]\nnats = \"nats://127.0.0.1:4222\"\n").unwrap();
+        assert_eq!(check_exported_page(&config), None, "no page exported");
+
+        std::fs::write(&config, format!("[cli]\nweb_export = {:?}\n", www.to_str().unwrap())).unwrap();
+        let missing = check_exported_page(&config).unwrap();
+        assert_eq!(missing.status, Status::Warn);
+        assert!(missing.detail.starts_with(&format!("no page in {}", www.display())), "{}", missing.detail);
+        assert_eq!(missing.fix[0], format!("ants web export {} --server URL --bootstrap FILE", www.display()));
+
+        std::fs::create_dir_all(&www).unwrap();
+        std::fs::write(www.join("ants-version"), format!("{}\n", env!("CARGO_PKG_VERSION"))).unwrap();
+        let same = check_exported_page(&config).unwrap();
+        assert_eq!(
+            (same.status, same.detail),
+            (
+                Status::Ok,
+                format!("the page in {} is of ants {}, as this binary", www.display(), env!("CARGO_PKG_VERSION"))
+            )
+        );
+
+        std::fs::write(www.join("ants-version"), "0.0.1\n").unwrap();
+        let site = Site {
+            server: "wss://hub.example/nats".to_owned(),
+            bootstrap: Some("creds".to_owned()),
+            github_url: Some("https://ghe.example".to_owned()),
+            human: None,
+        };
+        std::fs::write(www.join(site::FILE), site.to_json()).unwrap();
+        let other = check_exported_page(&config).unwrap();
+        assert_eq!(other.status, Status::Warn);
+        assert_eq!(
+            other.detail,
+            format!(
+                "the page in {} (web_export of [cli] in {}) is of ants 0.0.1, this binary of {}: pages loading it run \
+                 a client of another version than the hub's",
+                www.display(),
+                config.display(),
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(
+            other.fix,
+            [format!(
+                "ants web export {} --server wss://hub.example/nats --bootstrap FILE --github-url https://ghe.example",
+                www.display()
+            )]
+        );
+        let unbootstrapped = Site { bootstrap: None, github_url: None, ..site };
+        std::fs::write(www.join(site::FILE), unbootstrapped.to_json()).unwrap();
+        let fix = check_exported_page(&config).unwrap().fix;
+        assert_eq!(fix, [format!("ants web export {} --server wss://hub.example/nats", www.display())]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_configuration_nats_conf_names_is_checked_beside_the_machine_s() {
+        let dir = scratch_dir("doctor-web-named").canonicalize().unwrap();
+        let (leaf, hub, named) = (dir.join("leaf.conf"), dir.join("nats.conf"), dir.join("etc-nats.conf"));
+        let open = "listen: \"127.0.0.1:4222\"\nwebsocket {\n  port: 8080\n  no_tls: true\n}\n";
+        std::fs::write(&hub, open).unwrap();
+        let setup = |nats_conf: Option<&Path>| Setup {
+            nats: "nats://127.0.0.1:4222".to_owned(),
+            creds: None,
+            js_domain: None,
+            human: None,
+            config: dir.join("config.toml"),
+            leaf_config: leaf.clone(),
+            hub_config: hub.clone(),
+            nats_conf: nats_conf.map(Path::to_path_buf),
+            harnesses: false,
+            team: dir.join("auth"),
+            webhooks: dir.join("webhooks.toml"),
+            home: None,
+            worker: None,
+        };
+        let statuses = |checks: Vec<Check>| checks.into_iter().map(|c| (c.status, c.detail)).collect::<Vec<_>>();
+        assert_eq!(check_web_listeners(&setup(None), None).len(), 1, "the local hub's");
+        assert_eq!(check_web_listeners(&setup(Some(&hub)), None).len(), 1, "named once");
+
+        let missing = statuses(check_web_listeners(&setup(Some(&named)), None));
+        assert_eq!(missing[1].0, Status::Fail);
+        assert!(missing[1].1.starts_with(&format!("reading {}", named.display())), "{}", missing[1].1);
+
+        std::fs::write(&named, "listen: \"0.0.0.0:4222\"\n").unwrap();
+        let without = statuses(check_web_listeners(&setup(Some(&named)), None));
+        assert_eq!(
+            without[1],
+            (Status::Ok, format!("{} has no websocket listener: no page connects to it", named.display()))
+        );
+
+        std::fs::write(&named, format!("operator: \"eyJ0\"\n{}", &open[22..])).unwrap();
+        let checks = check_web_listeners(&setup(Some(&named)), None);
+        assert_eq!(checks.iter().map(|c| c.status).collect::<Vec<_>>(), [Status::Fail, Status::Warn]);
+        assert!(checks[1].detail.contains(&named.display().to_string()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

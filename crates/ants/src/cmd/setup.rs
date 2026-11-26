@@ -501,6 +501,7 @@ impl Steps<'_> {
             config: paths.config.clone(),
             leaf_config: paths.leaf_conf.clone(),
             hub_config: paths.nats_conf.clone(),
+            nats_conf: None,
             harnesses: false,
             team: auth::default_dir()?,
             webhooks: paths.config.with_file_name("webhooks.toml"),

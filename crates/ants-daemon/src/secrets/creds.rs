@@ -339,8 +339,13 @@ impl Finding {
 
     /// How to renew them, in words: over NATS ([`Finding::renew_over_nats`]) when they are at `path` and
     /// [`Finding::renewable`] at `now`, else naming [`Finding::renew`], and `ants login` for credentials a registration
-    /// granted.
+    /// granted; the page itself for a web device's a registration granted, which the page keeps.
     pub fn renew_hint(&self, path: Option<&Path>, now: u64) -> String {
+        if self.web && self.registered {
+            return "the page of the web client renews them while it is open, `ants signer` answering; once they \
+                    expired, sign in on the page again to register its device anew"
+                .to_owned();
+        }
         if let Some(path) = path.filter(|_| self.renewable(now)) {
             if self.registered {
                 return format!(
@@ -749,6 +754,18 @@ mod tests {
         assert!(!untagged.web && untagged.kind != Kind::Human, "the rights without the tag are no human's");
         let no_device = [tags[0].clone(), tags[2].clone()];
         assert!(Finding::from_claims(&claims("alice", &web, &no_device, None)).is_err(), "no device");
+
+        let registered = [&tags[..], &[ants_proto::REGISTERED_TAG.to_owned()]].concat();
+        let page = Finding::from_claims(&claims("alice", &web, &registered, Some(1_000))).unwrap();
+        assert!(page.web && page.registered);
+        let path = Path::new("/home/alice/.config/ants/auth/alice.creds");
+        for (path, now) in [(Some(path), 0), (Some(path), 2_000), (None, 0)] {
+            let hint = page.renew_hint(path, now);
+            assert!(!hint.contains("ants login") && !hint.contains(".creds"), "{hint}");
+            assert!(hint.starts_with("the page of the web client renews them"), "{hint}");
+        }
+        let issued = finding.renew_hint(Some(path), 0);
+        assert!(issued.starts_with("renew them with `ants renew /home/alice"), "{issued}");
         let admin = [tags[0].clone(), tags[1].clone(), tags[2].clone(), ants_proto::ADMIN_TAG.to_owned()];
         assert!(Finding::from_claims(&claims("alice", &web, &admin, None)).is_err(), "never the admin role");
     }

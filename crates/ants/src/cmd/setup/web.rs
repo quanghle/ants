@@ -148,6 +148,72 @@ mod tests {
     use super::super::{Report, SetupArgs};
     use super::*;
 
+    /// `ants setup --web` on a machine whose nats-server an `ants daemon` manages: the listener is added, the server
+    /// restarted through the daemon ([`natsd::apply`]), as nats-server takes no new WebSocket listener on a reload,
+    /// and the listener then takes pages of the origin of `ants web` alone; a second run changes nothing. Skipped
+    /// without nats-server, and while the listener's fixed port is taken, as by the machine's own server.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn web_restarts_a_managed_server_whose_new_listener_takes_the_page_of_ants_web_only() {
+        use ants_daemon::config::NatsServer;
+        use ants_test_support::{eventually_within, free_port, have};
+
+        const TAKEN: &str = "HTTP/1.1 101 Switching Protocols";
+        const REFUSED: &str = "HTTP/1.1 403 Forbidden";
+        let at = page::listen("127.0.0.1:4222").unwrap();
+        if !have("nats-server") {
+            return;
+        }
+        if std::net::TcpListener::bind(at).is_err() {
+            eprintln!("skipped: {at}, the listener's port, is taken");
+            return;
+        }
+        let home = ants_test_support::scratch_dir("setup-web-managed").canonicalize().unwrap();
+        let paths = paths(&home);
+        let listen = format!("127.0.0.1:{}", free_port());
+        let args = SetupArgs { web: true, ..managed_args(None) };
+        let mut steps = steps(&args, &paths);
+        steps.nats_config(&listen);
+        let settings = NatsServer {
+            command: "nats-server".into(),
+            config: paths.nats_conf.clone(),
+            ready_timeout: Duration::from_secs(10),
+        };
+        let policy = natsd::Policy { backoff: Duration::from_millis(50), ..natsd::Policy::DEFAULT };
+        let managed = natsd::start(&settings, &format!("nats://{listen}"), policy, std::future::pending())
+            .await
+            .unwrap()
+            .expect("a server started");
+        assert!(page::Listener::read(&std::fs::read_to_string(&paths.nats_conf).unwrap()).is_none());
+        assert!(!listening(&at.to_string()).await, "no listener before");
+
+        let addr = at.to_string();
+        let served = natsd::run_serving(managed, async {
+            steps.web(&listen).await;
+            eventually_within(Duration::from_secs(10), "the restarted server listens for pages", async || {
+                listening(&addr).await
+            })
+            .await;
+            let answers = tokio::task::spawn_blocking({
+                let addr = addr.clone();
+                move || {
+                    [Some(page::origin().as_str()), Some("http://localhost:4280"), Some("https://evil.example"), None]
+                        .map(|origin| page::upgrade(&addr, origin))
+                }
+            })
+            .await?;
+            steps.web(&listen).await;
+            Ok(answers)
+        })
+        .await
+        .unwrap();
+        assert_eq!(served, [TAKEN, REFUSED, REFUSED, TAKEN], "the page's origin, others refused, the CLI's none");
+        assert_eq!(steps.report.failed, 0);
+        let block = page::block(at, &page::origin());
+        assert_eq!(std::fs::read_to_string(&paths.nats_conf).unwrap().matches(&block).count(), 1, "added once");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn web_adds_the_listener_once_and_a_second_run_changes_nothing() {
         let home = ants_test_support::scratch_dir("setup-web").canonicalize().unwrap();

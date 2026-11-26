@@ -29,6 +29,9 @@ pub(super) fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) 
         Ok(identity) => {
             let finding = identity.finding.as_ref()?;
             checks.push(check_creds(check, path, finding, now));
+            if finding.web {
+                checks.push(web_creds(check, path, finding, &setup.config));
+            }
             checks.extend(check_key("credentials key", path, finding.renew(), keystore::os()));
             checks.extend(check_xkey("credentials xkey", path, finding, keystore::os()));
             Some(identity)
@@ -43,6 +46,24 @@ pub(super) fn check_cli_creds(setup: &Setup, now: u64, checks: &mut Vec<Check>) 
             None
         }
     }
+}
+
+/// The warning of the CLI's credentials at `path` being a web device's, `finding`: other commands refuse them
+/// ([`crate::connection::web_refused`]), and the checks needing more than they allow are skipped.
+fn web_creds(check: &str, path: &Path, finding: &creds::Finding, config: &Path) -> Check {
+    let detail = format!(
+        "{} ({}): web credentials, for a page of the web client, allowing only what its views do: ants commands but \
+         `ants doctor` and `ants renew` refuse them, and the checks needing more are skipped",
+        finding.holder(),
+        path.display()
+    );
+    let fix = format!(
+        "`ants login --hub URL` here, or `ants auth user {} --human` on the machine holding the account keys, then \
+         name the file in `creds` of [cli] in {}",
+        finding.name,
+        config.display()
+    );
+    Check::warn(check, detail, vec![fix])
 }
 
 /// The check of credentials at `path`: their holder, permissions version and expiry ([`creds::Finding`]), failing

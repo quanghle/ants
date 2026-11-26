@@ -92,6 +92,7 @@ async fn a_missing_harness_fails_with_its_fix() {
         config: config.clone(),
         leaf_config: dir.join("leaf.conf"),
         hub_config: dir.join("no-nats.conf"),
+        nats_conf: None,
         harnesses: true,
         team: dir.join("no-team"),
         webhooks: dir.join("no-webhooks.toml"),
