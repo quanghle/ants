@@ -211,3 +211,51 @@ async fn an_ant_dropped_leaves_its_team_and_a_lead_leaves_it_to_the_lead_above()
     let line = drop_ant_or_say(&js, None, &p("boss")).await.unwrap();
     assert!(line.starts_with("took boss off team eng, which has no lead now, nor has any team above it"), "{line}");
 }
+
+#[tokio::test]
+async fn a_directory_breaking_the_rules_is_shown_then_repaired_by_compare_and_set_and_told() {
+    let Some(server) = Server::start() else { return };
+    let creds = server.creds_as(&p("alice"), Role::Human);
+    let (nats, js) = human(&server, &creds).await;
+    identities(&js, &["dev-a", "dev-b"]).await;
+    let repair = |apply| TeamCommand::Repair { apply };
+    run(&nats, repair(true)).await.unwrap();
+    let ops =
+        TeamCommand::Create { team: p("ops"), lead: Some(p("dev-a")), members: vec![], owner: None, description: None };
+    run(&nats, ops).await.unwrap();
+    run(&nats, repair(true)).await.unwrap();
+
+    let mut broken = directory_of(&js).await;
+    let mut web = Team::new(p("web"), p("dev-a"), p("alice"));
+    web.members.extend([p("dev-b"), p("web")]);
+    broken.teams.push(web);
+    let kv = open(&js, None).await.unwrap();
+    kv.put(ants_proto::TEAM_DIRECTORY_KEY, serde_json::to_vec(&broken).unwrap()).await.unwrap();
+    let refused = read_of(&js, None).await.unwrap_err();
+    assert!(matches!(refused.downcast_ref::<TeamRefusal>(), Some(TeamRefusal::Unreadable { .. })), "{refused:#}");
+    let (_, before) = kv.lookup_last(ants_proto::TEAM_DIRECTORY_KEY).await.unwrap();
+    run(&nats, repair(false)).await.unwrap();
+    assert_eq!(kv.lookup_last(ants_proto::TEAM_DIRECTORY_KEY).await.unwrap().1, before, "shown, not written");
+
+    let (watching, _) = nats.connect("test").await.unwrap();
+    let mut status = watching.subscribe(ants_proto::subject::status_of(&p("alice"))).await.unwrap();
+    watching.flush().await.unwrap();
+    run(&nats, repair(true)).await.unwrap();
+    let directory = directory_of(&js).await;
+    let members = |team: &str| directory.team(&p(team)).map(|t| (t.members.clone(), t.lead.clone()));
+    assert_eq!(members("ops"), Some((vec![p("dev-a")], Some(p("dev-a")))), "dev-a stays on ops, the first");
+    assert_eq!(members("web"), Some((vec![p("dev-b")], None)), "web leaves itself and loses its lead");
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), futures::StreamExt::next(&mut status)).await;
+    let event: ants_proto::StatusEvent = serde_json::from_slice(&msg.unwrap().unwrap().payload).unwrap();
+    let ants_proto::StatusUpdate::TeamChanged { team, change, .. } = event.update else { panic!() };
+    assert_eq!((team, change), (p("web"), TeamChange::Changed), "the team repaired told, not the one kept");
+    run(&nats, repair(true)).await.unwrap();
+
+    kv.put(ants_proto::TEAM_DIRECTORY_KEY, b"[".to_vec()).await.unwrap();
+    let unparsed = run(&nats, repair(true)).await.unwrap_err();
+    assert!(format!("{unparsed:#}").contains("deletes key `directory`"), "{unparsed:#}");
+    let ant = server.creds_as(&p("dev-a"), Role::Ant);
+    let as_ant = Nats::new(&server.url, Some(&ant), None, None).unwrap();
+    let refused = run(&as_ant, repair(true)).await.unwrap_err();
+    assert!(refused.to_string().starts_with("repairing the team directory needs a human's"), "{refused}");
+}

@@ -1,7 +1,8 @@
 //! The teams as a human's client shows and writes them, with no I/O: the forest of teams ([`forest`]), a team's
 //! members as a tree with each ant's state in the colony ([`tree`], [`ant_state`]), a team's lead ([`lead_label`]) and
 //! the team an ant is on ([`team_line`]); the changes a human writes, checked before anything is read of the bus and
-//! applied to the directory read ([`change`]); and why reading or writing the directory failed ([`TeamError`]).
+//! applied to the directory read ([`change`]); a directory breaking the rules repaired ([`repair`]); and why reading or
+//! writing the directory failed ([`TeamError`]).
 //!
 //! The reads and writes themselves are [`crate::client::Client`]'s: the directory read with its revision
 //! ([`Directory`]) and each change stored by compare-and-set.
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 
 pub mod change;
+pub mod repair;
 
 /// How long after its last heartbeat a colony entry goes stale: two heartbeats missed.
 pub const STALE_AFTER: Duration = COLONY_HEARTBEAT.saturating_mul(2);

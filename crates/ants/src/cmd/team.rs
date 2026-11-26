@@ -1,8 +1,11 @@
-//! `ants team`: create, change, list, show and delete teams, as a human writing the team directory by
-//! compare-and-set, and telling observers what it changed on the human's status ([`ants_daemon::teams::tell`]).
+//! `ants team`: create, change, list, show and delete teams, and repair a directory breaking the rules, as a human
+//! writing the team directory by compare-and-set, and telling observers what it changed on the human's status
+//! ([`ants_daemon::teams::tell`]).
 
-use ants_proto::{TeamChange, TeamDirectory, TeamRefusal, UserId};
-use anyhow::{Result, bail};
+use ants_client::teams::repair::Repaired;
+use ants_daemon::records::direct_kv::{DirectKv, Lookup};
+use ants_proto::{TEAM_DIRECTORY_KEY, TEAMS_BUCKET, TeamChange, TeamDirectory, TeamRefusal, UserId};
+use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 
@@ -91,6 +94,15 @@ pub(crate) enum TeamCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show each rule the team directory breaks: a team listed twice, a member listed twice or on several teams, a
+    /// team holding itself, a lead that is no direct ant member, a description too long. With --apply, write it
+    /// repaired by compare-and-set: a member stays on the team that comes first in the directory, the order teams were
+    /// created, and leaves the others; a team holding itself leaves the team holding it.
+    Repair {
+        /// Write the repaired directory (needs human credentials); without it, only show what breaks the rules.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Show a team: the teams above it, its description, lead and owner, and its members as a tree down through its
     /// member teams, each ant with its state in the colony and the leads marked.
     Show {
@@ -109,6 +121,7 @@ pub(crate) async fn run(nats: &Nats<'_>, command: TeamCommand) -> Result<()> {
     match command {
         TeamCommand::List { json } => list(&kv, json).await,
         TeamCommand::Show { team, json } => show(&js, &kv, &team, json).await,
+        TeamCommand::Repair { apply } => repair(nats, &client, &kv, apply).await,
         command => {
             if !nats.me.role.is_human() {
                 bail!(
@@ -134,17 +147,17 @@ impl TeamCommand {
                 vec![(team.clone(), TeamChange::Changed)]
             }
             Self::Delete { team } => vec![(team.clone(), TeamChange::Deleted)],
-            Self::List { .. } | Self::Show { .. } => Vec::new(),
+            Self::List { .. } | Self::Show { .. } | Self::Repair { .. } => Vec::new(),
         }
     }
 }
 
 /// The directory as read, refusing a bus without `ants_teams`.
-async fn directory(kv: &ants_daemon::records::direct_kv::DirectKv) -> Result<TeamDirectory> {
+async fn directory(kv: &DirectKv) -> Result<TeamDirectory> {
     Ok(teams::read(kv).await?.ok_or(TeamRefusal::NoDirectory)?)
 }
 
-async fn list(kv: &ants_daemon::records::direct_kv::DirectKv, json: bool) -> Result<()> {
+async fn list(kv: &DirectKv, json: bool) -> Result<()> {
     let directory = directory(kv).await?;
     if json {
         for branch in teams::forest(&directory) {
@@ -158,12 +171,7 @@ async fn list(kv: &ants_daemon::records::direct_kv::DirectKv, json: bool) -> Res
     Ok(())
 }
 
-async fn show(
-    js: &async_nats::jetstream::Context,
-    kv: &ants_daemon::records::direct_kv::DirectKv,
-    id: &UserId,
-    json: bool,
-) -> Result<()> {
+async fn show(js: &async_nats::jetstream::Context, kv: &DirectKv, id: &UserId, json: bool) -> Result<()> {
     let directory = directory(kv).await?;
     let Some(team) = directory.team(id) else { return Err(TeamRefusal::NoSuchTeam { team: id.clone() }.into()) };
     let entries = colony::list(js).await.inspect_err(|e| tracing::warn!("not reading the colony: {e:#}"));
@@ -195,12 +203,66 @@ async fn show(
     Ok(())
 }
 
+/// `ants team repair`: each rule the directory as stored breaks ([`ants_client::teams::repair`]), and with `apply` the
+/// directory repaired, written by compare-and-set on what was read, read and repaired anew while another writer
+/// changed it meanwhile, then told on the human's status.
+async fn repair(nats: &Nats<'_>, client: &async_nats::Client, kv: &DirectKv, apply: bool) -> Result<()> {
+    if apply && !nats.me.role.is_human() {
+        bail!("repairing the team directory needs a human's credentials; those of {} are an ant's", nats.me.id);
+    }
+    for _ in 0..10 {
+        let (found, last) = kv.lookup_last(TEAM_DIRECTORY_KEY).await.context("reading the team directory")?;
+        let bytes = match found {
+            Lookup::NoBucket => return Err(TeamRefusal::NoDirectory.into()),
+            Lookup::NoValue => {
+                println!("no team directory is stored: nothing to repair");
+                return Ok(());
+            }
+            Lookup::Value(bytes) => bytes,
+        };
+        let read: TeamDirectory = serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "the team directory is no directory this ants reads; a human deletes key `{TEAM_DIRECTORY_KEY}` of \
+                 {TEAMS_BUCKET} to start over"
+            )
+        })?;
+        let Repaired { broken, directory } = ants_client::teams::repair::repair(read.clone());
+        if broken.is_empty() {
+            println!("the team directory keeps the rules: nothing to repair");
+            return Ok(());
+        }
+        if !apply {
+            for broken in &broken {
+                println!("{broken}");
+            }
+            println!("`ants team repair --apply` writes the directory so repaired");
+            return Ok(());
+        }
+        if !ants_daemon::teams::write(kv, &directory, last).await? {
+            continue;
+        }
+        for broken in &broken {
+            println!("{broken}");
+        }
+        println!("wrote the repaired team directory");
+        let changes: Vec<(UserId, TeamChange)> = directory
+            .teams
+            .iter()
+            .filter(|team| read.team(&team.team) != Some(team))
+            .map(|team| (team.team.clone(), TeamChange::Changed))
+            .collect();
+        teams::change::tell(client, &nats.me.id, kv, &changes).await;
+        return Ok(());
+    }
+    Err(TeamRefusal::Busy.into())
+}
+
 /// Every `ants team` subcommand that changes the directory, as the CLI's human, written as `ants chat` writes it
 /// ([`teams::change`]).
 async fn change(
     nats: &Nats<'_>,
     js: &async_nats::jetstream::Context,
-    kv: &ants_daemon::records::direct_kv::DirectKv,
+    kv: &DirectKv,
     command: TeamCommand,
 ) -> Result<()> {
     let humans = humans::load(js, &nats.me).await;
@@ -250,7 +312,9 @@ async fn change(
             }
             return Ok(());
         }
-        TeamCommand::List { .. } | TeamCommand::Show { .. } => unreachable!("reads change nothing"),
+        TeamCommand::List { .. } | TeamCommand::Show { .. } | TeamCommand::Repair { .. } => {
+            unreachable!("reads and repairs change nothing here")
+        }
     };
     for warning in warnings {
         tracing::warn!("{warning}");

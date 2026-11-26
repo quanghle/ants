@@ -48,8 +48,9 @@ pub(super) async fn check_teams(connected: Option<&Connected>, setup: &Setup, no
                 CHECK,
                 refusal.to_string(),
                 vec![format!(
-                    "a human puts a directory keeping the rules under key `directory` of {TEAMS_BUCKET}, or deletes \
-                     the key to start over"
+                    "`ants team repair` shows each rule it breaks and `ants team repair --apply` writes it repaired, \
+                     each member kept on the team that comes first; or a human deletes key `directory` of \
+                     {TEAMS_BUCKET} to start over"
                 )],
             )],
             _ => vec![Check::skip(CHECK, format!("no team directory read: {e:#}"))],
