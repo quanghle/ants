@@ -1,6 +1,7 @@
 //! Teams as humans run them: the team directory read and written with a human's credentials (`ants team`), the
 //! names teams share with ants and humans, a message to a team sent on to its lead (`ants ask @TEAM`), and what
-//! retiring or revoking an ant does to its team.
+//! retiring or revoking an ant does to its team. What a client derives of the teams, and the changes a human makes of
+//! them, are ants-client's ([`ants_client::teams`]); here they are read, written and printed over async-nats.
 //!
 //! A retired or revoked ant leaves its team ([`drop_ant`]); a lead leaving leaves its team without a lead of its own,
 //! so that it takes the lead of the nearest team above it with one. A team with no lead, nor any above it, refuses
@@ -11,12 +12,11 @@ use std::time::Duration;
 
 use ants_daemon::records::direct_kv::{DirectKv, Lookup};
 use ants_daemon::teams;
-use ants_proto::{ENROLL_INBOX, Humans, IDENTITIES_BUCKET, JsDomain, Team, TeamDirectory, TeamRefusal, UserId};
+use ants_proto::{ENROLL_INBOX, Humans, IDENTITIES_BUCKET, JsDomain, Team, TeamDirectory, UserId};
 use anyhow::{Context as _, Result, bail};
 use async_nats::jetstream;
-use chrono::{DateTime, Utc};
-use serde::Serialize;
 
+pub use ants_client::teams::{Branch, Member, Shown, forest, lead_label, team_line, tree};
 pub use ants_daemon::teams::open;
 
 pub mod change;
@@ -25,7 +25,7 @@ pub mod change;
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The team directory of `kv`: None when the bus keeps no `ants_teams`. Fails when the hub is out of reach, or the
-/// directory breaks the rules ([`TeamRefusal::Unreadable`]).
+/// directory breaks the rules ([`ants_proto::TeamRefusal::Unreadable`]).
 pub async fn read(kv: &DirectKv) -> Result<Option<TeamDirectory>> {
     match teams::read(kv).await? {
         Some(read) => Ok(Some(read.directory?)),
@@ -68,34 +68,8 @@ pub async fn check_team_name(
     team: &UserId,
 ) -> Result<()> {
     crate::auth::check_not_reserved(team)?;
-    if humans.contains(team) || !known_ants(js, js_domain, &[team]).await?.is_empty() {
-        return Err(TeamRefusal::NameTaken { name: team.clone() }.into());
-    }
-    Ok(())
-}
-
-/// Refuse a member that is a human: humans are no team's members, at most a team's owner.
-pub fn check_not_human(member: &UserId, humans: &Humans) -> Result<()> {
-    if humans.contains(member) {
-        bail!("{member} is a human: a team's members are ants and teams, and a human at most its owner (`--owner`)");
-    }
-    Ok(())
-}
-
-/// Refuse an owner that is no human of `humans`.
-pub fn check_owner(owner: &UserId, humans: &Humans) -> Result<()> {
-    if !humans.contains(owner) {
-        bail!("{owner} is no human of the bus (`ants auth user {owner} --human`): a team's owner is a human");
-    }
-    Ok(())
-}
-
-/// Refuse the members of `members` that are neither teams of `directory` nor ants of `known`.
-pub fn check_known(directory: &TeamDirectory, known: &BTreeSet<UserId>, members: &[UserId]) -> Result<(), TeamRefusal> {
-    match members.iter().find(|m| !directory.is_team(m) && !known.contains(*m)) {
-        Some(name) => Err(TeamRefusal::UnknownAnt { name: name.clone() }),
-        None => Ok(()),
-    }
+    let known = known_ants(js, js_domain, &[team]).await?;
+    Ok(ants_client::teams::change::check_name(team, humans, &known)?)
 }
 
 /// Whether a team of the bus holds `name`, the name of an ant or a human about to be issued credentials: false, with
@@ -187,34 +161,6 @@ pub async fn drop_ant_or_say(js: &jetstream::Context, js_domain: Option<&JsDomai
     }
 }
 
-/// The team holding `ant` as `ants ant show` names it: `backend`, `backend, within eng`, with `(lead)` when the ant
-/// leads it, `none` when on no team.
-pub fn team_line(directory: &TeamDirectory, ant: &UserId) -> String {
-    let chain = directory.ancestors(ant);
-    let Some(team) = chain.first() else { return "none".to_owned() };
-    let mut line = team.team.to_string();
-    if team.lead.as_ref() == Some(ant) {
-        line.push_str(" (lead)");
-    }
-    for up in &chain[1..] {
-        line.push_str(", within ");
-        line.push_str(up.team.as_str());
-    }
-    line
-}
-
-/// The lead of `team` as shown: its own, `X (from team Y)` when it takes the lead of a team above it, `none` when
-/// neither it nor any team above it has one.
-pub fn lead_label(directory: &TeamDirectory, team: &Team) -> String {
-    match directory.lead_source(&team.team) {
-        Some(source) if source.team == team.team => source.lead.as_ref().map_or_default(UserId::to_string),
-        Some(source) => {
-            format!("{} (from team {})", source.lead.as_ref().map_or_default(UserId::to_string), source.team)
-        }
-        None => "none".to_owned(),
-    }
-}
-
 /// A team as `ants team` prints it after a change: one line, then its description should it have one.
 pub fn describe(directory: &TeamDirectory, team: &Team) -> String {
     let members: Vec<String> =
@@ -239,10 +185,10 @@ pub fn table(directory: &TeamDirectory) -> String {
         header.push("DESCRIPTION".to_owned());
     }
     let mut rows = vec![header];
-    for (depth, team) in forest(directory) {
+    for Branch { depth, team, .. } in forest(directory) {
         let mut row = vec![
             format!("{}{}", "  ".repeat(depth), team.team),
-            lead_label(directory, team),
+            lead_label(directory, &team),
             team.members.len().to_string(),
             team.owner.as_ref().map_or_else(|| "-".to_owned(), UserId::to_string),
         ];
@@ -252,80 +198,6 @@ pub fn table(directory: &TeamDirectory) -> String {
         rows.push(row);
     }
     crate::text::columns(&rows)
-}
-
-/// Every team of `directory`, depth first from the top-level teams, with its depth (0 for a top-level team).
-pub fn forest(directory: &TeamDirectory) -> Vec<(usize, &Team)> {
-    fn under<'a>(directory: &'a TeamDirectory, team: &'a Team, depth: usize, out: &mut Vec<(usize, &'a Team)>) {
-        if out.iter().any(|(_, t)| t.team == team.team) {
-            return;
-        }
-        out.push((depth, team));
-        for sub in directory.subteams(team) {
-            under(directory, sub, depth + 1, out);
-        }
-    }
-    let mut out = Vec::new();
-    for root in directory.roots() {
-        under(directory, root, 0, &mut out);
-    }
-    out
-}
-
-/// A member of a team as `ants team show --json` gives it: an ant, with whether it leads the team and its state in
-/// the colony, or a team, with its lead and its own members.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Member {
-    Ant {
-        name: UserId,
-        lead: bool,
-        state: String,
-    },
-    Team {
-        name: UserId,
-        /// Its lead, its own or, without one, that of the nearest team above it with one (`lead_from`).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        lead: Option<UserId>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        lead_from: Option<UserId>,
-        members: Vec<Member>,
-    },
-}
-
-/// The members of `team` as a tree, down through its member teams, each ant's state as `state` tells it.
-pub fn members(directory: &TeamDirectory, team: &Team, state: &impl Fn(&UserId) -> String) -> Vec<Member> {
-    let mut seen = BTreeSet::from([team.team.clone()]);
-    members_of(directory, team, state, &mut seen)
-}
-
-fn members_of(
-    directory: &TeamDirectory,
-    team: &Team,
-    state: &impl Fn(&UserId) -> String,
-    seen: &mut BTreeSet<UserId>,
-) -> Vec<Member> {
-    let mut out = Vec::new();
-    for member in &team.members {
-        match directory.team(member) {
-            Some(sub) if seen.insert(sub.team.clone()) => {
-                let source = directory.lead_source(&sub.team);
-                out.push(Member::Team {
-                    name: sub.team.clone(),
-                    lead: source.and_then(|t| t.lead.clone()),
-                    lead_from: source.filter(|t| t.team != sub.team).map(|t| t.team.clone()),
-                    members: members_of(directory, sub, state, seen),
-                });
-            }
-            Some(_) => {}
-            None => out.push(Member::Ant {
-                name: member.clone(),
-                lead: team.lead.as_ref() == Some(member),
-                state: state(member),
-            }),
-        }
-    }
-    out
 }
 
 /// The members tree as `ants team show` prints it: one line each, indented by depth, each ant with its face
@@ -354,28 +226,6 @@ pub fn tree_lines(members: &[Member], face: &impl Fn(&UserId) -> String) -> Vec<
     let mut out = Vec::new();
     lines(members, 0, face, &mut out);
     out
-}
-
-/// A team as `ants team list --json` and `ants team show --json` give it: its record, the team holding it and, for
-/// `show`, its members as a tree.
-#[derive(Debug, Serialize)]
-pub struct Shown<'a> {
-    #[serde(flatten)]
-    pub team: &'a Team,
-    pub parent: Option<&'a UserId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tree: Option<Vec<Member>>,
-}
-
-impl<'a> Shown<'a> {
-    pub fn of(directory: &'a TeamDirectory, team: &'a Team) -> Self {
-        Self { team, parent: directory.holder(&team.team).map(|t| &t.team), tree: None }
-    }
-}
-
-/// An ant's state as `ants team show` gives it, from its colony entry, as `ants ant show` says it.
-pub fn state_of(entries: &[ants_proto::ColonyEntry], ant: &UserId, now: DateTime<Utc>) -> String {
-    crate::ants::ant::state(entries.iter().find(|e| e.ant == *ant), None, now)
 }
 
 #[cfg(test)]

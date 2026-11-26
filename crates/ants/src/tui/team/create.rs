@@ -199,7 +199,7 @@ impl Form {
             Row::Lead => {
                 let lead = one(text)?;
                 if let Some(lead) = &lead {
-                    crate::teams::check_not_human(lead, &humans).map_err(|e| format!("{e:#}"))?;
+                    crate::teams::change::check_not_human(lead, &humans).map_err(|e| format!("{e:#}"))?;
                 }
                 self.lead = lead;
             }
@@ -207,14 +207,14 @@ impl Form {
                 let words = text.split_whitespace().filter(|w| *w != "@");
                 let members = words.map(name).collect::<Result<Vec<_>, _>>()?;
                 for member in &members {
-                    crate::teams::check_not_human(member, &humans).map_err(|e| format!("{e:#}"))?;
+                    crate::teams::change::check_not_human(member, &humans).map_err(|e| format!("{e:#}"))?;
                 }
                 self.members = members;
             }
             Row::Owner => {
                 let owner = one(text)?;
                 if let Some(owner) = &owner {
-                    crate::teams::check_owner(owner, &humans).map_err(|e| format!("{e:#}"))?;
+                    crate::teams::change::check_owner(owner, &humans).map_err(|e| format!("{e:#}"))?;
                 }
                 self.owner = owner;
             }

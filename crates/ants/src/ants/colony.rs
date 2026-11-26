@@ -46,21 +46,7 @@ fn chain(entry: &ColonyEntry) -> String {
 /// keeps failing to start, `rate-limited` or `out-of-quota` while a provider limit holds its
 /// messages, else its activity.
 pub(crate) fn activity(entry: &ColonyEntry) -> &'static str {
-    if entry.unserved.is_some() {
-        return "unserved";
-    }
-    if entry.paused.is_some() {
-        return "paused";
-    }
-    if entry.fallback.is_some() {
-        return "fallback";
-    }
-    match (&entry.signed_out, &entry.failing, &entry.limited, entry.activity) {
-        (Some(_), _, _, _) => "signed-out",
-        (None, Some(_), _, _) => "failing",
-        (None, None, Some(limited), _) => limited.kind.as_str(),
-        (None, None, None, activity) => activity.as_str(),
-    }
+    ants_client::teams::activity(entry)
 }
 
 /// One line per ant its daemon cannot serve (why, since when, and when it is tried again), paused (since when, by

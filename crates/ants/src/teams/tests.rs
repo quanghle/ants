@@ -1,10 +1,7 @@
-//! Tests of teams as humans run them: the forest as `ants team list` and `ants team show` print it, the team named
-//! by `ants ant show`, the checks of a change, and `ants team` and a retirement changing the directory of a bus, each
-//! change of `ants team` told on the human's status.
+//! Tests of teams as humans run them: the forest as `ants team list` and `ants team show` print it, and `ants team`
+//! and a retirement changing the directory of a bus, each change of `ants team` told on the human's status.
 
-use std::collections::BTreeSet;
-
-use ants_proto::{AntIdentity, IDENTITIES_BUCKET, Role, Team, TeamChange, TeamDirectory, UserId};
+use ants_proto::{AntIdentity, IDENTITIES_BUCKET, Role, Team, TeamChange, TeamDirectory, TeamRefusal, UserId};
 use async_nats::jetstream;
 use chrono::Utc;
 
@@ -29,23 +26,26 @@ fn forest() -> TeamDirectory {
 }
 
 #[test]
-fn the_forest_lists_each_team_under_the_team_holding_it() {
+fn the_forest_is_a_table_each_team_under_the_team_holding_it() {
     let directory = forest();
-    let order: Vec<(usize, &str)> = forest_of(&directory);
-    assert_eq!(order, [(0, "eng"), (1, "backend"), (1, "web")]);
+    assert_eq!(forest_of(&directory), tiers(&[(0, "eng"), (1, "backend"), (1, "web")]));
     let table = table(&directory);
     let lines: Vec<&str> = table.lines().map(str::trim_end).collect();
     assert!(lines[0].starts_with("TEAM") && !lines[0].contains("DESCRIPTION"), "{table}");
     assert!(lines[1].starts_with("eng ") && lines[1].contains("boss"), "{table}");
     assert!(lines[2].starts_with("  backend ") && lines[2].contains("dev-a"), "{table}");
 
-    let mut described = directory.clone();
+    let mut described = directory;
     described.teams[1].description = Some("the services".to_owned());
     assert!(super::table(&described).lines().next().unwrap().contains("DESCRIPTION"));
 }
 
-fn forest_of(directory: &TeamDirectory) -> Vec<(usize, &str)> {
-    super::forest(directory).into_iter().map(|(depth, team)| (depth, team.team.as_str())).collect()
+fn forest_of(directory: &TeamDirectory) -> Vec<(usize, String)> {
+    super::forest(directory).into_iter().map(|b| (b.depth, b.team.team.to_string())).collect()
+}
+
+fn tiers(teams: &[(usize, &str)]) -> Vec<(usize, String)> {
+    teams.iter().map(|(depth, team)| (*depth, (*team).to_owned())).collect()
 }
 
 #[test]
@@ -61,16 +61,15 @@ fn a_team_is_described_and_an_ant_s_team_named() {
         "team backend, within team eng: lead dev-a; members dev-a, dev-b; owner alice\ndescription: the services"
     );
     assert_eq!(team_line(&directory, &p("dev-a")), "backend (lead), within eng");
-    assert_eq!(team_line(&directory, &p("dev-b")), "backend, within eng");
-    assert_eq!(team_line(&directory, &p("boss")), "eng (lead)");
-    assert_eq!(team_line(&directory, &p("dev-z")), "none");
 }
 
 #[test]
-fn a_team_s_members_are_a_tree_with_its_lead_marked() {
+fn a_team_s_members_are_printed_as_a_tree_with_its_lead_marked() {
     let directory = forest();
     let eng = directory.team(&p("eng")).unwrap();
-    let tree = members(&directory, eng, &|ant| if *ant == p("dev-b") { "stopped".into() } else { "idle".into() });
+    let tree = ants_client::teams::members(&directory, eng, &|ant| {
+        if *ant == p("dev-b") { "stopped".into() } else { "idle".into() }
+    });
     let lines = tree_lines(&tree, &|ant| ant.to_string());
     assert_eq!(
         lines,
@@ -82,21 +81,6 @@ fn a_team_s_members_are_a_tree_with_its_lead_marked() {
             "  team web (lead dev-c)",
             "    dev-c ★ lead: idle",
         ]
-    );
-    let json = serde_json::to_value(&tree[0]).unwrap();
-    assert_eq!(json, serde_json::json!({"kind": "ant", "name": "boss", "lead": true, "state": "idle"}));
-    let shown = Shown::of(&directory, directory.team(&p("web")).unwrap());
-    assert_eq!(serde_json::to_value(&shown).unwrap()["parent"], "eng");
-}
-
-#[test]
-fn a_member_must_be_known() {
-    let directory = forest();
-    let known = BTreeSet::from([p("dev-x")]);
-    check_known(&directory, &known, &[p("dev-x"), p("web")]).unwrap();
-    assert_eq!(
-        check_known(&directory, &known, &[p("dev-x"), p("dev-y")]),
-        Err(TeamRefusal::UnknownAnt { name: p("dev-y") })
     );
     assert_eq!(parse_name("@backend").unwrap(), p("backend"));
 }
@@ -164,7 +148,7 @@ async fn a_human_creates_and_changes_a_team_of_known_ants_only() {
         "each change told on the human's own status, on the thread the team names"
     );
     let directory = directory_of(&js).await;
-    assert_eq!(forest_of(&directory), [(0, "eng"), (1, "backend")]);
+    assert_eq!(forest_of(&directory), tiers(&[(0, "eng"), (1, "backend")]));
     assert_eq!(directory.team(&p("backend")).unwrap().description.as_deref(), Some("the services"));
 
     let set = |lead: Option<&str>, no_description: bool| TeamCommand::Set {
@@ -194,7 +178,7 @@ async fn a_human_creates_and_changes_a_team_of_known_ants_only() {
     assert_eq!((&ops.lead, lead_label(&directory, ops)), (&None, "none".to_owned()));
 
     run(&nats, TeamCommand::Delete { team: p("eng") }).await.unwrap();
-    assert_eq!(forest_of(&directory_of(&js).await), [(0, "backend"), (0, "ops")]);
+    assert_eq!(forest_of(&directory_of(&js).await), tiers(&[(0, "backend"), (0, "ops")]));
     assert!(holds_team(&js, None, &p("backend")).await);
     assert!(check_no_team(&js, None, &p("backend")).await.is_err());
 }
@@ -226,4 +210,52 @@ async fn an_ant_dropped_leaves_its_team_and_a_lead_leaves_it_to_the_lead_above()
     assert!(backend.lead.is_none() && backend.members.is_empty(), "{backend:?}");
     let line = drop_ant_or_say(&js, None, &p("boss")).await.unwrap();
     assert!(line.starts_with("took boss off team eng, which has no lead now, nor has any team above it"), "{line}");
+}
+
+#[tokio::test]
+async fn a_directory_breaking_the_rules_is_shown_then_repaired_by_compare_and_set_and_told() {
+    let Some(server) = Server::start() else { return };
+    let creds = server.creds_as(&p("alice"), Role::Human);
+    let (nats, js) = human(&server, &creds).await;
+    identities(&js, &["dev-a", "dev-b"]).await;
+    let repair = |apply| TeamCommand::Repair { apply };
+    run(&nats, repair(true)).await.unwrap();
+    let ops =
+        TeamCommand::Create { team: p("ops"), lead: Some(p("dev-a")), members: vec![], owner: None, description: None };
+    run(&nats, ops).await.unwrap();
+    run(&nats, repair(true)).await.unwrap();
+
+    let mut broken = directory_of(&js).await;
+    let mut web = Team::new(p("web"), p("dev-a"), p("alice"));
+    web.members.extend([p("dev-b"), p("web")]);
+    broken.teams.push(web);
+    let kv = open(&js, None).await.unwrap();
+    kv.put(ants_proto::TEAM_DIRECTORY_KEY, serde_json::to_vec(&broken).unwrap()).await.unwrap();
+    let refused = read_of(&js, None).await.unwrap_err();
+    assert!(matches!(refused.downcast_ref::<TeamRefusal>(), Some(TeamRefusal::Unreadable { .. })), "{refused:#}");
+    let (_, before) = kv.lookup_last(ants_proto::TEAM_DIRECTORY_KEY).await.unwrap();
+    run(&nats, repair(false)).await.unwrap();
+    assert_eq!(kv.lookup_last(ants_proto::TEAM_DIRECTORY_KEY).await.unwrap().1, before, "shown, not written");
+
+    let (watching, _) = nats.connect("test").await.unwrap();
+    let mut status = watching.subscribe(ants_proto::subject::status_of(&p("alice"))).await.unwrap();
+    watching.flush().await.unwrap();
+    run(&nats, repair(true)).await.unwrap();
+    let directory = directory_of(&js).await;
+    let members = |team: &str| directory.team(&p(team)).map(|t| (t.members.clone(), t.lead.clone()));
+    assert_eq!(members("ops"), Some((vec![p("dev-a")], Some(p("dev-a")))), "dev-a stays on ops, the first");
+    assert_eq!(members("web"), Some((vec![p("dev-b")], None)), "web leaves itself and loses its lead");
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), futures::StreamExt::next(&mut status)).await;
+    let event: ants_proto::StatusEvent = serde_json::from_slice(&msg.unwrap().unwrap().payload).unwrap();
+    let ants_proto::StatusUpdate::TeamChanged { team, change, .. } = event.update else { panic!() };
+    assert_eq!((team, change), (p("web"), TeamChange::Changed), "the team repaired told, not the one kept");
+    run(&nats, repair(true)).await.unwrap();
+
+    kv.put(ants_proto::TEAM_DIRECTORY_KEY, b"[".to_vec()).await.unwrap();
+    let unparsed = run(&nats, repair(true)).await.unwrap_err();
+    assert!(format!("{unparsed:#}").contains("deletes key `directory`"), "{unparsed:#}");
+    let ant = server.creds_as(&p("dev-a"), Role::Ant);
+    let as_ant = Nats::new(&server.url, Some(&ant), None, None).unwrap();
+    let refused = run(&as_ant, repair(true)).await.unwrap_err();
+    assert!(refused.to_string().starts_with("repairing the team directory needs a human's"), "{refused}");
 }

@@ -119,6 +119,68 @@ fn a_device_connects_only_with_unexpired_web_credentials_of_its_key_of_no_newer_
 fn without_authentication_a_device_is_the_human_it_names() {
     let session = unauthenticated("alice".parse().unwrap());
     assert_eq!((session.human.as_str(), session.domain, session.account), ("alice", None, None));
+    assert_eq!(session.capabilities, Capabilities::all());
+    assert!(session.capabilities.teams_write && !session.capabilities.stale_permissions);
+}
+
+#[test]
+fn what_credentials_let_a_page_do_is_what_their_rights_allow_whatever_their_version() {
+    let team = Team::new();
+    let (key, device) = (KeyPair::new_user(), DeviceId::generate());
+    let account = team.account.public_key();
+    let read = |nats: serde_json::Value| {
+        let jwt = jwt(&team.account, &key.public_key(), "alice", nats, None);
+        Credentials::read(&jwt, &key.public_key(), Some(&account)).unwrap().capabilities
+    };
+    let rights =
+        |rights: &Permissions| json!({ "pub": { "allow": rights.publish }, "sub": { "allow": rights.subscribe } });
+    let tagged = |mut nats: serde_json::Value, version| {
+        nats["tags"] = web_tags(device, version);
+        nats
+    };
+
+    let web = Permissions::for_web(&p("alice"));
+    let all = read(tagged(rights(&web), PERMISSIONS_VERSION));
+    let expected =
+        Capabilities { memories_read: false, permissions_version: Some(PERMISSIONS_VERSION), ..Capabilities::all() };
+    assert_eq!(all, expected);
+    assert_eq!(credentials_session(&team, &key, device, &web).capabilities, expected, "carried by the session");
+
+    let hub: JsDomain = "hub".parse().unwrap();
+    let in_hub = read(tagged(rights(&web.clone().with_js_domain(Some(&hub))), PERMISSIONS_VERSION));
+    assert_eq!(in_hub, expected, "the requests in the hub's domain");
+
+    let without = |dropped: &[&str]| Permissions {
+        publish: web.publish.iter().filter(|s| !dropped.iter().any(|d| s.contains(d))).cloned().collect(),
+        subscribe: web.subscribe.clone(),
+    };
+    let reads_only = read(tagged(rights(&without(&["$KV.ants_teams"])), PERMISSIONS_VERSION));
+    assert_eq!((reads_only.teams_read, reads_only.teams_write), (true, false));
+    let no_teams = read(tagged(rights(&without(&["ants_teams"])), PERMISSIONS_VERSION));
+    assert_eq!((no_teams.teams_read, no_teams.teams_write), (false, false));
+    let no_identities = read(tagged(rights(&without(&["KV_ants_identities"])), PERMISSIONS_VERSION));
+    assert_eq!((no_identities.teams_read, no_identities.teams_write), (true, false));
+
+    let older = read(tagged(rights(&web), PermissionsVersion(0)));
+    assert_eq!((older.permissions_version, older.stale_permissions), (Some(PermissionsVersion(0)), true));
+    assert!(older.teams_write, "rights tell, not the version");
+    let mut unversioned = rights(&web);
+    unversioned["tags"] = json!([WEB_TAG, device.tag()]);
+    let unversioned = read(unversioned);
+    assert_eq!((unversioned.permissions_version, unversioned.stale_permissions), (None, true));
+    let listing_none = read(tagged(json!({}), PERMISSIONS_VERSION));
+    assert!(listing_none.teams_write && listing_none.memories_read, "a JWT listing no subjects allows them all");
+}
+
+/// The session of web credentials of `device` for `key` with `rights`.
+fn credentials_session(team: &Team, key: &KeyPair, device: DeviceId, rights: &Permissions) -> Session {
+    let nats = json!({
+        "tags": web_tags(device, PERMISSIONS_VERSION),
+        "pub": { "allow": rights.publish },
+        "sub": { "allow": rights.subscribe },
+    });
+    let jwt = jwt(&team.account, &key.public_key(), "alice", nats, None);
+    Credentials::read(&jwt, &key.public_key(), Some(&team.account.public_key())).unwrap().session()
 }
 
 #[test]

@@ -514,11 +514,11 @@ async fn change_channel(ctx: &Ctx, channel: ChannelId, change: &crate::channel::
     Ok(Done { line, warnings: changed.warnings, channel: Some(channel), ..Done::default() })
 }
 
-/// Write `change` to `team` with the human's credentials ([`crate::teams::change::Change::write`]).
+/// Write `change` to `team` with the human's credentials ([`crate::teams::change::change`]).
 pub async fn change_team(ctx: &Ctx, team: &UserId, change: &crate::teams::change::Change) -> Result<Done> {
     let kv = crate::teams::open(&ctx.js, ctx.domain.as_ref()).await?;
     let humans = humans::load(&ctx.js, &ctx.me).await;
-    let changed = change.write(&ctx.js, ctx.domain.as_ref(), &kv, team, &humans).await?;
+    let changed = crate::teams::change::change(change, &ctx.js, ctx.domain.as_ref(), &kv, team, &humans).await?;
     crate::teams::change::tell(&ctx.client, &ctx.me.id, &kv, &[(team.clone(), TeamChange::Changed)]).await;
     Ok(Done { line: change.line(team, &changed), teams: true, ..Done::default() })
 }
@@ -527,7 +527,8 @@ pub async fn change_team(ctx: &Ctx, team: &UserId, change: &crate::teams::change
 pub async fn create_team(ctx: &Ctx, create: &crate::teams::change::Create) -> Result<Done> {
     let kv = crate::teams::open(&ctx.js, ctx.domain.as_ref()).await?;
     let humans = humans::load(&ctx.js, &ctx.me).await;
-    let (team, lines) = create.write(&ctx.js, ctx.domain.as_ref(), &kv, &ctx.me.id, &humans).await?;
+    let (team, lines) =
+        crate::teams::change::create(create, &ctx.js, ctx.domain.as_ref(), &kv, &ctx.me.id, &humans).await?;
     crate::teams::change::tell(&ctx.client, &ctx.me.id, &kv, &[(team.team, TeamChange::Created)]).await;
     Ok(Done { line: lines.join("; "), teams: true, ..Done::default() })
 }

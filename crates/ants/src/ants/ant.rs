@@ -28,8 +28,7 @@ pub fn state(entry: Option<&ColonyEntry>, moved: Option<&MovedMark>, now: DateTi
     match (entry, moved) {
         (Some(_), Some(_)) => "moved, draining".to_owned(),
         (None, Some(_)) => "moved".to_owned(),
-        (Some(e), None) => format!("{}, {}", State::of(e, now).as_str(), colony::activity(e)),
-        (None, None) => "not in the colony".to_owned(),
+        (entry, None) => ants_client::teams::ant_state(entry, now),
     }
 }
 

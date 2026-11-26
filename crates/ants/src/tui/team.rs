@@ -49,9 +49,7 @@ struct Row {
 
 impl Row {
     fn name(&self) -> &UserId {
-        match &self.member {
-            Member::Ant { name, .. } | Member::Team { name, .. } => name,
-        }
+        self.member.name()
     }
 }
 
@@ -85,7 +83,7 @@ impl Page {
             }
         }
         let Some((directory, team)) = self.entry(data) else { return Vec::new() };
-        let tree = teams::members(directory, team, &|ant| teams::state_of(&data.live.colony, ant, now));
+        let tree = teams::tree(directory, team, &data.live.colony, now);
         let mut rows = Vec::new();
         flatten(tree, 0, &mut rows);
         rows

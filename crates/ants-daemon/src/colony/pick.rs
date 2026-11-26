@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use ants_proto::{Activity, COLONY_HEARTBEAT, ColonyEntry, UserId};
+use ants_proto::{Activity, ColonyEntry, UserId};
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::kv;
 use chrono::{DateTime, Utc};
@@ -39,12 +39,12 @@ pub fn has_capability(entry: &ColonyEntry, capability: &str) -> bool {
 }
 
 /// An entry not refreshed for this long has missed a heartbeat: its daemon may be gone, and the entry expires once
-/// [`ants_proto::COLONY_TTL`] has passed.
-pub const STALE_AFTER: Duration = COLONY_HEARTBEAT.saturating_mul(2);
+/// [`ants_proto::COLONY_TTL`] has passed. Human's clients judge entries alike ([`ants_client::teams::is_live`]).
+pub const STALE_AFTER: Duration = ants_client::teams::STALE_AFTER;
 
 /// Whether `entry` was refreshed within [`STALE_AFTER`] of `now`. A heartbeat ahead of `now` counts as fresh.
 pub fn is_live(entry: &ColonyEntry, now: DateTime<Utc>) -> bool {
-    (now - entry.heartbeat_at).to_std().unwrap_or_default() <= STALE_AFTER
+    ants_client::teams::is_live(entry, now)
 }
 
 /// The live entry, of the colony's `entries` at `now`, of another ant naming `ant` as its sage: `ant` is a sage while

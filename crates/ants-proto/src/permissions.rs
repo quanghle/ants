@@ -78,6 +78,18 @@ pub struct Permissions {
     pub subscribe: Vec<String>,
 }
 
+impl Permissions {
+    /// Whether they allow publishing `subject`: one of [`Permissions::publish`] covers it, token by token.
+    pub fn publishes(&self, subject: &str) -> bool {
+        self.publish.iter().any(|pattern| covers(pattern, subject))
+    }
+
+    /// Whether they allow subscribing to `subject`: one of [`Permissions::subscribe`] covers it, token by token.
+    pub fn hears(&self, subject: &str) -> bool {
+        self.subscribe.iter().any(|pattern| covers(pattern, subject))
+    }
+}
+
 /// The version of the permissions `ants auth` gives credentials of every kind (ants, humans, webhooks, leaf node
 /// uplinks, the channel manager, enrollment), stamped into each user JWT it issues as the tag
 /// [`PermissionsVersion::tag`]. Credentials carrying an older version were issued before the permissions changed:

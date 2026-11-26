@@ -3,7 +3,8 @@
 //! Three parts, the first two with no I/O:
 //! - what a client shows, derived from what it reads: the entries of stored messages ([`entry`], [`parser`]) with
 //!   their attachments ([`attachments`]) and what a sealed one shows as ([`sealed`]), the messages a stream relayed,
-//!   which a reader refuses ([`relayed`]), and the human's inbox with what its read marker tells unread ([`inbox`]);
+//!   which a reader refuses ([`relayed`]), the human's inbox with what its read marker tells unread ([`inbox`]), and
+//!   the teams with the changes a human makes of them ([`teams`]);
 //! - what a human sends ([`sending`]), and the requests of its reads and writes with the reading of their answers
 //!   ([`requests`]);
 //! - those reads and writes themselves ([`client`]), over a transport of four calls that names no runtime
@@ -29,6 +30,7 @@ pub mod requests;
 pub mod sealed;
 pub mod sending;
 pub mod site;
+pub mod teams;
 pub mod text;
 pub mod transport;
 

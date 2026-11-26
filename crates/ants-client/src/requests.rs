@@ -116,8 +116,19 @@ impl Position {
 
 /// The batched direct get of the stream's messages on `filter` from `at` on, its answers to come on `reply`.
 pub(crate) fn batch_get(domain: Option<&JsDomain>, filter: &str, at: &Position, reply: String) -> Message {
+    batch_get_of(domain, STREAM, filter, at, reply)
+}
+
+/// [`batch_get`] of the stream `stream`.
+pub(crate) fn batch_get_of(
+    domain: Option<&JsDomain>,
+    stream: &str,
+    filter: &str,
+    at: &Position,
+    reply: String,
+) -> Message {
     let payload = serde_json::to_vec(&at.request(filter)).unwrap_or_default();
-    Message { reply: Some(reply), ..Message::new(format!("{}DIRECT.GET.{STREAM}", api(domain)), payload) }
+    Message { reply: Some(reply), ..Message::new(format!("{}DIRECT.GET.{stream}", api(domain)), payload) }
 }
 
 /// A message as the stream stored it, read back by a direct get.
@@ -251,6 +262,14 @@ pub(crate) fn kv_get(domain: Option<&JsDomain>, bucket: &str, key: &str) -> Mess
     )
 }
 
+/// The direct get of the last message under `key` of `bucket`, naming the key in its request rather than its
+/// subject, as credentials that may read the whole bucket by direct gets naming no subject send it.
+pub(crate) fn kv_last(domain: Option<&JsDomain>, bucket: &str, key: &str) -> Message {
+    let request = serde_json::json!({ "last_by_subj": subject::kv(bucket, key) });
+    let payload = serde_json::to_vec(&request).unwrap_or_default();
+    Message::new(format!("{}DIRECT.GET.{}", api(domain), subject::kv_stream(bucket)), payload)
+}
+
 /// A bucket's entry: its value, none for a key with none or deleted, and its revision, 0 for a key never written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KvEntry {
@@ -260,19 +279,32 @@ pub(crate) struct KvEntry {
 
 /// The entry in `answer` to a [`kv_get`] made to `what`.
 pub(crate) fn kv_entry(what: &str, answer: Message) -> Result<KvEntry, Error> {
+    kv_entry_or_relayed(what, answer)?.map_err(|_| Error::new(what, ErrorKind::Relayed))
+}
+
+/// [`kv_entry`], or, for a key whose last message a stream relayed, that message's revision, which a write expects.
+pub(crate) fn kv_entry_or_relayed(what: &str, answer: Message) -> Result<Result<KvEntry, u64>, Error> {
     match answer.status {
         None => {}
-        Some(404) => return Ok(KvEntry { value: None, revision: 0 }),
+        Some(404) => return Ok(Ok(KvEntry { value: None, revision: 0 })),
         Some(status) => return Err(Error::status(what, status, answer.description)),
-    }
-    if relayed::stored_relayed(answer.header_names(), &answer.payload, Read::DirectGet) {
-        return Err(Error::new(what, ErrorKind::Relayed));
     }
     let revision = answer.header_value(SEQUENCE).and_then(|seq| seq.parse().ok());
     let revision = revision.ok_or_else(|| Error::malformed(what, "no sequence"))?;
+    if relayed::stored_relayed(answer.header_names(), &answer.payload, Read::DirectGet) {
+        return Ok(Err(revision));
+    }
     // The server adds no such header: it is the writer's, read first as the daemons and async-nats read it.
     let deleted = answer.stored_header_value(KV_OPERATION).is_some_and(|op| DELETED.contains(&op));
-    Ok(KvEntry { value: (!deleted).then_some(answer.payload), revision })
+    Ok(Ok(KvEntry { value: (!deleted).then_some(answer.payload), revision }))
+}
+
+/// Whether `stored`, read back by a batched direct get of a bucket, is a delete or a purge of its key.
+pub(crate) fn kv_deleted(stored: &Stored) -> bool {
+    stored
+        .headers
+        .iter()
+        .any(|(name, value)| name.eq_ignore_ascii_case(KV_OPERATION) && DELETED.contains(&value.as_str()))
 }
 
 /// The put of `value` under `key` of `bucket`, stored only while the key's last message is still the one at
@@ -316,10 +348,7 @@ pub(crate) fn colony_get(domain: Option<&JsDomain>, reply: String) -> Message {
 /// The entry `stored`, one of the answers to a [`colony_get`], holds: none for a deleted one, one that does not parse
 /// and one under another ant's key.
 pub(crate) fn colony_entry(stored: &Stored) -> Option<ColonyEntry> {
-    let deleted = stored
-        .headers
-        .iter()
-        .any(|(name, value)| name.eq_ignore_ascii_case(KV_OPERATION) && DELETED.contains(&value.as_str()));
+    let deleted = kv_deleted(stored);
     let key = stored.subject.strip_prefix(&format!("$KV.{COLONY_BUCKET}."))?;
     let entry = serde_json::from_slice::<ColonyEntry>(&stored.payload).ok().filter(|_| !deleted)?;
     (entry.ant.as_str() == key).then_some(entry)
