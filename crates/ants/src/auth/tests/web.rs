@@ -213,6 +213,8 @@ async fn a_web_device_does_what_the_page_s_views_do_and_nothing_else() {
         subject::cancel(&dev_a, &thread),
         subject::renew("bob"),
         subject::renew("leaf-m1"),
+        // No answer to a memories request, which only the ant's daemon gives.
+        subject::memoried(&dev_a),
     ];
     for denied in refused {
         client.publish(denied.clone(), "{}".into()).await.unwrap();
@@ -264,7 +266,6 @@ async fn page(
             account: Some(account),
             name: "ants-web".into(),
             capabilities: Capabilities {
-                memories_read: false,
                 permissions_version: Some(ants_proto::PERMISSIONS_VERSION),
                 ..Capabilities::all()
             },
@@ -288,6 +289,31 @@ async fn read(client: &ants_client::client::Client, window: Window) -> Vec<(u64,
             return entries;
         }
     }
+}
+
+/// The memories of `dev_a`, which `client` asks of the daemon serving it, here answered with the ant's own credentials
+/// (`d_client`) as its daemon does, on the ant's reply subject.
+async fn the_ant_s_memories_are_read(
+    client: &ants_client::client::Client,
+    d_client: &async_nats::Client,
+    dev_a: &UserId,
+    alice: &UserId,
+) {
+    let mut asked = d_client.subscribe(subject::memories(dev_a)).await.unwrap();
+    d_client.flush().await.unwrap();
+    let shown = ants_proto::MemoriesShown {
+        core: ants_proto::CoreMemories { whoami: Some("a tester".into()), ..Default::default() },
+        ..Default::default()
+    };
+    let answering = async {
+        let msg = timeout(WAIT, asked.next()).await.expect("no memories request").unwrap();
+        let request: ants_proto::MemoriesRequest = serde_json::from_slice(&msg.payload).unwrap();
+        assert_eq!((request.check_subject(&msg.subject), &request.by), (Ok(()), alice));
+        let answer = request.answer(ants_proto::MemoriesOutcome::Read(shown.clone()));
+        d_client.publish(answer.subject(), serde_json::to_vec(&answer).unwrap().into()).await.unwrap();
+    };
+    let (read, ()) = tokio::join!(client.memories(dev_a), answering);
+    assert_eq!(read.unwrap(), ants_proto::MemoriesOutcome::Read(shown));
 }
 
 /// The client lists the colony, keeps its presence, sends, hears, reads a window and marks read on `server`, whose JetStream is in `domain`, and the
@@ -394,6 +420,7 @@ async fn the_client_s_reads_and_writes_pass(server: &Server, domain: Option<&JsD
     assert!(entry.stored_at > chrono::Utc::now() - chrono::Duration::hours(1), "{}", entry.stored_at);
 
     Box::pin(the_teams_pass(&client, &h_js, domain)).await;
+    the_ant_s_memories_are_read(&client, &d_client, &dev_a, &alice).await;
 
     // The server answers a connection in order: the refusal of this publish is the first it sent, so it refused
     // nothing the client did.

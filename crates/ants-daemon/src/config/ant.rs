@@ -173,6 +173,10 @@ pub struct Ant {
     /// The file's `[trails] workers`.
     #[serde(skip)]
     pub trail_workers: usize,
+    /// The file's `[admin] remote`: false refuses humans' reads of the ant's memories too
+    /// ([`ants_proto::MemoriesRequest`]).
+    #[serde(skip, default = "super::yes")]
+    pub remote_admin: bool,
     /// What `provider` names among the file's providers; sense while it names none.
     #[serde(skip)]
     pub provider_setting: Setting,
@@ -276,6 +280,7 @@ impl Ant {
             storage: storage::Settings::default(),
             memory_pressure: pressure::Settings::default(),
             trail_workers: crate::trail::DEFAULT_WORKERS,
+            remote_admin: true,
             provider_setting: Setting::Sense,
             timezone: None,
         }
@@ -286,6 +291,7 @@ impl Ant {
         harness::validate_env(&self.env)?;
         self.validate()?;
         let instructions = self.prompt_instructions();
+        let core = crate::admin::memories::core_memories(&self);
         let caps = self.caps();
         let turn_budget = self.effective_turn_budget();
         let sage = self.reviewed_by();
@@ -334,6 +340,7 @@ impl Ant {
                 workdir,
                 env: self.env,
                 instructions,
+                core,
                 limits: PromptLimits {
                     timeout: Some(self.prompt_timeout).filter(|t| !t.is_zero()),
                     max_tool_calls: Some(self.max_tool_calls).filter(|n| *n > 0),
@@ -360,6 +367,7 @@ impl Ant {
                 },
                 redact: self.redact,
                 sage,
+                remote_admin: self.remote_admin,
             },
             spending: Spending { caps, warn_percent: self.spend_warn_percent, pool: self.pool },
             storage: Storage { home, jetstream: self.storage },

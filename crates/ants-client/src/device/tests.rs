@@ -141,8 +141,7 @@ fn what_credentials_let_a_page_do_is_what_their_rights_allow_whatever_their_vers
 
     let web = Permissions::for_web(&p("alice"));
     let all = read(tagged(rights(&web), PERMISSIONS_VERSION));
-    let expected =
-        Capabilities { memories_read: false, permissions_version: Some(PERMISSIONS_VERSION), ..Capabilities::all() };
+    let expected = Capabilities { permissions_version: Some(PERMISSIONS_VERSION), ..Capabilities::all() };
     assert_eq!(all, expected);
     assert_eq!(credentials_session(&team, &key, device, &web).capabilities, expected, "carried by the session");
 

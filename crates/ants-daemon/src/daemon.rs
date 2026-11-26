@@ -47,6 +47,7 @@ mod handling;
 mod holds;
 mod incoming;
 mod mcp_sign_in;
+mod memories;
 mod own_turn;
 mod prompt;
 mod queue;
@@ -333,7 +334,7 @@ async fn serve(
         trails: trails(shared, &services).await,
         teams: crate::teams::open(&js, config.connection.js_domain.as_ref()).await.ok(),
     };
-    let beside = Beside { config, stop, registration: &registration, storage: &storage };
+    let beside = Beside { config, stop, registration: &registration, storage: &storage, providers };
     let served = Box::pin(serve_inbox(&inbox, messages, channels, beside)).await?;
     end_runs_if_retired(&served, config, inbox.trails.as_ref(), retired_before).await;
     forget_if_retired(&served, config, &js, retired_before).await;
@@ -397,6 +398,8 @@ struct Beside<'a> {
     registration: &'a colony::Registration,
     /// The watch of the room the ant's records have left.
     storage: &'a crate::monitoring::storage::Watcher,
+    /// The providers of the process, among which the ant's.
+    providers: &'a Providers,
 }
 
 /// Serve the inbox, and the ant's watches beside it, until a stop, the hand-over or the move: which one ended it. A
@@ -406,7 +409,7 @@ where
     S: Stream<Item = Result<jetstream::Message, E>> + Unpin,
     E: Display,
 {
-    let Beside { config, stop, registration, storage } = beside;
+    let Beside { config, stop, registration, storage, providers } = beside;
     log_serving(config);
     let mut unserved = unserved::Watch::new(
         inbox.js,
@@ -448,6 +451,20 @@ where
             }
         }
     };
+    let memories = memories::Shown {
+        client: inbox.client,
+        ant: &config.ant,
+        core: &config.harness.core,
+        remote: config.policy.remote_admin,
+        humans: inbox.humans,
+        provider: async || {
+            let identity = match inbox.provider.identity {
+                Some(identity) => identity.id().await.ok().flatten(),
+                None => None,
+            };
+            (providers.of(&config.ant).await, identity)
+        },
+    };
     tokio::select! {
         () = inbox.serve(messages, channels, config.pooling.idle_timeout, stop_or_hand_over) => {}
         () = inbox.escalator.deadlines() => {}
@@ -459,6 +476,7 @@ where
         () = inbox.hear_clones() => {}
         () = inbox.hear_mcp() => {}
         () = inbox.conduct_trails() => {}
+        () = memories.hear() => {}
         () = or_pending(inbox.provider.sense.map(|sense| sense.publish(&config.ant, inbox.workload))) => {}
         () = crate::secrets::creds::recheck(config.connection.creds.as_deref()) => {}
         () = storage.watch(crate::monitoring::storage::CHECK_EVERY) => {}

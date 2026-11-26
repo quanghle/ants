@@ -47,7 +47,7 @@ mod export;
 mod hand;
 pub mod held;
 pub mod mcp;
-mod memories;
+pub(crate) mod memories;
 pub use memories::files_under;
 pub(crate) use memories::{Env as MemoriesEnv, harness as harness_memories};
 mod pause;

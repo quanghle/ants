@@ -131,7 +131,9 @@ pub(crate) enum AntCommand {
     /// last dream, the open findings of that dream, open commitments, active reminders and open tasks, and core and
     /// top memories; `no sense data` for an ant sense keeps none of), and its harness's memory files (the
     /// `memory_files` globs of its harness) and bd memories (with BD_DB in its environment), read-only and size-capped.
-    /// Needs a human device's admin credentials.
+    /// The memory files and bd memories need a human device's admin credentials: without the admin role, and without
+    /// --machine, the daemon serving ANT is asked over core NATS for the core and provider memories alone, which any
+    /// human reads, unless the config of its machine refuses remote admin.
     Memories {
         #[arg(add = ArgValueCandidates::new(completions::ants))]
         ant: UserId,

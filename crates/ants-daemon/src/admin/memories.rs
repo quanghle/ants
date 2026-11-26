@@ -31,7 +31,7 @@ use ants_proto::AdminOp;
 use ants_proto::provider::{AntRef, Capability, Connected, MemoryEntry, MemoryFields};
 use ants_proto::{
     AdminOrder, AdminOutcome, BdMemories, BdMemory, CoreMemories, MEMORIES_CAP, MEMORIES_FRESH, MEMORY_FILE_CAP,
-    Memories, MemoryFile, ProviderMemories, ProviderMemory, Skipped,
+    Memories, MemoriesShown, MemoryFile, ProviderMemories, ProviderMemory, Skipped,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -133,19 +133,7 @@ impl Env {
 pub(crate) async fn read(ant: &Ant, harness: Option<&Harness>, env: &Env, provider: Option<Of<'_>>) -> Memories {
     let mut budget = Budget(MEMORIES_CAP);
     let mut skipped = Vec::new();
-    let core = core_memories(ant);
-    let mut cap = |what: &str, text: Option<String>| {
-        let (text, cut) = budget.take(&text?, MEMORY_FILE_CAP, false)?;
-        if cut {
-            skipped.push(Skipped { what: what.to_owned(), why: "cut short: over the size cap".to_owned() });
-        }
-        Some(text)
-    };
-    let core = CoreMemories {
-        whoami: cap("whoami", core.whoami),
-        memory: cap("memory", core.memory),
-        tasks: cap("tasks", core.tasks),
-    };
+    let core = capped_core(core_memories(ant), &mut budget, &mut skipped);
     let provider = match provider {
         Some(of) => provider_memories(&ant.name, of, &mut budget, &mut skipped).await,
         None => None,
@@ -545,5 +533,39 @@ async fn bd_memories(
     memories
 }
 
+/// `core`, each text cut as what is left of `budget` lets it be shown.
+fn capped_core(core: CoreMemories, budget: &mut Budget, skipped: &mut Vec<Skipped>) -> CoreMemories {
+    let mut cap = |what: &str, text: Option<String>| {
+        let (text, cut) = budget.take(&text?, MEMORY_FILE_CAP, false)?;
+        if cut {
+            skipped.push(Skipped { what: what.to_owned(), why: "cut short: over the size cap".to_owned() });
+        }
+        Some(text)
+    };
+    CoreMemories {
+        whoami: cap("whoami", core.whoami),
+        memory: cap("memory", core.memory),
+        tasks: cap("tasks", core.tasks),
+    }
+}
+
+/// The core memories `core` of `ant` and the memories view of its provider `provider`, capped as [`read`] caps them:
+/// what any human's read shows ([`ants_proto::MemoriesRequest`]), the harness's files and bd memories left to an
+/// admin's.
+pub(crate) async fn read_shown(
+    ant: &ants_proto::UserId,
+    core: CoreMemories,
+    provider: Option<Of<'_>>,
+) -> MemoriesShown {
+    let mut budget = Budget(MEMORIES_CAP);
+    let mut skipped = Vec::new();
+    let core = capped_core(core, &mut budget, &mut skipped);
+    let provider = match provider {
+        Some(of) => provider_memories(ant, of, &mut budget, &mut skipped).await,
+        None => None,
+    };
+    MemoriesShown { core, provider, skipped }
+}
+
 #[cfg(test)]
-pub(super) mod tests;
+pub(crate) mod tests;

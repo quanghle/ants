@@ -22,7 +22,7 @@ pub(super) struct HostSection {
 pub(super) struct AdminSection {
     /// Whether to carry out the orders an admin signed; false refuses every one.
     #[serde(default = "super::yes")]
-    remote: bool,
+    pub(super) remote: bool,
 }
 
 impl Default for AdminSection {

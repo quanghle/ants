@@ -2,8 +2,8 @@
 //! async-nats: the stream read back window by window ([`Client::reader`]), a message sent with its thread's owner
 //! recorded first and stored once the stream acks it ([`Client::send`]), the human's read marker moved by
 //! compare-and-set ([`Client::mark_read`]), and what is heard live ([`Client::status`], [`Client::inbox`]); beside
-//! them the colony as it is now ([`Client::colony`]), a device's presence ([`Client::present`]) and the teams
-//! ([`teams`]).
+//! them the colony as it is now ([`Client::colony`]), a device's presence ([`Client::present`]), the teams
+//! ([`teams`]) and an ant's memories as any human reads them ([`Client::memories`]).
 //!
 //! This is what a binding wraps, for a browser or another platform: [`Client`], [`Reader`] and the feeds carry no
 //! lifetime or type parameter, and what their calls take and return are owned values that serialize.
@@ -12,10 +12,11 @@
 //! not ack fails, with no outbox to keep it.
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use ants_proto::{
-    AssistantGrant, ColonyEntry, DeviceId, Envelope, Following, JsDomain, Presence, ReadMarker, StatusEvent, ThreadId,
-    UserId, Uuid, subject,
+    AssistantGrant, ColonyEntry, DeviceId, Envelope, Following, JsDomain, MemoriesOutcome, MemoriesRequest, Presence,
+    ReadMarker, StatusEvent, ThreadId, UserId, Uuid, subject,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -325,7 +326,28 @@ impl Client {
         let messages = self.subscribe("following the inbox", subject::inbox_of(&self.session.human)).await?;
         Ok(InboxFeed { messages })
     }
+
+    /// The memories of `ant` any human reads, asked of the daemon serving it ([`MemoriesRequest`]): its core
+    /// memories and its provider's memories view, or why the daemon refused. Fails as timed out when no daemon answers
+    /// within [`MEMORIES_WAIT`], as none serves the ant or none of its version takes the request.
+    pub async fn memories(&self, ant: &UserId) -> Result<MemoriesOutcome, Error> {
+        const WHAT: &str = "reading the ant's memories";
+        let request = MemoriesRequest::new(ant.clone(), self.session.human.clone());
+        let mut answers = self.subscribe(WHAT, request.reply_subject()).await?;
+        let payload = serde_json::to_vec(&request).map_err(|e| Error::invalid(WHAT, e))?;
+        let message = Message::new(request.subject(), payload);
+        self.transport.publish(message).await.map_err(|e| Error::transport(WHAT, e))?;
+        loop {
+            let answer = answers.next(Some(MEMORIES_WAIT)).await.map_err(|e| Error::transport(WHAT, e))?;
+            if let Some(outcome) = requests::memories_answer(&request, &answer) {
+                return Ok(outcome);
+            }
+        }
+    }
 }
+
+/// How long [`Client::memories`] waits for the daemon serving the ant, which gives its provider up to 10 s.
+pub const MEMORIES_WAIT: Duration = Duration::from_secs(15);
 
 /// Reads a [`Window`] of the stream page by page, one batched direct get each, so a client shows what it has before
 /// reading on. A reader takes what a human's CLI reader takes: it skips a stored message that parses as no message of

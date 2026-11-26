@@ -40,6 +40,19 @@ fn admin_creds<'a>(nats: &Nats<'a>) -> Result<&'a Path> {
     }
 }
 
+/// Whether `nats` has a human device's credentials whose user JWT carries the admin role, which admin orders need.
+pub fn is_admin(nats: &Nats<'_>) -> bool {
+    let Ok(creds) = admin_creds(nats) else { return false };
+    auth::read_creds(creds).is_ok_and(|(jwt, _)| carries_admin(&jwt, creds).unwrap_or(false))
+}
+
+/// Whether the user JWT `jwt`, of the credentials `creds`, carries the admin role.
+fn carries_admin(jwt: &str, creds: &Path) -> Result<bool> {
+    let (_, claims) = ants_proto::verified_jwt(jwt).with_context(|| format!("credentials {}", creds.display()))?;
+    let tags = claims["nats"]["tags"].as_array().map_or(&[][..], Vec::as_slice);
+    Ok(tags.iter().any(|tag| tag.as_str() == Some(ADMIN_TAG)))
+}
+
 /// What came of an order sent, when the wait for its outcome ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Sent {
@@ -144,9 +157,7 @@ impl Admin {
     ) -> Result<(AdminOrder, Option<AdminOutcome>)> {
         let creds = &self.creds;
         let (jwt, key) = auth::read_creds(creds)?;
-        let (_, claims) = ants_proto::verified_jwt(&jwt).with_context(|| format!("credentials {}", creds.display()))?;
-        let tags = claims["nats"]["tags"].as_array().map_or(&[][..], Vec::as_slice);
-        if !tags.iter().any(|tag| tag.as_str() == Some(ADMIN_TAG)) {
+        if !carries_admin(&jwt, creds)? {
             bail!(
                 "the credentials of {} carry no admin role: `ants auth user NAME --human --admin` issues them",
                 self.id

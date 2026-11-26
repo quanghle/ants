@@ -140,6 +140,9 @@ impl Permissions {
     /// ([`TRAIL_RATINGS_BUCKET`]) the same way; an ant puts only its own, under keys naming it, and a human writes none
     /// but purges a removed trail's.
     ///
+    /// A human asks the daemon serving an ant for its core and provider memories ([`crate::MemoriesRequest`], on
+    /// [`subject::memories`], which the ant alone hears and answers on [`subject::memoried`]), with no admin order.
+    ///
     /// Every ant and human reads the team directory ([`TEAMS_BUCKET`]) by direct gets naming no subject; a human
     /// creates the bucket and puts the directory by compare-and-set (`team_rights`), telling what it changed on its own
     /// status subjects ([`subject::status_of`]), as an ant tells its progress. The directory is one entry for
@@ -329,6 +332,7 @@ impl Permissions {
             subject::cancelled_of(user),
             subject::queued(user),
             subject::trailed(user),
+            subject::memoried(user),
             subject::chanadm_from(user),
             // Put and delete of its own colony entry, and of its own escalation chain.
             subject::colony(user),
@@ -397,6 +401,8 @@ impl Permissions {
             subject::queues_by_of(user),
             // A human's requests to start, stop and resume the trail runs it conducts.
             subject::trail(user),
+            // A human's requests for its core and provider memories.
+            subject::memories(user),
             // Live replies to its ask_ant calls, which the inbox consumer holds back while the asking prompt runs.
             subject::inbox_of(user),
             subject::renew_reply(user.as_str()),
