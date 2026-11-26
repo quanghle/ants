@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use ants_proto::{ChannelId, ChannelNotify, Reaction, ThreadId, UserId};
+use ants_proto::{ChannelId, ChannelNotify, Machine, Reaction, ThreadId, UserId};
 use chrono::TimeDelta;
 
 use crate::admin::orders::{add, clone};
@@ -86,7 +86,12 @@ pub const COMMANDS: &[Row] = &[
     ),
     row("unremind", "", "clear the thread's reminder", Needs::Thread),
     row("reminders", "", "every reminder, the soonest due first, in the pager", Needs::Nothing),
-    row("schedules", "", "the machine's schedules, their next and last firings, in the pager", Needs::Nothing),
+    row(
+        "schedules",
+        "[--machine MACHINE]",
+        "the machine's schedules, or another's by admin order, their next and last firings, in the pager",
+        Needs::Nothing,
+    ),
     row("archive", "", "archive the thread", Needs::Thread),
     row("unarchive", "", "unarchive the thread", Needs::Thread),
     row("title", "TEXT", "title the thread", Needs::Thread),
@@ -199,8 +204,8 @@ pub enum Slash {
     Unremind,
     /// List every reminder, as `ants remind list` does.
     Reminders,
-    /// List the machine's schedules, as `ants schedule list` does.
-    Schedules,
+    /// List the schedules of this machine, else of the machine given, as `ants schedule list` does.
+    Schedules(Option<Machine>),
     Title(String),
     /// Post the text to the thread's notes.
     Notes(String),
@@ -368,7 +373,11 @@ fn slash(text: &str) -> Result<Slash, String> {
         "remind" => text().map(Slash::Remind),
         "unremind" => bare(Slash::Unremind),
         "reminders" => bare(Slash::Reminders),
-        "schedules" => bare(Slash::Schedules),
+        "schedules" if args.is_empty() => Ok(Slash::Schedules(None)),
+        "schedules" => {
+            let args: SchedulesArgs = flags("/schedules", args).map_err(|why| why.unwrap_or_else(usage))?;
+            Ok(Slash::Schedules(args.machine))
+        }
         "title" => text().map(Slash::Title),
         "notes" => text().map(Slash::Notes),
         "react" => text()?.parse().map(Slash::React).map_err(|e| e.to_string()),
@@ -448,6 +457,13 @@ fn dead(args: &str) -> Result<Dead, Option<String>> {
 fn flags<T: clap::Args>(command: &'static str, args: &str) -> Result<T, Option<String>> {
     let command = clap::Command::new(command).no_binary_name(true).disable_help_flag(true);
     read_words(T::augment_args(command), args, T::from_arg_matches)
+}
+
+/// The flags of `/schedules`, as `ants schedule list` takes them.
+#[derive(clap::Args, Debug)]
+struct SchedulesArgs {
+    #[arg(long)]
+    machine: Option<Machine>,
 }
 
 /// `args` read as the command line reads the subcommands `T` of its command, the first word naming one, as [`flags`]
@@ -587,7 +603,9 @@ pub(super) mod tests {
         assert_eq!(ok("/unremind"), Slash::Unremind);
         assert_eq!(ok("/reminders"), Slash::Reminders);
         assert_eq!(parse("/reminders soon").unwrap_err(), "usage: /reminders");
-        assert_eq!(ok("/schedules"), Slash::Schedules);
+        assert_eq!(ok("/schedules"), Slash::Schedules(None));
+        assert_eq!(ok("/schedules --machine m1"), Slash::Schedules(Some("m1".parse().unwrap())));
+        assert_eq!(parse("/schedules m1").unwrap_err(), "unexpected argument 'm1' found");
         assert_eq!(parse("/remind").unwrap_err(), "usage: /remind DURATION|TIME [NOTE]");
         assert_eq!(ok("/forward @dev-b"), Slash::Forward { to: user("dev-b"), note: String::new() });
         assert_eq!(ok("/forward @dev-b take it"), Slash::Forward { to: user("dev-b"), note: "take it".into() });

@@ -41,6 +41,7 @@ mod questions;
 mod queue;
 mod reactions;
 mod roles;
+mod schedules;
 mod sealed;
 mod sense;
 mod shared;
@@ -155,6 +156,7 @@ pub use roles::{
     ADMIN_TAG, AdminRole, AssistantOf, JwtClaims, JwtError, VerifiedUser, is_admin, verified_jwt, verify_admin,
     verify_assistant_of, verify_user_jwt,
 };
+pub use schedules::{ListedSchedule, SCHEDULES_CAP, SCHEDULES_FRESH, Schedules};
 pub use sealed::{SEALED_VERSION, Sealed, SealedBody, SealedKey};
 pub use sense::{SENSE_STREAM, SENSE_SUBJECTS, SenseId};
 pub use shared::{

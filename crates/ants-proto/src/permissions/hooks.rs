@@ -11,7 +11,8 @@ use crate::{
 };
 
 /// Where a webhook delivers its events: an ant's inbox, or a channel.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Destination {
     Ant(UserId),
     Channel(ChannelId),
