@@ -1,5 +1,5 @@
 //! Tests of `ants leaf outbox`: what a leaf kept while its uplink was down reaching the hub, post waiters, intake
-//! reports, admissions, removed ants, attachments, and restarts.
+//! reports, admissions, removed ants, attachments, restarts, and each put of a leaf client stored once.
 
 use std::assert_matches;
 use std::process::Command;
@@ -676,4 +676,95 @@ async fn an_outbox_goes_on_after_a_restart_at_once_through_its_durable_consumer(
     eventually("and so does the hub's stream", async || messages(&h_js, STREAM).await == 2).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(messages(&h_js, INTAKE_STREAM).await, 2, "nothing taken twice");
+}
+
+/// A real hub and a leaf node with the three uplinks `ants leaf config` writes, the team account's, the store
+/// account's and the system account's: the hub sources the leaf's outbox through the store uplink, and each put of a
+/// client on the leaf, to a KV bucket in the hub's domain form (`$JS.hub.API.$KV.…`), to the hub's stream or to its
+/// file store, is stored once, never also through the leaf's store account and its uplink.
+#[tokio::test]
+async fn each_put_of_a_leaf_client_is_stored_once() {
+    let leaf_port = free_port();
+    let Some(hub) = spawn_hub(leaf_port, "feature_flags { js_api_reply_v2: true }") else {
+        return;
+    };
+    let team = hub.dir().join("auth");
+    let domain: JsDomain = "hub".parse().unwrap();
+    let m1: Machine = "m1".parse().unwrap();
+    let (human, dev_a): (UserId, UserId) = (ants_test_support::human(), "dev-a".parse().unwrap());
+    let creds = |p: &UserId| {
+        let out = hub.dir().join(format!("{p}.creds"));
+        crate::test_support::issue(&team, p, crate::test_support::role_of(p), Some(&domain), &out).unwrap();
+        out
+    };
+    let connect = async |url: &str, p: &UserId| {
+        let (client, mut js) = bus::connect(url, Some(&creds(p)), Some(&domain), p, "test").await.unwrap();
+        js.set_timeout(Duration::from_secs(2));
+        (client, js)
+    };
+    let (_h, h_js) = connect(&hub.url, &human).await;
+    bus::ensure_stream(&h_js).await.unwrap();
+    bus::ensure_links(&h_js).await.unwrap();
+    bus::ensure_owners(&h_js).await.unwrap();
+    bus::init_own_buckets(&h_js).await.unwrap();
+    h_js.create_stream(ants_daemon::hub::files_config()).await.unwrap();
+
+    let leaf_creds = hub.dir().join("leaf-m1.creds");
+    let on_m1 = auth::members(std::slice::from_ref(&dev_a), std::slice::from_ref(&human));
+    auth::issue_leaf(&team, &m1, &on_m1, &[], EnrollApprover::Without, Some(&domain), &leaf_creds).unwrap();
+    let (server_conf, system_creds) = (team.join(auth::SERVER_CONF), auth::leaf_system_creds(&leaf_creds));
+    let listen = format!("127.0.0.1:{}", free_port());
+    let leaf_node = NatsServer::spawn_with(|dir| {
+        let uplinks = [format!("nats-leaf://127.0.0.1:{leaf_port}")];
+        let config = leaf::Leaf {
+            machine: &m1,
+            hub_domain: Some(&domain),
+            uplinks: &uplinks,
+            creds: &leaf_creds,
+            system_creds: Some(&system_creds),
+            server_conf: &server_conf,
+            ca_file: None,
+            proxy: None,
+            listen: &listen,
+        };
+        leaf::write(&config, &dir.join("leaf.conf")).unwrap();
+        "include \"leaf.conf\"\n".to_owned()
+    })
+    .unwrap();
+    let conf = std::fs::read_to_string(leaf_node.dir().join("leaf.conf")).unwrap();
+    assert!(conf.contains("leaf-m1.store.creds") && conf.matches("credentials:").count() == 3, "{conf}");
+    let (_a, a_js) = connect(&leaf_node.url, &dev_a).await;
+    eventually("the leaf reaches the hub", async || bus::open_stream(&a_js, &dev_a).await.is_ok()).await;
+    let setup = super::connect(&hub.url, Some(&creds(&human)), &human).await.unwrap();
+    admit(&setup, &h_js, &m1, &on_m1).await.unwrap();
+    sourced(&h_js, &m1, SOURCE_WAIT).await.unwrap();
+    let found = sourcing(&h_js, &m1, &on_m1).await.unwrap();
+    assert_eq!(found, Sourcing { hearing: Hearing::Heard, unadmitted: Vec::new() }, "sourced through the store uplink");
+
+    // A second copy of a put would replace the first, under the key's limit of one entry, or be dropped as a
+    // duplicate: the last sequence counts both.
+    let last = async |name: &str| h_js.get_stream(name).await.unwrap().info().await.unwrap().state.last_sequence;
+    let sessions_stream = subject::kv_stream(ants_proto::SESSIONS_BUCKET);
+    let sessions = bus::ensure_sessions(&a_js, Some(&domain), &dev_a).await.unwrap();
+    let key = ants_proto::session_key(&dev_a, &ThreadId::generate());
+    for (n, value) in ["s1", "s2", "s3"].into_iter().enumerate() {
+        sessions.put(&key, value).await.unwrap();
+        assert_eq!(last(&sessions_stream).await, n as u64 + 1, "put {value} stored once");
+    }
+    let direct = Envelope::new(dev_a.clone(), human.clone(), "direct");
+    assert_eq!(bus::publish(&a_js, &direct).await.unwrap(), bus::Stored::Hub);
+    let note = files::reference("note.txt", "text/plain", b"direct").unwrap();
+    let note_handle = direct.attachment_handle(note.id);
+    assert_eq!(files::put(&a_js, &note_handle, &note, b"direct").await.unwrap(), bus::Stored::Hub);
+    // What a leaf client puts into the outbox reaches the hub's stream through the store uplink.
+    let kept = Envelope::new(dev_a.clone(), human.clone(), "kept");
+    let copy =
+        PublishMessage::build().payload(serde_json::to_vec(&kept).unwrap().into()).message_id(kept.id.to_string());
+    a_js.send_publish(subject::outbox(&kept.subject()).unwrap(), copy).await.unwrap().await.unwrap();
+    eventually("the hub's stream takes what the outbox kept", async || last(STREAM).await == 2).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(last(&sessions_stream).await, 3, "each put stored once");
+    assert_eq!(last(STREAM).await, 2, "each message stored once");
+    assert_eq!(last(FILES_STREAM).await, 1, "the chunk stored once");
+    assert_eq!(last(INTAKE_STREAM).await, 1, "only the outbox's message taken in");
 }
