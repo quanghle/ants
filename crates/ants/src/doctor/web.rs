@@ -1,9 +1,12 @@
 //! The WebSocket listeners of the machine's nats-server configurations: which pages each takes. A browser lets any
 //! page open in it connect to a listener on the machine, so one naming no origin, on a server asking for no
 //! credentials, lets any site read and send as the human; on a server asking for credentials, as a hub does, it still
-//! takes pages of any site.
+//! takes pages of any site. And the page `ants web export` last wrote for a hub, whose version is to be this ants'.
 
 use std::path::Path;
+
+use ants_client::device::registration::GITHUB_URL;
+use ants_client::site::{self, Site};
 
 use super::{Check, Setup, same_file};
 use crate::node::web::{self, Listener};
@@ -37,6 +40,44 @@ fn check_named(conf: &Path) -> Check {
         Ok(_) => check_listener(conf)
             .unwrap_or_else(|| Check::ok(CHECK, format!("{shown} has no websocket listener: no page connects to it"))),
     }
+}
+
+/// The page in the directory `ants web export` last wrote, `web_export` of `[cli]` in the config file at `config`:
+/// of this ants version, else a warning naming the export writing this version's; None without one recorded.
+pub(super) fn check_exported_page(config: &Path) -> Option<Check> {
+    let check = "web page";
+    let dir = ants_daemon::config::CliDefaults::load(config).ok()?.web_export?;
+    let shown = dir.display();
+    let ours = env!("CARGO_PKG_VERSION");
+    let site = std::fs::read_to_string(dir.join(site::FILE)).ok().and_then(|text| Site::from_json(&text).ok());
+    let export = {
+        let server = site.as_ref().map_or("URL", |site| site.server.as_str());
+        let bootstrap = match &site {
+            Some(Site { bootstrap: None, .. }) => String::new(),
+            _ => " --bootstrap FILE".to_owned(),
+        };
+        let github = match site.as_ref().and_then(|site| site.github_url.as_deref()) {
+            Some(url) if url != GITHUB_URL => format!(" --github-url {url}"),
+            _ => String::new(),
+        };
+        format!("ants web export {shown} --server {server}{bootstrap}{github}")
+    };
+    let recorded = format!("web_export of [cli] in {}", config.display());
+    let version = match std::fs::read_to_string(dir.join("ants-version")) {
+        Ok(version) => version.trim().to_owned(),
+        Err(e) => {
+            let detail = format!("no page in {shown}, which {recorded} names: reading its ants-version: {e}");
+            return Some(Check::warn(check, detail, vec![export, format!("or remove {recorded}")]));
+        }
+    };
+    if version == ours {
+        return Some(Check::ok(check, format!("the page in {shown} is of ants {ours}, as this binary")));
+    }
+    let detail = format!(
+        "the page in {shown} ({recorded}) is of ants {version}, this binary of {ours}: pages loading it run a client \
+         of another version than the hub's"
+    );
+    Some(Check::warn(check, detail, vec![export]))
 }
 
 /// The WebSocket listener of the nats-server configuration at `conf`; None without one.
@@ -81,7 +122,7 @@ fn check_listener(conf: &Path) -> Option<Check> {
 mod tests {
     //! Tests of the WebSocket listener check: a listener naming no origin fails on a server asking for no
     //! credentials and warns on one asking for them, one naming the page's origin passes, and the configuration
-    //! `--nats-conf` names is checked beside the machine's.
+    //! `--nats-conf` names is checked beside the machine's; an exported page of another ants version warns.
 
     use ants_test_support::scratch_dir;
 
@@ -147,6 +188,65 @@ mod tests {
             )
         );
         assert!(hub.fix[0].starts_with("add `allowed_origins: [\"ORIGIN\"]`"), "{:?}", hub.fix);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_exported_page_of_another_ants_version_warns_naming_the_export_to_run() {
+        let dir = scratch_dir("doctor-web-page").canonicalize().unwrap();
+        let (config, www) = (dir.join("config.toml"), dir.join("www"));
+        assert_eq!(check_exported_page(&config), None, "no config file");
+        std::fs::write(&config, "[cli]\nnats = \"nats://127.0.0.1:4222\"\n").unwrap();
+        assert_eq!(check_exported_page(&config), None, "no page exported");
+
+        std::fs::write(&config, format!("[cli]\nweb_export = {:?}\n", www.to_str().unwrap())).unwrap();
+        let missing = check_exported_page(&config).unwrap();
+        assert_eq!(missing.status, Status::Warn);
+        assert!(missing.detail.starts_with(&format!("no page in {}", www.display())), "{}", missing.detail);
+        assert_eq!(missing.fix[0], format!("ants web export {} --server URL --bootstrap FILE", www.display()));
+
+        std::fs::create_dir_all(&www).unwrap();
+        std::fs::write(www.join("ants-version"), format!("{}\n", env!("CARGO_PKG_VERSION"))).unwrap();
+        let same = check_exported_page(&config).unwrap();
+        assert_eq!(
+            (same.status, same.detail),
+            (
+                Status::Ok,
+                format!("the page in {} is of ants {}, as this binary", www.display(), env!("CARGO_PKG_VERSION"))
+            )
+        );
+
+        std::fs::write(www.join("ants-version"), "0.0.1\n").unwrap();
+        let site = Site {
+            server: "wss://hub.example/nats".to_owned(),
+            bootstrap: Some("creds".to_owned()),
+            github_url: Some("https://ghe.example".to_owned()),
+            human: None,
+        };
+        std::fs::write(www.join(site::FILE), site.to_json()).unwrap();
+        let other = check_exported_page(&config).unwrap();
+        assert_eq!(other.status, Status::Warn);
+        assert_eq!(
+            other.detail,
+            format!(
+                "the page in {} (web_export of [cli] in {}) is of ants 0.0.1, this binary of {}: pages loading it run \
+                 a client of another version than the hub's",
+                www.display(),
+                config.display(),
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(
+            other.fix,
+            [format!(
+                "ants web export {} --server wss://hub.example/nats --bootstrap FILE --github-url https://ghe.example",
+                www.display()
+            )]
+        );
+        let unbootstrapped = Site { bootstrap: None, github_url: None, ..site };
+        std::fs::write(www.join(site::FILE), unbootstrapped.to_json()).unwrap();
+        let fix = check_exported_page(&config).unwrap().fix;
+        assert_eq!(fix, [format!("ants web export {} --server wss://hub.example/nats", www.display())]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

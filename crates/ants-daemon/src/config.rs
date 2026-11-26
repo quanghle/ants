@@ -148,7 +148,7 @@ mod templated;
 
 pub use amend::{append, template_of, with_allow_rule, without_ant, write};
 pub use ant::{Ant, builtin_messenger, builtin_sage};
-pub use cli::{CliDefaults, Notify, Summaries, SummaryConfig, Theme, with_cli_login};
+pub use cli::{CliDefaults, Notify, Summaries, SummaryConfig, Theme, with_cli_login, with_web_export};
 pub use dropin::{dropin_dir, dropin_files};
 pub use entry::{entry, template_entry, toml_string};
 pub use host::HostSettings;

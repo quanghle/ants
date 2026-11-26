@@ -4,7 +4,7 @@
 
 use ants_proto::Machine;
 
-use super::cli::cli_login_text;
+use super::cli::{cli_login_text, web_export_text};
 use super::host::hostname;
 use super::*;
 use crate::daemon::Config;

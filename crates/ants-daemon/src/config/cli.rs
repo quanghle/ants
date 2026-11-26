@@ -33,6 +33,7 @@ pub(super) struct CliSection {
     mouse: Option<bool>,
     #[serde(default)]
     notify: Notify,
+    web_export: Option<PathBuf>,
 }
 
 /// How an unfocused `ants chat` announces a new item on home.
@@ -124,6 +125,8 @@ pub struct CliDefaults {
     pub animate: bool,
     pub mouse: bool,
     pub notify: Notify,
+    /// The directory `ants web export` last wrote the page into, whose version `ants doctor` checks.
+    pub web_export: Option<PathBuf>,
 }
 
 impl Default for CliDefaults {
@@ -140,6 +143,7 @@ impl Default for CliDefaults {
             animate: true,
             mouse: true,
             notify: Notify::Bell,
+            web_export: None,
         }
     }
 }
@@ -180,6 +184,7 @@ impl CliDefaults {
             (view.cli.inline_images, view.cli.theme, view.cli.animate.unwrap_or(true));
         let mouse = view.cli.mouse.unwrap_or(true);
         let notify = view.cli.notify;
+        let web_export = view.cli.web_export.map(|dir| resolve(&dir, base, home));
         Ok(Self {
             nats,
             creds,
@@ -192,8 +197,38 @@ impl CliDefaults {
             animate,
             mouse,
             notify,
+            web_export,
         })
     }
+}
+
+/// The text of the config file at `path` (none when missing) with `[cli]` `web_export` naming `dir`, an absolute
+/// path, as `ants web export` records the directory it wrote; None when it names `dir` already. The text around
+/// stays as it is, comments included. Fails when the file does not parse, or would not with the key in place.
+pub fn with_web_export(path: &Path, dir: &Path) -> Result<Option<String>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading config {}", path.display())),
+    };
+    web_export_text(&text, &std::path::absolute(path)?, &home_dir()?, dir)
+}
+
+pub(super) fn web_export_text(text: &str, path: &Path, home: &Path, dir: &Path) -> Result<Option<String>> {
+    if CliDefaults::parse(text, path, home)?.web_export.as_deref() == Some(dir) {
+        return Ok(None);
+    }
+    let dir_text = dir.to_str().with_context(|| format!("{} is not UTF-8", dir.display()))?;
+    let mut doc: toml_edit::DocumentMut = text.parse().with_context(|| format!("parsing config {}", path.display()))?;
+    let cli = doc.entry("cli").or_insert_with(toml_edit::table);
+    let cli = cli.as_table_like_mut().with_context(|| format!("config {}: cli is no table", path.display()))?;
+    cli.insert("web_export", toml_edit::value(dir_text));
+    let new = doc.to_string();
+    let fail = || format!("cannot set [cli] in config {}: set web_export = {dir_text:?} there by hand", path.display());
+    if CliDefaults::parse(&new, path, home).with_context(fail)?.web_export.as_deref() != Some(dir) {
+        bail!(fail());
+    }
+    Ok(Some(new))
 }
 
 /// The text of the config file at `path` (none when missing) with `[cli]` naming the credentials at `creds`, and the

@@ -1,4 +1,5 @@
-//! The CLI section: the connection `ants login` sets, and what the section overrides of the top level.
+//! The CLI section: the connection `ants login` sets, the directory `ants web export` records, and what the section
+//! overrides of the top level.
 
 use super::*;
 
@@ -97,4 +98,29 @@ fn the_cli_section_overrides_the_top_level_server() {
     }
     assert!(parse_all("[cli]\nnats = \"nats://hub:4222\"\ncreds = \"alice.creds\"").is_ok(), "daemon accepts it");
     assert!(parse_all("[cli]\nharness = \"claude\"").is_err());
+}
+
+#[test]
+fn ants_web_export_records_its_directory_in_cli_keeping_the_text_around() {
+    let (path, home) = (Path::new("/team/config.toml"), Path::new("/home/alice"));
+    let (dir, other) = (Path::new("/srv/ants-web"), Path::new("/var/www/ants"));
+    let set = |text: &str, dir: &Path| web_export_text(text, path, home, dir);
+    let fresh = set("", dir).unwrap().unwrap();
+    assert_eq!(fresh, "[cli]\nweb_export = \"/srv/ants-web\"\n");
+    let read = CliDefaults::parse(&fresh, path, home).unwrap();
+    assert_eq!(read.web_export.as_deref(), Some(dir));
+    assert_eq!(set(&fresh, dir).unwrap(), None, "recorded already");
+
+    let own = "# mine\nhuman = \"alice\"\n\n[cli] # the CLI\nnats = \"nats://hub:4222\" # the hub\n\n[[ant]]\nname = \"dev-a\"\n";
+    let inserted = set(own, dir).unwrap().unwrap();
+    assert_eq!(
+        inserted,
+        "# mine\nhuman = \"alice\"\n\n[cli] # the CLI\nnats = \"nats://hub:4222\" # the hub\nweb_export = \"/srv/ants-web\"\n\n[[ant]]\nname = \"dev-a\"\n"
+    );
+    let moved = set(&inserted, other).unwrap().unwrap();
+    assert_eq!(moved, inserted.replace("/srv/ants-web", "/var/www/ants"), "the last export's directory");
+    let relative = CliDefaults::parse("[cli]\nweb_export = \"~/web\"\n", path, home).unwrap();
+    assert_eq!(relative.web_export.as_deref(), Some(Path::new("/home/alice/web")));
+    assert!(set("[cli\n", dir).is_err());
+    assert!(set("cli = 1\n", dir).is_err());
 }
