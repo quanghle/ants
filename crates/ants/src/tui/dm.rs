@@ -24,14 +24,9 @@ use ants_client::sealed::State;
 /// The lock marking a sealed message between two humans, and a thread with one.
 pub const LOCK: &str = "🔒";
 
-/// What a sealed message the device did not open reads in place of its text: one it has no key entry for was sent
-/// before it had a key; None for one opened or not sealed.
+/// What a sealed message the device did not open reads in place of its text ([`ants_client::sealed::unopened_text`]).
 pub fn unopened(sealed: Option<State>) -> Option<&'static str> {
-    match sealed? {
-        State::Opened => None,
-        State::Unreadable => Some("[sealed] sent before this device had a key"),
-        State::Forged => Some("[forged] does not open with the key of the device it names"),
-    }
+    ants_client::sealed::unopened_text(sealed)
 }
 
 /// A message between the human and another user.

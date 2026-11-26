@@ -3,9 +3,9 @@
 //! Three parts, the first two with no I/O:
 //! - what a client shows, derived from what it reads: the entries of stored messages ([`entry`], [`parser`]) with
 //!   their attachments ([`attachments`]) and what a sealed one shows as ([`sealed`]), the messages a stream relayed,
-//!   which a reader refuses ([`relayed`]), the human's inbox with what its read marker tells unread ([`inbox`]), the
-//!   teams with the changes a human makes of them ([`teams`]), and a message's markdown as a tree safe to show
-//!   ([`markdown`]);
+//!   which a reader refuses ([`relayed`]), the human's inbox with what its read marker tells unread ([`inbox`]), what
+//!   the entries tell of each thread ([`facts`]) and what waits on the human, its home ([`home`]), the teams with
+//!   the changes a human makes of them ([`teams`]), and a message's markdown as a tree safe to show ([`markdown`]);
 //! - what a human sends ([`sending`]), and the requests of its reads and writes with the reading of their answers
 //!   ([`requests`]);
 //! - those reads and writes themselves ([`client`]), over a transport of four calls that names no runtime
@@ -24,6 +24,8 @@ pub mod client;
 pub mod device;
 pub mod entry;
 pub mod error;
+pub mod facts;
+pub mod home;
 pub mod inbox;
 pub mod markdown;
 pub mod parser;

@@ -60,11 +60,21 @@ const ANSWER_GRACE: Duration = Duration::from_millis(500);
 /// anything.
 pub type Change<T> = Box<dyn Fn(&mut T) -> bool + Send + Sync>;
 
-/// A message as stored, with its stream sequence.
+/// A message as stored, with its stream sequence and when the stream stored it.
 #[derive(Clone, Debug)]
 pub struct HumanMessage {
     pub seq: u64,
+    pub stored_at: chrono::DateTime<chrono::Utc>,
     pub envelope: Envelope,
+}
+
+/// A dead letter as stored: its stream sequence, when the stream stored it, its subject and its payload.
+#[derive(Clone, Debug)]
+pub struct StoredLetter {
+    pub seq: u64,
+    pub stored_at: chrono::DateTime<chrono::Utc>,
+    pub subject: String,
+    pub payload: Vec<u8>,
 }
 
 /// What the assistant tools read and write for the human: its messages, the tool requests waiting for it, its read
@@ -74,6 +84,8 @@ pub trait HumanStore: Send + Sync {
     /// each checked against its subject.
     fn messages(&self, human: UserId, assistant: UserId, since: SystemTime)
     -> BoxFuture<'_, Result<Vec<HumanMessage>>>;
+    /// Every ant's dead letters stored since `since`, in the order stored.
+    fn dead_letters(&self, since: SystemTime) -> BoxFuture<'_, Result<Vec<StoredLetter>>>;
     /// The tool requests stored since `since`, and the ids of those a human decided or the cancellation of their
     /// prompt settled.
     fn approvals(&self, since: SystemTime) -> BoxFuture<'_, Result<(Vec<ApprovalRequest>, HashSet<Uuid>)>>;
@@ -188,6 +200,11 @@ struct Messages {
 impl Messages {
     fn find(&self, id: Uuid) -> Option<&HumanMessage> {
         self.stored.iter().find(|m| m.envelope.id == id)
+    }
+
+    /// The message stored at `seq`.
+    fn at(&self, seq: u64) -> Option<&HumanMessage> {
+        self.stored.binary_search_by_key(&seq, |m| m.seq).ok().map(|i| &self.stored[i])
     }
 
     fn on(&self, thread: &ThreadId) -> impl Iterator<Item = &HumanMessage> {

@@ -57,14 +57,7 @@ pub fn summary(questions: &Questions) -> String {
     }
 }
 
-/// What `questions` ask in a line: the first question's text, and how many more follow.
-pub fn asking(questions: &Questions) -> String {
-    let first = questions.questions.first().map_or("", |q| q.text.as_str());
-    match questions.questions.len() {
-        0 | 1 => first.to_owned(),
-        n => format!("{first} (+{} more)", n - 1),
-    }
-}
+pub use ants_client::text::asking;
 
 /// Where a key on a card that is not focused leads: somewhere, or to the card focused with a pick made.
 #[derive(Debug, PartialEq, Eq)]

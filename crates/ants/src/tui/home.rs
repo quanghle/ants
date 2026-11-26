@@ -11,7 +11,7 @@ use ants_proto::{ApprovalRequest, ThreadId, UserId, Uuid};
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
@@ -29,22 +29,8 @@ use crate::text::excerpt;
 
 mod items;
 
-pub use items::{Id, Item, Why, items, snoozed, waiting};
+pub use items::{Id, Item, Shown, Why, items, snoozed, waiting};
 use items::{asker, asks};
-
-impl Why {
-    pub fn color(self) -> Color {
-        match self {
-            Self::Approval => Color::Yellow,
-            Self::Question => Color::Cyan,
-            Self::Stuck => Color::Red,
-            Self::Message => Color::Blue,
-            Self::Mention => Color::Magenta,
-            Self::Reminder => Color::LightCyan,
-            Self::Finished => Color::Green,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct Page {

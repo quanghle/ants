@@ -9,7 +9,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::home::{self, Why};
+use super::home::{self, Shown as _, Why};
 use super::model::{Action, Data, Focus, Key, Level, Model, Page};
 use super::nav;
 use super::style;
