@@ -11,7 +11,7 @@
 //!
 //! An order an admin signed it carries out (`apply`) with the module of its op: `set` edits the ant's settings in
 //! the config file the daemon serves ([`ConfigFile`]), which the daemon reloads at once, and its shared settings in
-//! their record ([`crate::profile::shared`]); `settings` reads them;
+//! their record ([`crate::profile::shared`]); `settings` reads them; `schedules` lists the config file's schedules;
 //! `pause` pauses or resumes the ant there; [`restart`] has the daemon serving the ant restart its harnesses;
 //! `memories` reads the ant's memories, only while online; `add` adds an ant to the config, its credentials signed
 //! by `ants signer` on the order, and `retire` removes one, its credentials revoked so; `clone` adds a copy of one;
@@ -53,6 +53,7 @@ mod pause;
 pub mod payload;
 pub mod restart;
 mod retire;
+mod schedules;
 mod set;
 mod settings;
 pub mod trail;
@@ -560,6 +561,7 @@ async fn apply(
         AdminOp::ExportProvider { identity } => export::export(js, orders, order, identity, stored_at).await,
         AdminOp::ImportProvider { identity, payload } => export::import(js, orders, order, identity, payload).await,
         AdminOp::ReadSettings => settings::apply(orders, order),
+        AdminOp::ReadSchedules => schedules::apply(orders, order, stored_at),
         AdminOp::ReadMcp => mcp::apply(orders, order, None, stored_at).await,
         AdminOp::McpSignIn { server, callback } => {
             mcp::apply(orders, order, Some((server, callback.as_deref())), stored_at).await

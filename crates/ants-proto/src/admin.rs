@@ -130,6 +130,9 @@ pub enum AdminOp {
     /// Read the ant's settings as the machine's config file has them, which the outcome's `result` carries
     /// ([`Settings`]).
     ReadSettings,
+    /// Read the `[[schedule]]` entries of the machine's config file, whatever ant the order names, which the outcome's
+    /// `result` carries ([`Schedules`](crate::Schedules)).
+    ReadSchedules,
     /// Read the MCP servers the ant's harness runs and how each stands, which the outcome's `result` carries
     /// ([`McpReport`](crate::McpReport)).
     ReadMcp,
@@ -177,6 +180,7 @@ impl AdminOp {
             Self::ExportProvider { .. } => "export_provider",
             Self::ImportProvider { .. } => "import_provider",
             Self::ReadSettings => "read_settings",
+            Self::ReadSchedules => "read_schedules",
             Self::ReadMcp => "read_mcp",
             Self::McpSignIn { .. } => "mcp_sign_in",
             Self::Clone { .. } => "clone",
@@ -185,8 +189,8 @@ impl AdminOp {
         }
     }
 
-    /// Whether an assistant may order it for its human: anything but adding, retiring or cloning an ant, reading or
-    /// signing in its MCP servers, which `ants signer` signs for an admin's own order only, exporting or importing
+    /// Whether an assistant may order it for its human: anything but adding, retiring or cloning an ant, reading the
+    /// machine's schedules, reading or signing in its MCP servers, which `ants signer` signs for an admin's own order only, exporting or importing
     /// what its provider holds of it, or stopping or resuming a trail run it conducts.
     pub fn for_assistant(&self) -> bool {
         !matches!(
@@ -194,6 +198,7 @@ impl AdminOp {
             Self::Add { .. }
                 | Self::Retire
                 | Self::Clone { .. }
+                | Self::ReadSchedules
                 | Self::ReadMcp
                 | Self::McpSignIn { .. }
                 | Self::ExportProvider { .. }
@@ -223,6 +228,7 @@ impl AdminOp {
                 format!("import an export of {} bytes into its provider", payload.size)
             }
             Self::ReadSettings => "read settings".to_owned(),
+            Self::ReadSchedules => "read the machine's schedules".to_owned(),
             Self::ReadMcp => "read MCP servers".to_owned(),
             Self::McpSignIn { server, callback: None } => format!("sign in to MCP server {server}"),
             Self::McpSignIn { server, callback: Some(_) } => format!("complete the sign-in to MCP server {server}"),

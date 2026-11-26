@@ -145,6 +145,7 @@ ants ask --wait @dev-b "run the test suite"
 | [docs/container-demo.md](docs/container-demo.md) | Isolated three-node local demo in Apple container, Docker, Podman or wslc |
 | [contrib/skills/ants/SKILL.md](contrib/skills/ants/SKILL.md) | Agent skill teaching external coding agents to use the `ants` CLI |
 | [contrib/skills/ants-trails/SKILL.md](contrib/skills/ants-trails/SKILL.md) | Trail authoring guide for ants and humans: the API, sandbox, limits, patterns and complete example trails |
+| [contrib/skills/ants-pr-watch/SKILL.md](contrib/skills/ants-pr-watch/SKILL.md) | Agent skill teaching an ant to follow a pull request to its merge with a `pr-blocked` trail watcher (gh or Forgejo) |
 
 ## Contributing
 

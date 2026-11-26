@@ -9,7 +9,7 @@ pub const GUIDE: &str = include_str!("../../../../contrib/skills/ants-trails/SKI
 pub const DOCS: &str = include_str!("../../../../docs/trails.md");
 
 /// A fenced block of the guide: its language and its text.
-fn blocks(markdown: &str) -> Vec<(&str, String)> {
+pub fn blocks(markdown: &str) -> Vec<(&str, String)> {
     let mut blocks = Vec::new();
     let mut open: Option<(&str, String)> = None;
     for line in markdown.lines() {

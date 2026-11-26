@@ -39,7 +39,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ants_proto::{ChannelId, Destination, JsDomain, TrailName, TrailStart, UserId};
+use ants_proto::{ChannelId, Destination, JsDomain, ListedSchedule, TrailName, TrailStart, UserId, WEBHOOK_RETENTION};
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, Datelike as _, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, Timelike as _, Utc};
 use jiff::tz::TimeZone;
@@ -189,6 +189,21 @@ impl Schedule {
             catch_up: entry.catch_up,
             allow: entry.allow,
         })
+    }
+
+    /// The schedule as listed at `now`: its next firing and the last one due within [`WEBHOOK_RETENTION`], as far
+    /// back as the webhooks bucket tells whether a firing went out.
+    pub fn listed(&self, now: DateTime<Utc>) -> ListedSchedule {
+        let since = now - TimeDelta::from_std(WEBHOOK_RETENTION).unwrap_or(TimeDelta::days(7));
+        ListedSchedule {
+            name: self.name.clone(),
+            when: self.when.to_string(),
+            to: self.destination.clone(),
+            trail: self.trail.as_ref().map(|start| start.trail.to_string()),
+            catch_up: self.catch_up,
+            next: self.when.next_after(now),
+            last_due: self.when.last_in(since, now),
+        }
     }
 }
 
