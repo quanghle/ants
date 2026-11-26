@@ -16,7 +16,7 @@ data-encoding.workspace = true
 jiff.workspace = true
 # Already in the binary through async-nats: the sanitizer's secret shapes (crate::sanitize).
 regex = "1.13.1"
-rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.43.0", default-features = false, features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 # The version nkeys already brings in, through ed25519-dalek.
@@ -34,7 +34,7 @@ test-support = []
 ants-test-support.workspace = true
 nkeys.workspace = true
 # Its commit hook, to see on which thread the cache commits.
-rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "hooks"] }
+rusqlite = { version = "0.43.0", default-features = false, features = ["bundled", "hooks"] }
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
