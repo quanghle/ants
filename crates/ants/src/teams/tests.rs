@@ -1,10 +1,7 @@
-//! Tests of teams as humans run them: the forest as `ants team list` and `ants team show` print it, the team named
-//! by `ants ant show`, the checks of a change, and `ants team` and a retirement changing the directory of a bus, each
-//! change of `ants team` told on the human's status.
+//! Tests of teams as humans run them: the forest as `ants team list` and `ants team show` print it, and `ants team`
+//! and a retirement changing the directory of a bus, each change of `ants team` told on the human's status.
 
-use std::collections::BTreeSet;
-
-use ants_proto::{AntIdentity, IDENTITIES_BUCKET, Role, Team, TeamChange, TeamDirectory, UserId};
+use ants_proto::{AntIdentity, IDENTITIES_BUCKET, Role, Team, TeamChange, TeamDirectory, TeamRefusal, UserId};
 use async_nats::jetstream;
 use chrono::Utc;
 
@@ -29,23 +26,26 @@ fn forest() -> TeamDirectory {
 }
 
 #[test]
-fn the_forest_lists_each_team_under_the_team_holding_it() {
+fn the_forest_is_a_table_each_team_under_the_team_holding_it() {
     let directory = forest();
-    let order: Vec<(usize, &str)> = forest_of(&directory);
-    assert_eq!(order, [(0, "eng"), (1, "backend"), (1, "web")]);
+    assert_eq!(forest_of(&directory), tiers(&[(0, "eng"), (1, "backend"), (1, "web")]));
     let table = table(&directory);
     let lines: Vec<&str> = table.lines().map(str::trim_end).collect();
     assert!(lines[0].starts_with("TEAM") && !lines[0].contains("DESCRIPTION"), "{table}");
     assert!(lines[1].starts_with("eng ") && lines[1].contains("boss"), "{table}");
     assert!(lines[2].starts_with("  backend ") && lines[2].contains("dev-a"), "{table}");
 
-    let mut described = directory.clone();
+    let mut described = directory;
     described.teams[1].description = Some("the services".to_owned());
     assert!(super::table(&described).lines().next().unwrap().contains("DESCRIPTION"));
 }
 
-fn forest_of(directory: &TeamDirectory) -> Vec<(usize, &str)> {
-    super::forest(directory).into_iter().map(|(depth, team)| (depth, team.team.as_str())).collect()
+fn forest_of(directory: &TeamDirectory) -> Vec<(usize, String)> {
+    super::forest(directory).into_iter().map(|b| (b.depth, b.team.team.to_string())).collect()
+}
+
+fn tiers(teams: &[(usize, &str)]) -> Vec<(usize, String)> {
+    teams.iter().map(|(depth, team)| (*depth, (*team).to_owned())).collect()
 }
 
 #[test]
@@ -61,16 +61,15 @@ fn a_team_is_described_and_an_ant_s_team_named() {
         "team backend, within team eng: lead dev-a; members dev-a, dev-b; owner alice\ndescription: the services"
     );
     assert_eq!(team_line(&directory, &p("dev-a")), "backend (lead), within eng");
-    assert_eq!(team_line(&directory, &p("dev-b")), "backend, within eng");
-    assert_eq!(team_line(&directory, &p("boss")), "eng (lead)");
-    assert_eq!(team_line(&directory, &p("dev-z")), "none");
 }
 
 #[test]
-fn a_team_s_members_are_a_tree_with_its_lead_marked() {
+fn a_team_s_members_are_printed_as_a_tree_with_its_lead_marked() {
     let directory = forest();
     let eng = directory.team(&p("eng")).unwrap();
-    let tree = members(&directory, eng, &|ant| if *ant == p("dev-b") { "stopped".into() } else { "idle".into() });
+    let tree = ants_client::teams::members(&directory, eng, &|ant| {
+        if *ant == p("dev-b") { "stopped".into() } else { "idle".into() }
+    });
     let lines = tree_lines(&tree, &|ant| ant.to_string());
     assert_eq!(
         lines,
@@ -82,21 +81,6 @@ fn a_team_s_members_are_a_tree_with_its_lead_marked() {
             "  team web (lead dev-c)",
             "    dev-c ★ lead: idle",
         ]
-    );
-    let json = serde_json::to_value(&tree[0]).unwrap();
-    assert_eq!(json, serde_json::json!({"kind": "ant", "name": "boss", "lead": true, "state": "idle"}));
-    let shown = Shown::of(&directory, directory.team(&p("web")).unwrap());
-    assert_eq!(serde_json::to_value(&shown).unwrap()["parent"], "eng");
-}
-
-#[test]
-fn a_member_must_be_known() {
-    let directory = forest();
-    let known = BTreeSet::from([p("dev-x")]);
-    check_known(&directory, &known, &[p("dev-x"), p("web")]).unwrap();
-    assert_eq!(
-        check_known(&directory, &known, &[p("dev-x"), p("dev-y")]),
-        Err(TeamRefusal::UnknownAnt { name: p("dev-y") })
     );
     assert_eq!(parse_name("@backend").unwrap(), p("backend"));
 }
@@ -164,7 +148,7 @@ async fn a_human_creates_and_changes_a_team_of_known_ants_only() {
         "each change told on the human's own status, on the thread the team names"
     );
     let directory = directory_of(&js).await;
-    assert_eq!(forest_of(&directory), [(0, "eng"), (1, "backend")]);
+    assert_eq!(forest_of(&directory), tiers(&[(0, "eng"), (1, "backend")]));
     assert_eq!(directory.team(&p("backend")).unwrap().description.as_deref(), Some("the services"));
 
     let set = |lead: Option<&str>, no_description: bool| TeamCommand::Set {
@@ -194,7 +178,7 @@ async fn a_human_creates_and_changes_a_team_of_known_ants_only() {
     assert_eq!((&ops.lead, lead_label(&directory, ops)), (&None, "none".to_owned()));
 
     run(&nats, TeamCommand::Delete { team: p("eng") }).await.unwrap();
-    assert_eq!(forest_of(&directory_of(&js).await), [(0, "backend"), (0, "ops")]);
+    assert_eq!(forest_of(&directory_of(&js).await), tiers(&[(0, "backend"), (0, "ops")]));
     assert!(holds_team(&js, None, &p("backend")).await);
     assert!(check_no_team(&js, None, &p("backend")).await.is_err());
 }

@@ -63,7 +63,7 @@ pub fn items(data: &Data, selected: &Item, _now: DateTime<Utc>) -> Vec<Item> {
     }
     items.extend(data.channels.iter().map(|c| Item::Channel(c.channel.clone())));
     if let Some(teams) = &data.teams {
-        items.extend(crate::teams::forest(teams).into_iter().map(|(_, t)| Item::Team(t.team.clone())));
+        items.extend(crate::teams::forest(teams).into_iter().map(|b| Item::Team(b.team.team)));
         items.push(Item::NewTeam);
     }
     let mut ants: Vec<&UserId> = data.live.colony.iter().map(|e| &e.ant).collect();

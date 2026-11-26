@@ -238,7 +238,8 @@ impl Subscription for Queue {
 
 fn alice_on(server: &Server, account: Option<String>) -> Client {
     let domain = Some("hub".parse().unwrap());
-    let session = Session { human: p("alice"), domain, account, name: "ants-web".into() };
+    let capabilities = crate::device::Capabilities::all();
+    let session = Session { human: p("alice"), domain, account, name: "ants-web".into(), capabilities };
     Client::new(Rc::new(server.clone()), session)
 }
 

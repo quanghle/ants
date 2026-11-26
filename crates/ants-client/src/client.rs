@@ -2,7 +2,8 @@
 //! async-nats: the stream read back window by window ([`Client::reader`]), a message sent with its thread's owner
 //! recorded first and stored once the stream acks it ([`Client::send`]), the human's read marker moved by
 //! compare-and-set ([`Client::mark_read`]), and what is heard live ([`Client::status`], [`Client::inbox`]); beside
-//! them the colony as it is now ([`Client::colony`]) and a device's presence ([`Client::present`]).
+//! them the colony as it is now ([`Client::colony`]), a device's presence ([`Client::present`]) and the teams
+//! ([`teams`]).
 //!
 //! This is what a binding wraps, for a browser or another platform: [`Client`], [`Reader`] and the feeds carry no
 //! lifetime or type parameter, and what their calls take and return are owned values that serialize.
@@ -19,6 +20,7 @@ use ants_proto::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::device::Capabilities;
 use crate::entry::Entry;
 use crate::error::{Error, ErrorKind};
 use crate::inbox;
@@ -41,6 +43,8 @@ pub struct Session {
     pub account: Option<String>,
     /// The name the connection tells the server.
     pub name: String,
+    /// What its credentials let it do ([`Client::capabilities`]).
+    pub capabilities: Capabilities,
 }
 
 /// Which of the stream's messages a [`Reader`] reads.
@@ -145,6 +149,12 @@ impl Client {
 
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// What the human's credentials let the client do, which views a client offers: all of it on a server without
+    /// authentication.
+    pub fn capabilities(&self) -> Capabilities {
+        self.session.capabilities
     }
 
     /// Connect under the reply subjects of the human, the only ones its rights let it hear answers on.
@@ -426,6 +436,8 @@ impl InboxFeed {
         }
     }
 }
+
+pub mod teams;
 
 #[cfg(test)]
 mod tests;

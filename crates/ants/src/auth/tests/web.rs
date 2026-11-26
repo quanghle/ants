@@ -5,7 +5,7 @@
 use std::rc::Rc;
 
 use ants_client::client::{MarkRead, Session, Window};
-use ants_client::device::Credentials;
+use ants_client::device::{Capabilities, Credentials};
 use ants_client::transport::{Message, Transport as _};
 use ants_proto::{StatusEvent, StatusUpdate};
 use ants_test_support::NatsTransport;
@@ -204,7 +204,6 @@ async fn a_web_device_does_what_the_page_s_views_do_and_nothing_else() {
         subject::read_marker(&bob),
         subject::channel_reads(&alice),
         api(&format!("DIRECT.GET.{read}.{}", subject::read_marker(&bob))),
-        api(&format!("DIRECT.GET.{humans}.{}", subject::human_entry(&bob))),
         format!(
             "$KV.{}.{}",
             ants_proto::PRESENCE_BUCKET,
@@ -259,7 +258,17 @@ async fn page(
     let session = credentials.session();
     assert_eq!(
         session,
-        Session { human: alice, domain: domain.cloned(), account: Some(account), name: "ants-web".into() }
+        Session {
+            human: alice,
+            domain: domain.cloned(),
+            account: Some(account),
+            name: "ants-web".into(),
+            capabilities: Capabilities {
+                memories_read: false,
+                permissions_version: Some(ants_proto::PERMISSIONS_VERSION),
+                ..Capabilities::all()
+            },
+        }
     );
     let transport = Rc::new(NatsTransport::new(&server.url, Some(&out)));
     let client = ants_client::client::Client::new(transport.clone(), session);
@@ -384,6 +393,8 @@ async fn the_client_s_reads_and_writes_pass(server: &Server, domain: Option<&JsD
     assert_eq!((entry.seq, entry.from.as_ref(), entry.text.as_str()), (ack.sequence, Some(&dev_a), "again"));
     assert!(entry.stored_at > chrono::Utc::now() - chrono::Duration::hours(1), "{}", entry.stored_at);
 
+    Box::pin(the_teams_pass(&client, &h_js, domain)).await;
+
     // The server answers a connection in order: the refusal of this publish is the first it sent, so it refused
     // nothing the client did.
     let denied = subject::read_marker(&bob);
@@ -391,6 +402,82 @@ async fn the_client_s_reads_and_writes_pass(server: &Server, domain: Option<&JsD
     crate::test_support::eventually("the refusal", async || !transport.server_errors().is_empty()).await;
     let errors = transport.server_errors();
     assert!(errors.len() == 1 && errors[0].contains(&format!("Publish to \"{denied}\"")), "{errors:?}");
+}
+
+/// The client of a web device reads the team directory and creates, changes and deletes a team in it by
+/// compare-and-set, refused as `ants team` refuses, with the rights of its credentials; `h_js` is its human's other
+/// device, in `domain`.
+async fn the_teams_pass(
+    client: &ants_client::client::Client,
+    h_js: &async_nats::jetstream::Context,
+    domain: Option<&JsDomain>,
+) {
+    use ants_client::teams::TeamError;
+    use ants_client::teams::change::{Change, Create};
+    use ants_daemon::records::direct_kv::DirectKv;
+    use ants_proto::{TEAMS_BUCKET, TeamDirectory, TeamRefusal};
+
+    let (dev_a, dev_b) = (p("dev-a"), p("dev-b"));
+    let caps = client.capabilities();
+    assert!(caps.teams_read && caps.teams_write && !caps.stale_permissions, "{caps:?}");
+    assert_eq!(client.teams().await.unwrap().directory, TeamDirectory::default(), "no directory yet");
+    let identities = DirectKv::whole(h_js, domain, ants_proto::IDENTITIES_BUCKET).await.unwrap();
+    for ant in [&dev_a, &dev_b] {
+        identities.put(ant.as_str(), b"{}".to_vec()).await.unwrap();
+    }
+    let create = |team: &str, members: &[&str], owner: Option<&str>| Create {
+        team: p(team),
+        lead: members.first().map(|m| p(m)),
+        members: members.iter().map(|m| p(m)).collect(),
+        owner: owner.map(p),
+        description: Some("on call".to_owned()),
+    };
+
+    let created = client.create_team(create("ops", &["dev-a"], Some("alice"))).await.unwrap();
+    let ops = created.directory.directory.team(&p("ops")).unwrap();
+    assert_eq!((&ops.members[..], ops.lead.as_ref()), (&[dev_a.clone()][..], Some(&dev_a)), "{:?}", created.lines);
+    assert_eq!(client.teams().await.unwrap(), created.directory, "read back at the revision written");
+    let teams = DirectKv::whole(h_js, domain, TEAMS_BUCKET).await.unwrap();
+    let (stored, _) = ants_daemon::teams::read_checked(&teams).await.unwrap();
+    assert_eq!(stored, created.directory.directory, "as the human's other devices read it");
+
+    let refused = |e: TeamError| match e {
+        TeamError::Refused(refusal) => refusal,
+        other => panic!("not a refusal: {other}"),
+    };
+    let unknown = client.create_team(create("dev", &["dev-z"], None)).await.unwrap_err();
+    assert_eq!(refused(unknown), TeamRefusal::UnknownAnt { name: p("dev-z") });
+    let taken = client.create_team(create("dev-b", &[], None)).await.unwrap_err();
+    assert_eq!(refused(taken), TeamRefusal::NameTaken { name: dev_b.clone() });
+    let on_a_team = client.create_team(create("dev", &["dev-a"], None)).await.unwrap_err();
+    assert_eq!(refused(on_a_team), TeamRefusal::OnTeam { member: dev_a.clone(), team: p("ops") });
+    let a_human = client.create_team(create("dev", &["alice"], None)).await.unwrap_err();
+    assert!(matches!(&a_human, TeamError::Invalid(why) if why.starts_with("alice is a human")), "{a_human}");
+    let no_owner = client.create_team(create("dev", &[], Some("bob"))).await.unwrap_err();
+    assert!(matches!(&no_owner, TeamError::Invalid(why) if why.starts_with("bob is no human")), "{no_owner}");
+
+    let change = Change { add: vec![dev_b.clone()], lead: Some(Some(dev_b.clone())), ..Change::default() };
+    let changed = client.change_team(p("ops"), change).await.unwrap();
+    assert_eq!(&changed.added[..], &[dev_b.clone()][..]);
+    assert_eq!(changed.lines, ["team ops: added dev-b, lead now dev-b"]);
+    assert!(changed.directory.revision > created.directory.revision);
+    let deleted = client.delete_team(p("ops")).await.unwrap();
+    assert_eq!(deleted.directory.directory, TeamDirectory::default());
+    assert_eq!(refused(client.delete_team(p("ops")).await.unwrap_err()), TeamRefusal::NoSuchTeam { team: p("ops") });
+
+    // A directory breaking the rules, put by another writer: read as unreadable, and left as it is.
+    let mut broken = TeamDirectory::default();
+    for team in ["ops", "dev"] {
+        let mut team = ants_proto::Team::unled(p(team), p("alice"));
+        team.members.push(dev_a.clone());
+        broken.teams.push(team);
+    }
+    teams.put(ants_proto::TEAM_DIRECTORY_KEY, serde_json::to_vec(&broken).unwrap()).await.unwrap();
+    assert!(matches!(refused(client.teams().await.unwrap_err()), TeamRefusal::Unreadable { .. }));
+    let blocked = client.change_team(p("ops"), Change { remove: vec![dev_a.clone()], ..Change::default() }).await;
+    assert!(matches!(blocked.map_err(refused), Err(TeamRefusal::Unreadable { .. })));
+    teams.delete(ants_proto::TEAM_DIRECTORY_KEY).await.unwrap();
+    assert_eq!(client.teams().await.unwrap().directory, TeamDirectory::default(), "a deleted directory is empty");
 }
 
 #[tokio::test]

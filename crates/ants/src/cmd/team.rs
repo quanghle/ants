@@ -10,7 +10,7 @@ use crate::ants::colony;
 use crate::completions;
 use crate::connection::Nats;
 use crate::people::humans;
-use crate::teams::change::{Change, Create};
+use crate::teams::change::{self as edit, Change, Create};
 use crate::teams::{self, parse_name};
 
 #[derive(Subcommand, Debug)]
@@ -147,8 +147,8 @@ async fn directory(kv: &ants_daemon::records::direct_kv::DirectKv) -> Result<Tea
 async fn list(kv: &ants_daemon::records::direct_kv::DirectKv, json: bool) -> Result<()> {
     let directory = directory(kv).await?;
     if json {
-        for (_, team) in teams::forest(&directory) {
-            println!("{}", serde_json::to_string(&teams::Shown::of(&directory, team))?);
+        for branch in teams::forest(&directory) {
+            println!("{}", serde_json::to_string(&teams::Shown::of(&directory, &branch.team))?);
         }
     } else if directory.teams.is_empty() {
         println!("no teams");
@@ -169,7 +169,7 @@ async fn show(
     let entries = colony::list(js).await.inspect_err(|e| tracing::warn!("not reading the colony: {e:#}"));
     let entries = entries.unwrap_or_default();
     let now = chrono::Utc::now();
-    let tree = teams::members(&directory, team, &|ant| teams::state_of(&entries, ant, now));
+    let tree = teams::tree(&directory, team, &entries, now);
     if json {
         let shown = teams::Shown { tree: Some(tree), ..teams::Shown::of(&directory, team) };
         println!("{}", serde_json::to_string(&shown)?);
@@ -204,11 +204,11 @@ async fn change(
     command: TeamCommand,
 ) -> Result<()> {
     let humans = humans::load(js, &nats.me).await;
-    let write = async |team: &UserId, change: Change| change.write(js, nats.domain, kv, team, &humans).await;
+    let write = async |team: &UserId, change: Change| edit::change(&change, js, nats.domain, kv, team, &humans).await;
     let (id, warnings, added) = match command {
         TeamCommand::Create { team, lead, members, owner, description } => {
             let create = Create { team, lead, members, owner, description };
-            let (created, _) = create.write(js, nats.domain, kv, &nats.me.id, &humans).await?;
+            let (created, _) = edit::create(&create, js, nats.domain, kv, &nats.me.id, &humans).await?;
             (created.team, Vec::new(), created.members)
         }
         TeamCommand::Set { team, lead, no_lead, owner, no_owner, description, no_description } => {
@@ -245,7 +245,7 @@ async fn change(
             (team, warnings, Vec::new())
         }
         TeamCommand::Delete { team } => {
-            for line in teams::change::delete(kv, &team).await? {
+            for line in edit::delete(kv, &team).await? {
                 println!("{line}");
             }
             return Ok(());

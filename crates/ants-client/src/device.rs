@@ -10,7 +10,8 @@ pub mod registration;
 pub mod renewal;
 
 use ants_proto::{
-    DeviceId, JsDomain, JwtError, PERMISSIONS_VERSION, PermissionsVersion, UserId, is_web, js_domain_of, verified_jwt,
+    DeviceId, HUMANS_BUCKET, IDENTITIES_BUCKET, JsDomain, JwtError, PERMISSIONS_VERSION, Permissions,
+    PermissionsVersion, TEAM_DIRECTORY_KEY, TEAMS_BUCKET, UserId, is_web, js_domain_of, subject, verified_jwt,
     verify_user_jwt,
 };
 use chrono::{DateTime, Utc};
@@ -79,6 +80,57 @@ fn crc16(data: &[u8]) -> u16 {
     })
 }
 
+/// What a device's credentials let a client do, which views it offers: each told by the rights the user JWT lists, not
+/// by its permissions version, so a page keeps working on credentials issued before a view was added, without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capabilities {
+    /// Read the team directory ([`crate::client::Client::teams`]).
+    pub teams_read: bool,
+    /// Create, change and delete teams, reading the ants and the humans they name.
+    pub teams_write: bool,
+    /// Read an ant's memories: request them on `ants.memories.*` and hear the answers on `ants.memoried.*`.
+    pub memories_read: bool,
+    /// The permissions version the credentials carry, none for credentials carrying none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions_version: Option<PermissionsVersion>,
+    /// Whether they carry an older permissions version than this client's, or none: renewing them may add rights.
+    pub stale_permissions: bool,
+}
+
+impl Capabilities {
+    /// Everything, as on a server without authentication.
+    pub fn all() -> Self {
+        Self {
+            teams_read: true,
+            teams_write: true,
+            memories_read: true,
+            permissions_version: None,
+            stale_permissions: false,
+        }
+    }
+
+    /// What `rights`, of credentials for the hub's JetStream domain `domain` carrying the permissions version
+    /// `version`, let a client do: each view's requests allowed.
+    pub fn of(rights: &Permissions, domain: Option<&JsDomain>, version: Option<PermissionsVersion>) -> Self {
+        let api = crate::requests::api(domain);
+        let whole = |bucket: &str| rights.publishes(&format!("{api}DIRECT.GET.{}", subject::kv_stream(bucket)));
+        let put = match domain {
+            Some(_) => format!("{api}{}", subject::kv(TEAMS_BUCKET, TEAM_DIRECTORY_KEY)),
+            None => subject::kv(TEAMS_BUCKET, TEAM_DIRECTORY_KEY),
+        };
+        let humans =
+            format!("{api}DIRECT.GET.{}.{}", subject::kv_stream(HUMANS_BUCKET), subject::kv(HUMANS_BUCKET, "x"));
+        let teams_read = whole(TEAMS_BUCKET);
+        Self {
+            teams_read,
+            teams_write: teams_read && rights.publishes(&put) && whole(IDENTITIES_BUCKET) && rights.publishes(&humans),
+            memories_read: rights.publishes("ants.memories.x") && rights.hears("ants.memoried.x"),
+            permissions_version: version,
+            stale_permissions: version.is_none_or(|version| version < PERMISSIONS_VERSION),
+        }
+    }
+}
+
 /// The credentials of a device: the user JWT of its key, read and checked to be web credentials of a human, issued to
 /// that key and of no newer permissions version than this client's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +150,8 @@ pub struct Credentials {
     pub issued_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// What they let a client do, as their rights tell.
+    pub capabilities: Capabilities,
 }
 
 impl Credentials {
@@ -124,14 +178,22 @@ impl Credentials {
                 user.id, user.id
             )));
         }
-        if let Some(theirs) = PermissionsVersion::from_tags(tags()).filter(|theirs| *theirs > PERMISSIONS_VERSION) {
+        let version = PermissionsVersion::from_tags(tags());
+        if let Some(theirs) = version.filter(|theirs| *theirs > PERMISSIONS_VERSION) {
             return Err(Error::NewerPermissions { theirs, ours: PERMISSIONS_VERSION });
         }
-        let publish = body["nats"]["pub"]["allow"].as_array().into_iter().flatten().filter_map(|s| s.as_str());
+        // A user JWT listing no subjects allowed allows them all.
+        let allowed = |kind: &str| -> Vec<String> {
+            let Some(allow) = body["nats"][kind]["allow"].as_array() else { return vec![">".to_owned()] };
+            allow.iter().filter_map(|s| s.as_str()).map(str::to_owned).collect()
+        };
+        let rights = Permissions { publish: allowed("pub"), subscribe: allowed("sub") };
+        let domain = js_domain_of(rights.publish.iter().map(String::as_str));
         let time = |secs: Option<u64>| secs.and_then(|s| DateTime::from_timestamp(i64::try_from(s).ok()?, 0));
         Ok(Self {
             device: DeviceId::from_tags(tags()),
-            domain: js_domain_of(publish),
+            capabilities: Capabilities::of(&rights, domain.as_ref(), version),
+            domain,
             human: user.id,
             public_key: user.public_key,
             account: claims.iss,
@@ -147,6 +209,7 @@ impl Credentials {
             domain: self.domain.clone(),
             account: Some(self.account.clone()),
             name: CONNECTION_NAME.to_owned(),
+            capabilities: self.capabilities,
         }
     }
 
@@ -165,9 +228,9 @@ impl Credentials {
 }
 
 /// A client on a server without authentication acting as `human`, as the CLI without credentials acts as the `human`
-/// of its config.
+/// of its config: it may do everything ([`Capabilities::all`]).
 pub fn unauthenticated(human: UserId) -> Session {
-    Session { human, domain: None, account: None, name: CONNECTION_NAME.to_owned() }
+    Session { human, domain: None, account: None, name: CONNECTION_NAME.to_owned(), capabilities: Capabilities::all() }
 }
 
 /// The bus's public bootstrap credentials (`ants auth bootstrap`), with which a device asks `ants signer` to register
