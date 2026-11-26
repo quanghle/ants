@@ -3,24 +3,32 @@
 //! ([`BY`]), as it does the card. The thread's start makes it, with who started it, the repository the ant works in
 //! and when; a later start, the thread's session gone, notes only when, and so do the thread marked done and its
 //! session expiring. Each event changes the record once and a repeat nothing, so a thread takes about two events of
-//! the log, its start and its end, none per prompt. An end of a thread sense never saw start records nothing.
+//! the log, its start and its end, and one more for each prompt ending with a plan the harness reported other than
+//! the record's ([`EventKind::ThreadPlanned`]): the plan the brief shows ([`Plan`]), kept here rather than in the
+//! resume register, which the ant replaces by compare-and-set and a write of sense's would refuse. An end, or a plan,
+//! of a thread sense never saw start records nothing.
 //!
 //! A clone inherits no record ([`crate::fork::KEPT`]); an export carries them with the rest of the log.
 
-use ants_proto::ThreadId;
+use std::fmt::Write as _;
+
 use ants_proto::provider::{Event, EventKind, Origin};
-use chrono::{DateTime, Utc};
+use ants_proto::{MAX_TIMELINE_STEPS, MAX_TIMELINE_TITLE, PlanStep, ThreadId};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::identity::BY;
 use crate::items::{ItemId, ItemValues};
+use crate::sanitize::{Limit, sanitize_title};
 use crate::store::{Items, StoreError, read_modify_write};
 
 /// The kind of a thread's record.
 pub const KIND: &str = "thread";
 /// How many ids of the events last applied a record keeps, so a repeated event changes nothing.
 const EVENTS_KEPT: usize = 8;
+/// The most characters of a plan step's status.
+const STATUS_CHARS: usize = 20;
 
 /// A thread's record, as sense keeps it: never written by the ant. Its revisions and their times are the item's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,8 +50,54 @@ pub struct Record {
     /// When its session last expired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expired: Option<DateTime<Utc>>,
+    /// The plan the harness last reported on the thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
     /// The ids of the events last applied, the latest last.
     pub events: Vec<Uuid>,
+}
+
+/// The plan a harness last reported on a thread, as a prompt ended with it: its steps, sanitized, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Plan {
+    pub steps: Vec<PlanStep>,
+    pub at: DateTime<Utc>,
+}
+
+impl Plan {
+    /// The plan of `steps` reported at `at`: at most [`MAX_TIMELINE_STEPS`], each sanitized and cut, the blank ones
+    /// left out.
+    fn of(steps: &[PlanStep], at: DateTime<Utc>) -> Self {
+        let clean = |text: &str, max: usize| {
+            let text: String = text.trim().chars().take(max).collect();
+            sanitize_title(&text, Limit::Chars(max)).map_or(text, |clean| clean.text.trim().to_owned())
+        };
+        let steps = steps
+            .iter()
+            .map(|step| PlanStep {
+                content: clean(&step.content, MAX_TIMELINE_TITLE),
+                status: clean(&step.status, STATUS_CHARS),
+            })
+            .filter(|step| !step.content.is_empty())
+            .take(MAX_TIMELINE_STEPS)
+            .collect();
+        Self { steps, at }
+    }
+
+    /// The plan as brief text: a line a step, `[x]` done, `[>]` in progress, `[ ]` pending.
+    pub fn text(&self) -> String {
+        let at = self.at.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let mut out = format!("Plan the harness last reported ({at}):\n");
+        for step in &self.steps {
+            let mark = match step.status.as_str() {
+                "completed" => "[x]",
+                "in_progress" => "[>]",
+                _ => "[ ]",
+            };
+            let _ = writeln!(out, "- {mark} {}", step.content);
+        }
+        out
+    }
 }
 
 impl ItemValues for Record {
@@ -61,6 +115,7 @@ impl Record {
             restarted: None,
             done: None,
             expired: None,
+            plan: None,
             events: vec![event.id],
         }
     }
@@ -70,10 +125,18 @@ impl Record {
         if self.events.contains(&event.id) {
             return;
         }
-        match event.kind {
+        match &event.kind {
             EventKind::ThreadStarted { .. } => self.restarted = Some(event.at),
             EventKind::ThreadDone => self.done = Some(event.at),
             EventKind::ThreadExpired => self.expired = Some(event.at),
+            EventKind::ThreadPlanned { steps } => {
+                let plan = Plan::of(steps, event.at);
+                // The same plan reported again changes nothing, not even the events applied.
+                if self.plan.as_ref().is_some_and(|kept| kept.steps == plan.steps) || plan.steps.is_empty() {
+                    return;
+                }
+                self.plan = Some(plan);
+            }
             _ => return,
         }
         self.events.push(event.id);
@@ -84,7 +147,13 @@ impl Record {
 
 /// Whether events of `kind` change a thread's record.
 pub fn touches_record(kind: &EventKind) -> bool {
-    matches!(kind, EventKind::ThreadStarted { .. } | EventKind::ThreadDone | EventKind::ThreadExpired)
+    matches!(
+        kind,
+        EventKind::ThreadStarted { .. }
+            | EventKind::ThreadDone
+            | EventKind::ThreadExpired
+            | EventKind::ThreadPlanned { .. }
+    )
 }
 
 /// The record of `thread` in `items`; none before sense saw it start.
@@ -207,12 +276,56 @@ mod tests {
             restarted: Some(at(20)),
             done: Some(at(30)),
             expired: Some(at(10)),
+            plan: None,
             events: (1..=4).map(Uuid::from_u128).collect(),
         };
         assert_eq!(record, expected, "the first start kept");
         let item = items.get(&id).await.unwrap().unwrap();
         assert_eq!((item.kind.as_str(), item.updated.by.as_str()), (KIND, BY));
         assert_eq!(records(&*items, 10).await.unwrap(), [expected]);
+    }
+
+    fn step(content: &str, status: &str) -> PlanStep {
+        PlanStep { content: content.to_owned(), status: status.to_owned() }
+    }
+
+    fn planned(id: u128, minute: u32, steps: Vec<PlanStep>) -> Event {
+        event(id, minute, EventKind::ThreadPlanned { steps })
+    }
+
+    #[tokio::test]
+    async fn a_plan_reported_otherwise_replaces_the_one_kept_and_the_same_plan_changes_nothing() {
+        let (sense, items) = sense().await;
+        let id = ItemId::named(KIND, THREAD);
+        let revision = async || items.get(&id).await.unwrap().map_or(0, |item| item.revision);
+        sense.event(planned(1, 0, vec![step("Read the code", "pending")])).await.unwrap();
+        assert_eq!(revision().await, 0, "no record of a thread sense never saw start");
+
+        sense.event(started(2, 1, "alice", "github.com/o/r")).await.unwrap();
+        let first = vec![step("Read the code", "completed"), step("Write\u{202e} the fix", "in_progress")];
+        sense.event(planned(3, 2, first.clone())).await.unwrap();
+        assert_eq!(revision().await, 2);
+        sense.event(planned(4, 3, first)).await.unwrap();
+        assert_eq!(revision().await, 2, "the same plan from the next prompt changes nothing");
+        sense.event(planned(5, 4, vec![step("  ", "pending")])).await.unwrap();
+        assert_eq!(revision().await, 2, "a plan of blank steps is none");
+
+        let thread = THREAD.parse().unwrap();
+        let plan = record(&*items, &thread).await.unwrap().unwrap().plan.unwrap();
+        let steps = vec![step("Read the code", "completed"), step("Write the fix", "in_progress")];
+        assert_eq!(plan, Plan { steps, at: at(2) }, "sanitized");
+        assert_eq!(
+            plan.text(),
+            "Plan the harness last reported (2025-01-01T10:02:00Z):\n- [x] Read the code\n- [>] Write the fix\n"
+        );
+
+        let next = vec![step("Ship it", "pending")];
+        sense.event(planned(6, 5, next.clone())).await.unwrap();
+        assert_eq!(revision().await, 3);
+        let plan = record(&*items, &thread).await.unwrap().unwrap().plan.unwrap();
+        assert_eq!(plan, Plan { steps: next, at: at(5) });
+        let register = items.get(&ItemId::named(super::super::CHECKPOINT, THREAD)).await.unwrap();
+        assert_eq!(register, None, "the resume register is the ant's alone");
     }
 
     #[tokio::test]

@@ -225,6 +225,7 @@ Calls and events:
   - `ant_cloned` (`from`, `from_identity`);
   - `thread_started` (`origin`; `repo`, the repository of the ant's working directory, named and left out as the context's `repo`);
   - `thread_done`, `thread_expired`;
+  - `thread_planned` (`steps`, each `{content, status}`: the plan the prompt ended with);
   - `session_lost`;
   - `session_rebuilt` (`reason`: `lost` or `overflow`).
 - Events are sent in order per ant and at least once; a repeat carries the same `id`. A provider acks a kind it does not know.
@@ -274,7 +275,7 @@ The message.
 
 ### Lifecycle events
 
-ants sends an ant's provider its lifecycle events only when both declared `events` at initialize, as sense does: it writes them on the ant's card and the thread's record ([sense.md](sense.md#identity)). Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply.
+ants sends an ant's provider its lifecycle events only when both declared `events` at initialize, as sense does: it writes them on the ant's card and the thread's record ([sense.md](sense.md#identity)). Each event carries the ant, the id of its identity record, the thread when there is one and the time, never a message, prompt or reply; a `thread_planned` event carries the harness's own plan.
 
 | Kind | Sent when |
 |---|---|
@@ -285,6 +286,7 @@ ants sends an ant's provider its lifecycle events only when both declared `event
 | `ant_moved`, `ant_renamed` | `ants ant import` queues `ant_moved`, then `ant_renamed` under `--as`, in the new home; the ant gets no `ant_added`. No other rename exists, and a daemon of the same bus taking an ant over is not a move. |
 | `thread_started` | A message comes on a thread the ant holds no session of, with the message's `origin` and the repository of the ant's working directory (`repo`). |
 | `thread_expired` | A thread's worktree goes because its session expired (threads in worktrees only). |
+| `thread_planned` | A prompt on the thread ends with a plan the harness reported: its steps as last reported (`steps`, each `{content, status}`, status `pending`, `in_progress` or `completed`), redacted and cut as a [timeline](hooks.md#timeline-on-antstimelinethreadant) record keeps them. Sense keeps it in the thread's record and shows it in the brief ([sense.md](sense.md#resume-registers-and-handoffs)). |
 | `session_lost`, `session_rebuilt` | A stored session fails to resume and a new one starts (`lost`); the harness moves to a new session on a full context window (`overflow`). |
 | `thread_done` | A thread the ant holds a session of is marked done (`ants thread done`, an assistant's `done_for_human`), at the time it was marked. Each marking puts its own `done.<thread>.<mark>` entry in `ants_threads`, kept 30 days, before the done state `done.<thread>`; the daemon hears each marking through the ant's durable consumer `done-<ant>`, filtered on `done.*.*`, one at a time, and acks it once the event is queued, so a thread marked done while no daemon served the ant is told once one does within those 30 days, unless the ant was retired meanwhile; a repeat carries the same id. A done state cleared (`ants thread undone`) or marked again tells nothing of its own and takes back no marking, even one not yet heard of; a thread marked done twice is told twice. |
 

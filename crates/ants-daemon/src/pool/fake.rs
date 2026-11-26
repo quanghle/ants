@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, ForkSessionRequest, ForkSessionResponse,
     Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, SessionCapabilities, SessionForkCapabilities, SessionId,
-    SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallUpdate, ToolCallUpdateFields,
-    ToolKind, Usage, UsageUpdate,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    SessionCapabilities, SessionForkCapabilities, SessionId, SessionNotification, SessionUpdate, StopReason,
+    TextContent, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind, Usage, UsageUpdate,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, Client, DynConnectTo, Error};
@@ -335,6 +335,13 @@ impl Fake {
         for i in 0..arg("tools").map_or(0, |n| n as u64) {
             let call = SessionUpdate::ToolCall(ToolCall::new(format!("call-{i}"), "tool"));
             sender.send_notification(SessionNotification::new(session.clone(), call))?;
+        }
+        if words.contains(&"plans") {
+            let entries =
+                [("Read the code", PlanEntryStatus::Completed), ("Write the fix", PlanEntryStatus::InProgress)]
+                    .map(|(content, status)| PlanEntry::new(content, PlanEntryPriority::Medium, status));
+            let plan = SessionUpdate::Plan(Plan::new(entries.into()));
+            sender.send_notification(SessionNotification::new(session.clone(), plan))?;
         }
         if let Some(total) = arg("cost") {
             let cost = Cost::new(total, "USD");

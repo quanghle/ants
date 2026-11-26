@@ -27,6 +27,7 @@ use crate::records::{self, RecordItem};
 use crate::skill::{self, Skill};
 use crate::store::{Items, StoreError};
 use crate::thread::experience::Experience;
+use crate::thread::record::Plan;
 use crate::thread::{self, Handoff, Register};
 use crate::{Answer, Sense, persona, promise, remind, task};
 
@@ -230,7 +231,8 @@ async fn sections(items: &dyn Items, context: &CallContext, card: Option<&Card>)
     sections.push(identity_section(card, context, experience.as_ref(), reviews.as_ref()));
     sections.push(persona_section(persona::current(items).await?.as_ref()));
     sections.push(self_model_section(records::self_model(items).await?.as_ref()));
-    sections.push(register_section(thread::register(items, &context.thread).await?.as_ref()));
+    let plan = thread::record::record(items, &context.thread).await?.and_then(|record| record.plan);
+    sections.push(register_section(thread::register(items, &context.thread).await?.as_ref(), plan.as_ref()));
     let mut handoffs = thread::unacknowledged(items, MAX_HANDOFFS + 1).await?;
     let more = handoffs.len() > MAX_HANDOFFS;
     handoffs.truncate(MAX_HANDOFFS);
@@ -422,12 +424,20 @@ fn relationships_section(found: &[RecordItem]) -> Option<Section> {
     Some(section)
 }
 
-fn register_section(register: Option<&Register>) -> Section {
+/// The section of the thread: its resume register, then the plan the harness last reported on it.
+fn register_section(register: Option<&Register>, plan: Option<&Plan>) -> Section {
+    let plan = plan.map_or_default(|plan| format!("\n{}", plan.text().trim_end()));
     match register {
-        Some(register) => Section::cut_with("## This thread", register.text().trim_end().to_owned(), thread::READ),
-        None => {
+        Some(register) => {
+            Section::cut_with("## This thread", format!("{}{plan}", register.text().trim_end()), thread::READ)
+        }
+        None if plan.is_empty() => {
             let body = "No resume register yet: start one with sense_checkpoint, without a revision.";
             Section::whole("## This thread".to_owned(), body.to_owned())
+        }
+        None => {
+            let body = format!("No resume register yet: start one with sense_checkpoint, without a revision.{plan}");
+            Section::cut_with("## This thread", body, thread::READ)
         }
     }
 }

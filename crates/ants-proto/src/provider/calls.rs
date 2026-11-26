@@ -253,6 +253,12 @@ pub enum EventKind {
     },
     ThreadDone,
     ThreadExpired,
+    /// A prompt on the thread ended with a plan the harness reported: its steps as last reported, cut to what a
+    /// timeline record keeps ([`crate::TimelineEntry::plan`]) and redacted as the timeline is. The harness's own plan,
+    /// never a message, prompt or reply.
+    ThreadPlanned {
+        steps: Vec<crate::PlanStep>,
+    },
     /// The harness lost the thread's session.
     SessionLost,
     /// The thread's session was started again.

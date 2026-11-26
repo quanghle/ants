@@ -101,5 +101,19 @@ expression: value
     "at": "2025-01-01T12:02:00Z",
     "kind": "session_rebuilt",
     "reason": "overflow"
+  },
+  {
+    "id": "019a7d2e-0000-7000-8000-00000000000c",
+    "ant": "dev-a",
+    "identity": "0f1e",
+    "thread": "019a7d2c-0000-7000-8000-000000000001",
+    "at": "2025-01-01T12:02:00Z",
+    "kind": "thread_planned",
+    "steps": [
+      {
+        "content": "Write the tests",
+        "status": "in_progress"
+      }
+    ]
   }
 ]

@@ -609,7 +609,8 @@ struct InboxSettings<'a> {
 struct Provider<'a> {
     /// The ant's identity record, which counts each prompt completed; None when it cannot be read.
     identity: Option<&'a Identity>,
-    /// Told of the threads the ant starts ([`Inbox::thread_started`]); None when its provider takes no events.
+    /// Told of the threads the ant starts ([`Inbox::thread_started`]) and of the plans its prompts end with; None when
+    /// its provider takes no events.
     lifecycle: Option<&'a Lifecycle>,
     /// The ant's sense, which takes its sage's answers to the reviews of its dreams ([`Inbox::arrived`]) and is told
     /// of its growth ([`Inbox::count_prompt`]); None when sense is not its provider.

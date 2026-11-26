@@ -1,6 +1,7 @@
 //! The lifecycle events of the ants a process serves ([`Event`]), told to each ant's provider when it agreed on
 //! [`Capability::Events`]: in order per ant and at least once, a repeat carrying the same id. An event says what
-//! happened, to which ant and identity, on which thread and when: never what a message, prompt or reply said.
+//! happened, to which ant and identity, on which thread and when: never what a message, prompt or reply said, a
+//! thread planned carrying only the plan the harness reported ([`Lifecycle::thread_planned`]).
 //!
 //! An ant's events wait in its home, one JSON [`Event`] a line in [`QUEUE`], from when they happen until its provider
 //! acks them, so a restarted daemon tells those left. Each home's queue has a lock, a file and, while it holds
@@ -22,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ants_proto::provider::{BoxFuture, Capability, Connected, Event, EventKind, Origin, RpcError};
-use ants_proto::{ThreadId, UserId};
+use ants_proto::{PlanStep, ThreadId, TimelineEntry, UserId};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -472,6 +473,13 @@ impl Lifecycle {
         let id = derived(&[self.ant.as_str(), thread.as_str(), message, "thread_started"]);
         let repo = self.workdir.as_deref().and_then(super::context::repository);
         self.push(event(id, &self.ant, &self.identity, Some(thread), EventKind::ThreadStarted { origin, repo })).await;
+    }
+
+    /// Tell of the plan `steps` a prompt on `thread` ended with, as the harness last reported it, cut to what a
+    /// timeline record keeps.
+    pub async fn thread_planned(&self, thread: &ThreadId, steps: &[PlanStep]) {
+        let TimelineEntry::Plan { steps } = TimelineEntry::plan(steps) else { return };
+        self.emit(EventKind::ThreadPlanned { steps }, Some(thread)).await;
     }
 
     /// Tell of `thread` marked done at `at`, by the done state stored at sequence `seq` of the stream of
