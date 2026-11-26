@@ -1,7 +1,7 @@
 //! What a human sends: who gets a message naming no one ([`unaddressed`]), the human's assistant while its grant
 //! stands ([`designated`]), else the messenger, where a message to a team goes ([`addressed`]), and the [`Envelope`]
 //! of a message as `ants ask` sends it ([`ask_envelope`], `compose`), refused when its text @mentions several users
-//! ([`one_recipient`]).
+//! ([`one_recipient`]); and where the bar of a client sends what is typed in it, as its title says ([`bar`]).
 
 use ants_proto::{
     AssistantGrant, Envelope, GrantError, Quote, TeamDirectory, TeamRefusal, ThreadId, UserId, Uuid,
@@ -11,6 +11,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+
+pub mod bar;
 
 /// Who a message goes to, with the human it assists when it got the message as that human's assistant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

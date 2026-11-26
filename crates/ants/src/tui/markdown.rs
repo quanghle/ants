@@ -2,11 +2,10 @@
 //! code blocks (behind a dim bar, neither highlighted nor reflowed, a line too wide going on below after a mark),
 //! nested lists, block quotes, links with their URL, rules and simple tables, as styled lines no wider than asked.
 //!
-//! A line break in the text stays one, as in a chat message, rather than joining the lines as CommonMark does. Control
-//! characters, as text or as character references, are dropped (tabs become spaces), so no escape sequence of a
-//! message reaches the terminal.
+//! The text is parsed as every client parses it ([`ants_client::markdown`]): a line break in it stays one, and no
+//! control character, as text or as character reference, reaches the terminal (tabs become spaces).
 
-use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use ants_client::markdown::{self, Alignment, Block, Inline, Item};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
@@ -21,11 +20,8 @@ const CODE_GOES_ON: &str = "▎↳";
 /// `text`, markdown, as lines at most `width` columns wide: a code block's line too wide for it is cut at the width, the
 /// rest going on below, and a table too wide for it has each row wrapped.
 pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
-    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut renderer = Renderer::new(width.max(1));
-    for event in Parser::new_ext(text, options) {
-        renderer.event(event);
-    }
+    renderer.blocks(&markdown::parse(text).blocks);
     renderer.flush();
     renderer.lines
 }
@@ -34,19 +30,14 @@ fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
 }
 
-/// `text` without control characters, a tab as a space.
-fn clean(text: &str) -> String {
-    text.chars().filter_map(|c| if c == '\t' { Some(' ') } else { (!c.is_control()).then_some(c) }).collect()
-}
-
-/// A line of a code block without control characters, its tabs expanded.
-fn clean_code(line: &str) -> String {
+/// A line of a code block, its tabs expanded.
+fn expand_tabs(line: &str) -> String {
     let mut out = String::new();
     for c in line.chars() {
         if c == '\t' {
             let to = (out.width() / TAB + 1) * TAB;
             out.extend(std::iter::repeat_n(' ', to - out.width()));
-        } else if !c.is_control() {
+        } else {
             out.push(c);
         }
     }
@@ -54,7 +45,7 @@ fn clean_code(line: &str) -> String {
 }
 
 /// What encloses the text being rendered.
-enum Block {
+enum Frame {
     Quote,
     List(Option<u64>),
     /// A list item: its marker shows on its first line, spaces as wide on the others.
@@ -81,13 +72,14 @@ struct Table {
 struct Renderer {
     width: usize,
     lines: Vec<Line<'static>>,
-    blocks: Vec<Block>,
+    frames: Vec<Frame>,
     /// The lines of the paragraph, heading or item text being rendered, split where the text breaks them.
     inline: Vec<Vec<Span<'static>>>,
     styles: Vec<Style>,
     links: Vec<Link>,
-    code: Option<String>,
     table: Option<Table>,
+    /// The task marker of the item being rendered, due before its text.
+    task: Option<&'static str>,
     /// Whether a blank line is due before the next block.
     gap: bool,
 }
@@ -97,176 +89,169 @@ impl Renderer {
         Self {
             width,
             lines: Vec::new(),
-            blocks: Vec::new(),
+            frames: Vec::new(),
             inline: Vec::new(),
             styles: Vec::new(),
             links: Vec::new(),
-            code: None,
             table: None,
+            task: None,
             gap: false,
         }
     }
 
-    fn event(&mut self, event: Event<'_>) {
-        match event {
-            Event::Start(tag) => self.start(tag),
-            Event::End(tag) => self.end(tag),
-            Event::Text(text) => match &mut self.code {
-                Some(code) => code.push_str(&text),
-                None => self.text(&text, self.style()),
-            },
-            Event::Code(code) => self.text(&code, self.style().fg(Color::Yellow)),
-            Event::InlineMath(text) | Event::DisplayMath(text) | Event::FootnoteReference(text) => {
-                self.text(&text, self.style());
-            }
-            Event::InlineHtml(html) => self.text(&html, self.style()),
-            Event::Html(html) => {
-                for line in html.lines() {
-                    self.text(line, self.style());
-                    self.inline.push(Vec::new());
-                }
-            }
-            Event::SoftBreak | Event::HardBreak => self.inline.push(Vec::new()),
-            Event::Rule => {
-                self.open();
-                let width = self.width.saturating_sub(self.indent()).max(1);
-                self.emit(vec![Span::styled("─".repeat(width), dim())]);
-                self.gap = true;
-            }
-            Event::TaskListMarker(done) => self.text(if done { "[x] " } else { "[ ] " }, self.style()),
+    fn blocks(&mut self, blocks: &[Block]) {
+        for block in blocks {
+            self.block(block);
         }
     }
 
-    fn start(&mut self, tag: Tag<'_>) {
-        match tag {
-            Tag::Paragraph | Tag::HtmlBlock => self.open(),
-            Tag::Heading { level, .. } => {
+    fn block(&mut self, block: &Block) {
+        match block {
+            Block::Paragraph { content } => {
+                self.open();
+                self.text_of_block(content);
+                self.close();
+            }
+            Block::Plain { content } => self.text_of_block(content),
+            Block::Heading { level, content } => {
                 self.open();
                 let style = Style::new().add_modifier(Modifier::BOLD);
-                let style = if level == HeadingLevel::H1 { style.add_modifier(Modifier::UNDERLINED) } else { style };
-                self.styles.push(style);
-            }
-            Tag::BlockQuote(_) => {
-                self.open();
-                self.blocks.push(Block::Quote);
-            }
-            Tag::CodeBlock(_) => {
-                self.open();
-                self.code = Some(String::new());
-            }
-            Tag::List(start) => {
-                self.open();
-                self.blocks.push(Block::List(start));
-            }
-            Tag::Item => {
-                self.open();
-                let depth = self.blocks.iter().filter(|b| matches!(b, Block::List(_))).count();
-                let marker = match self.blocks.iter_mut().rev().find(|b| matches!(b, Block::List(_))) {
-                    Some(Block::List(Some(n))) => {
-                        *n += 1;
-                        format!("{}. ", *n - 1)
-                    }
-                    _ => format!("{} ", ["•", "◦", "▪"][depth.saturating_sub(1) % 3]),
-                };
-                self.blocks.push(Block::Item { marker, shown: false });
-            }
-            Tag::Table(alignments) => {
-                self.open();
-                self.table = Some(Table { alignments, rows: Vec::new() });
-            }
-            Tag::TableHead | Tag::TableRow => {
-                if let Some(table) = &mut self.table {
-                    table.rows.push((matches!(tag, Tag::TableHead), Vec::new()));
-                }
-            }
-            Tag::TableCell => {
-                if let Some((_, cells)) = self.table.as_mut().and_then(|t| t.rows.last_mut()) {
-                    cells.push(Vec::new());
-                }
-            }
-            Tag::Emphasis => self.styles.push(Style::new().add_modifier(Modifier::ITALIC)),
-            Tag::Strong => self.styles.push(Style::new().add_modifier(Modifier::BOLD)),
-            Tag::Strikethrough => self.styles.push(Style::new().add_modifier(Modifier::CROSSED_OUT)),
-            Tag::Link { dest_url, .. } => {
-                self.styles.push(Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED));
-                self.links.push(Link { url: clean(&dest_url), text: String::new(), image: false });
-            }
-            Tag::Image { dest_url, .. } => {
-                self.text("[image: ", self.style());
-                self.styles.push(Style::new());
-                self.links.push(Link { url: clean(&dest_url), text: String::new(), image: true });
-            }
-            Tag::Superscript
-            | Tag::Subscript
-            | Tag::FootnoteDefinition(_)
-            | Tag::DefinitionList
-            | Tag::DefinitionListTitle
-            | Tag::DefinitionListDefinition
-            | Tag::MetadataBlock(_) => self.styles.push(Style::new()),
-        }
-    }
-
-    fn end(&mut self, tag: TagEnd) {
-        match tag {
-            TagEnd::Paragraph | TagEnd::HtmlBlock => self.close(),
-            TagEnd::Heading(_) => {
+                self.styles.push(if *level == 1 { style.add_modifier(Modifier::UNDERLINED) } else { style });
+                self.text_of_block(content);
                 self.close();
                 self.styles.pop();
             }
-            TagEnd::BlockQuote(_) => {
+            Block::Quote { blocks } => {
+                self.open();
+                self.frames.push(Frame::Quote);
+                self.blocks(blocks);
                 self.close();
-                self.blocks.pop();
+                self.frames.pop();
             }
-            TagEnd::CodeBlock => {
-                let code = self.code.take().unwrap_or_default();
+            Block::Code { text, .. } => {
+                self.open();
                 let width = self.width.saturating_sub(self.indent() + CODE_BAR.width()).max(1);
-                for line in code.lines() {
-                    for (n, row) in cut(&clean_code(line), width).into_iter().enumerate() {
+                for line in text.lines() {
+                    for (n, row) in cut(&expand_tabs(line), width).into_iter().enumerate() {
                         let bar = if n == 0 { CODE_BAR } else { CODE_GOES_ON };
                         self.emit(vec![Span::styled(bar, dim()), Span::raw(row)]);
                     }
                 }
                 self.gap = true;
             }
-            TagEnd::List(_) => {
+            Block::List { start, items } => {
+                self.open();
+                self.frames.push(Frame::List(*start));
+                for item in items {
+                    self.item(item);
+                }
                 self.flush();
-                self.blocks.pop();
+                self.frames.pop();
                 // A list nested in an item is part of the item, which takes no gap after it.
-                self.gap = !matches!(self.blocks.last(), Some(Block::Item { .. }));
+                self.gap = !matches!(self.frames.last(), Some(Frame::Item { .. }));
             }
-            TagEnd::Item => {
-                self.flush();
-                self.blocks.pop();
-            }
-            TagEnd::Table => {
+            Block::Table { alignments, head, rows } => {
+                self.open();
+                self.table = Some(Table { alignments: alignments.clone(), rows: Vec::new() });
+                for (head, cells) in std::iter::once((true, head)).chain(rows.iter().map(|row| (false, row))) {
+                    if let Some(table) = &mut self.table {
+                        table.rows.push((head, Vec::new()));
+                    }
+                    for cell in cells {
+                        if let Some((_, cells)) = self.table.as_mut().and_then(|t| t.rows.last_mut()) {
+                            cells.push(Vec::new());
+                        }
+                        self.inlines(cell);
+                    }
+                }
                 let table = self.table.take().unwrap_or_default();
                 self.table(table);
                 self.gap = true;
             }
-            TagEnd::TableHead | TagEnd::TableRow | TagEnd::TableCell => {}
-            TagEnd::Link | TagEnd::Image => {
-                self.styles.pop();
-                let Some(link) = self.links.pop() else { return };
-                let named = link.text != link.url && Some(link.text.as_str()) != link.url.strip_prefix("mailto:");
-                let url = if named && !link.url.is_empty() { format!(" ({})", link.url) } else { String::new() };
-                if link.image {
-                    self.text(&format!("]{url}"), self.style());
-                } else if !url.is_empty() {
-                    self.text(&url, self.style().patch(dim()));
-                }
+            Block::Rule => {
+                self.open();
+                let width = self.width.saturating_sub(self.indent()).max(1);
+                self.emit(vec![Span::styled("─".repeat(width), dim())]);
+                self.gap = true;
             }
-            TagEnd::Emphasis
-            | TagEnd::Strong
-            | TagEnd::Strikethrough
-            | TagEnd::Superscript
-            | TagEnd::Subscript
-            | TagEnd::FootnoteDefinition
-            | TagEnd::DefinitionList
-            | TagEnd::DefinitionListTitle
-            | TagEnd::DefinitionListDefinition
-            | TagEnd::MetadataBlock(_) => {
-                self.styles.pop();
+        }
+    }
+
+    fn item(&mut self, item: &Item) {
+        self.open();
+        let depth = self.frames.iter().filter(|f| matches!(f, Frame::List(_))).count();
+        let marker = match self.frames.iter_mut().rev().find(|f| matches!(f, Frame::List(_))) {
+            Some(Frame::List(Some(n))) => {
+                *n += 1;
+                format!("{}. ", *n - 1)
             }
+            _ => format!("{} ", ["•", "◦", "▪"][depth.saturating_sub(1) % 3]),
+        };
+        self.frames.push(Frame::Item { marker, shown: false });
+        self.task = item.task.map(|done| if done { "[x] " } else { "[ ] " });
+        self.blocks(&item.blocks);
+        self.task = None;
+        self.flush();
+        self.frames.pop();
+    }
+
+    /// Add the text of a block, after the task marker of the item it begins, if any.
+    fn text_of_block(&mut self, content: &[Inline]) {
+        if let Some(task) = self.task.take() {
+            self.text(task, self.style());
+        }
+        self.inlines(content);
+    }
+
+    fn inlines(&mut self, content: &[Inline]) {
+        for inline in content {
+            self.inline(inline);
+        }
+    }
+
+    fn inline(&mut self, inline: &Inline) {
+        match inline {
+            Inline::Text { text } => self.text(text, self.style()),
+            Inline::Code { text } => self.text(text, self.style().fg(Color::Yellow)),
+            Inline::Break => self.inline.push(Vec::new()),
+            Inline::Emphasis { content } => self.styled(Style::new().add_modifier(Modifier::ITALIC), content),
+            Inline::Strong { content } => self.styled(Style::new().add_modifier(Modifier::BOLD), content),
+            Inline::Strikethrough { content } => {
+                self.styled(Style::new().add_modifier(Modifier::CROSSED_OUT), content);
+            }
+            Inline::Link { url, content, .. } => {
+                self.styles.push(Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED));
+                self.links.push(Link { url: url.clone(), text: String::new(), image: false });
+                self.inlines(content);
+                self.end_link();
+            }
+            Inline::Image { url, alt, .. } => {
+                self.text("[image: ", self.style());
+                self.styles.push(Style::new());
+                self.links.push(Link { url: url.clone(), text: String::new(), image: true });
+                self.inlines(alt);
+                self.end_link();
+            }
+        }
+    }
+
+    /// Add `content` in `style`, over the style it is in.
+    fn styled(&mut self, style: Style, content: &[Inline]) {
+        self.styles.push(style);
+        self.inlines(content);
+        self.styles.pop();
+    }
+
+    /// End the link or image being rendered: its URL after its text, unless the text is the URL.
+    fn end_link(&mut self) {
+        self.styles.pop();
+        let Some(link) = self.links.pop() else { return };
+        let named = link.text != link.url && Some(link.text.as_str()) != link.url.strip_prefix("mailto:");
+        let url = if named && !link.url.is_empty() { format!(" ({})", link.url) } else { String::new() };
+        if link.image {
+            self.text(&format!("]{url}"), self.style());
+        } else if !url.is_empty() {
+            self.text(&url, self.style().patch(dim()));
         }
     }
 
@@ -277,22 +262,21 @@ impl Renderer {
 
     /// Add inline text: to the table cell being rendered, else to the current line.
     fn text(&mut self, text: &str, style: Style) {
-        let text = clean(text);
         if text.is_empty() {
             return;
         }
         if let Some(link) = self.links.last_mut() {
-            link.text.push_str(&text);
+            link.text.push_str(text);
         }
         if let Some(cell) = self.table.as_mut().and_then(|t| t.rows.last_mut()).and_then(|(_, cells)| cells.last_mut())
         {
-            cell.push(Span::styled(text, style));
+            cell.push(Span::styled(text.to_owned(), style));
             return;
         }
         if self.inline.is_empty() {
             self.inline.push(Vec::new());
         }
-        self.inline.last_mut().expect("a line").push(Span::styled(text, style));
+        self.inline.last_mut().expect("a line").push(Span::styled(text.to_owned(), style));
     }
 
     /// Start a block: render the text before it, and a blank line if due.
@@ -300,11 +284,11 @@ impl Renderer {
         self.flush();
         if std::mem::take(&mut self.gap) && !self.lines.is_empty() {
             let mut prefix = String::new();
-            for block in &self.blocks {
-                match block {
-                    Block::Quote => prefix.push_str("│ "),
-                    Block::Item { marker, .. } => prefix.push_str(&" ".repeat(marker.width())),
-                    Block::List(_) => {}
+            for frame in &self.frames {
+                match frame {
+                    Frame::Quote => prefix.push_str("│ "),
+                    Frame::Item { marker, .. } => prefix.push_str(&" ".repeat(marker.width())),
+                    Frame::List(_) => {}
                 }
             }
             self.lines.push(Line::styled(prefix.trim_end().to_owned(), dim()));
@@ -332,12 +316,12 @@ impl Renderer {
 
     /// How wide the prefix of a line is here.
     fn indent(&self) -> usize {
-        self.blocks
+        self.frames
             .iter()
-            .map(|b| match b {
-                Block::Quote => 2,
-                Block::Item { marker, .. } => marker.width(),
-                Block::List(_) => 0,
+            .map(|f| match f {
+                Frame::Quote => 2,
+                Frame::Item { marker, .. } => marker.width(),
+                Frame::List(_) => 0,
             })
             .sum()
     }
@@ -345,10 +329,10 @@ impl Renderer {
     /// Add a line, after the quote bars and list markers of the blocks it is in.
     fn emit(&mut self, spans: Vec<Span<'static>>) {
         let mut line = Vec::new();
-        for block in &mut self.blocks {
-            match block {
-                Block::Quote => line.push(Span::styled("│ ", dim())),
-                Block::Item { marker, shown } => {
+        for frame in &mut self.frames {
+            match frame {
+                Frame::Quote => line.push(Span::styled("│ ", dim())),
+                Frame::Item { marker, shown } => {
                     if *shown {
                         line.push(Span::raw(" ".repeat(marker.width())));
                     } else {
@@ -356,7 +340,7 @@ impl Renderer {
                         *shown = true;
                     }
                 }
-                Block::List(_) => {}
+                Frame::List(_) => {}
             }
         }
         line.extend(spans);

@@ -2,6 +2,7 @@
 //! and `ants notes` send them, with the files staged in the bar stored before the message.
 
 use ants_client::sending::Addressed;
+use ants_client::sending::bar::{dm_with, reply_to};
 use ants_daemon::bus;
 use ants_proto::{ChannelId, ThreadId, UserId};
 use anyhow::{Result, anyhow};
@@ -12,7 +13,7 @@ use crate::messages::forward;
 use crate::messages::send;
 use crate::people::humans;
 use crate::threads::thread;
-use crate::tui::work::entries::{dm_with, reply_to, stuck};
+use crate::tui::work::entries::stuck;
 
 /// How the chat attaches a file, as [`send::check_fits`] suggests it.
 const ATTACH: &str = "attach it with /attach";

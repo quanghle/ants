@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context as _, Result, bail};
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -101,26 +100,9 @@ pub struct Picker {
 impl Picker {
     pub fn new(text: &str) -> Option<Self> {
         let mut choices = vec![("Whole message".to_owned(), text.to_owned())];
-        let mut code = None;
-        let mut language = String::new();
-        for event in Parser::new(text) {
-            match event {
-                Event::Start(Tag::CodeBlock(kind)) => {
-                    language = match kind {
-                        pulldown_cmark::CodeBlockKind::Fenced(info) => info.to_string(),
-                        pulldown_cmark::CodeBlockKind::Indented => String::new(),
-                    };
-                    code = Some(String::new());
-                }
-                Event::Text(text) if code.is_some() => code.as_mut().expect("a code block").push_str(&text),
-                Event::End(TagEnd::CodeBlock) => {
-                    let text = code.take().unwrap_or_default();
-                    let label =
-                        format!("Code block {} {} ({} characters)", choices.len(), language, text.chars().count());
-                    choices.push((label, text));
-                }
-                _ => {}
-            }
+        for (language, code) in ants_client::markdown::parse(text).code_blocks() {
+            let (n, language, count) = (choices.len(), language.unwrap_or_default(), code.chars().count());
+            choices.push((format!("Code block {n} {language} ({count} characters)"), code.to_owned()));
         }
         (choices.len() > 1).then_some(Self { choices, selected: 0 })
     }

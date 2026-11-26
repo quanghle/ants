@@ -5,9 +5,10 @@
 //! command over the CLI's verbs, acting on the selected item or open thread ([`COMMANDS`]). Sends run in the background
 //! ([`super::exec`]); the bar's status line tells how they went, and a failed send's text, with the message it quoted, comes back into the bar.
 //! n on a tool request opens the bar on a note ([`Note`]): Enter rejects the request, then sends the note to its ant.
-//! The bar's title names where Enter sends the text as it stands ([`Route`]), and each conversation keeps its own
-//! draft ([`Drafts`]).
+//! The bar's title names where Enter sends the text as it stands ([`Route`], as every client routes it), and each
+//! conversation keeps its own draft ([`Drafts`]).
 
+use ants_client::sending::bar::Route;
 use ants_proto::{ApprovalRequest, ChannelId, ThreadId, UserId, Verdict};
 use chrono::{DateTime, Utc};
 
@@ -29,7 +30,6 @@ pub use bar::{Bar, Draft, Edited, Note, Tone};
 pub use drafts::{Conversation, Drafts};
 pub use history::{FILE as HISTORY_FILE, History};
 pub use parse::{COMMANDS, Command, Dead, Goto, Needs, Notify, OnThread, Row, Slash, Trail, parse};
-pub use route::Route;
 pub use slash::GRANT;
 
 /// A paste of more bytes than this is staged as a text file rather than put in the bar.
@@ -98,10 +98,9 @@ impl Model {
         let slash = matches!(command, Ok(Command::Slash(_)));
         // Before the command moves the view, and so what it acts on.
         let sealed = self.sealed(self.ui.drafts.here(), &text, now);
-        let route = self.route(&text);
         let done = command.and_then(|command| match command {
             Command::Slash(command) => self.command(command, now),
-            message => self.message(message, route),
+            _ => self.job(&text).map(|job| Some(Action::Run(job, String::new()))),
         });
         let action = match done {
             Ok(action) => action,
@@ -188,19 +187,6 @@ impl Model {
         Some(Action::Decide(request, Verdict::Reject))
     }
 
-    /// The action sending the message `command` the way `route`, the route of the bar's text, goes.
-    fn message(&self, command: Command, route: Route) -> Result<Option<Action>, String> {
-        let run = |job| Ok(Some(Action::Run(job, String::new())));
-        match command {
-            Command::Ask { text, .. } | Command::Post { text, .. } | Command::Say(text) => run(self.job(route, text)?),
-            Command::Later(text) => {
-                self.thread_open()?;
-                run(Job::Later(Box::new(self.job(route, text)?)))
-            }
-            Command::Slash(_) => Err("nothing to send".to_owned()),
-        }
-    }
-
     /// Stage a file for the next message, or drop those staged, the bar kept open to write it.
     fn stage(&mut self, slash: &Slash) {
         let staged = &mut self.ui.bar.staged;
@@ -251,7 +237,7 @@ impl Model {
             Route::Reply { .. } => "Enter replies on the thread".to_owned(),
             Route::Ask { to, thread: None } => format!("Enter writes to {to} on a new thread"),
             Route::Ask { to, thread: Some(_) } => format!("Enter writes to {to} on the thread"),
-            Route::Unaddressed | Route::Command(_) | Route::Unnamed => {
+            Route::Unaddressed | Route::Command { .. } | Route::Unnamed => {
                 "Enter asks the assistant or the messenger".to_owned()
             }
         };

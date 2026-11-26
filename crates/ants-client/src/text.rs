@@ -1,4 +1,5 @@
-//! The words an entry is noted with: a verdict, an escalation, how long a tool call took.
+//! The words an entry is noted with: a verdict, an escalation, how long a tool call took; and an excerpt of what
+//! someone else wrote.
 
 use std::time::Duration;
 
@@ -32,4 +33,16 @@ pub fn escalation_note(x: &Escalation) -> String {
     let (level, stuck, thread, leader) = (x.level, &x.stuck, &x.thread_id, &x.leader);
     let away = x.away.as_ref().map_or_default(|a| format!(", relayed while {} is away: answer {}", a.human, a.ant));
     format!("escalation level {level}, {reason}: {stuck} stuck on {thread}, leader {leader}, visited {visited}{away}")
+}
+
+/// The first line of `text`, words someone else wrote, cut to `max` characters, `…` marking what is left out: tabs
+/// as spaces, control characters and those reordering text left out ([`ants_proto::lines`]).
+pub fn excerpt(text: &str, max: usize) -> String {
+    let text = ants_proto::lines(text);
+    let line = text.lines().next().unwrap_or("");
+    let mut out: String = line.chars().take(max).collect();
+    if out.len() < text.len() {
+        out.push('…');
+    }
+    out
 }

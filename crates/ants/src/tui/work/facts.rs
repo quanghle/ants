@@ -254,7 +254,7 @@ impl Data {
 
     /// Whether `ant` is on the thread where a human reaches it: it posted there to a channel, or a message or
     /// escalation there went between it and a human. An ant only other ants messaged there is not, as a reply there
-    /// goes to another ant ([`super::entries::reply_to`]).
+    /// goes to another ant ([`ants_client::sending::bar::reply_to`]).
     pub(super) fn reaches(&self, thread: &ThreadId, ant: &UserId) -> bool {
         self.facts.get(thread).is_some_and(|fact| {
             fact.posted.contains(ant)
