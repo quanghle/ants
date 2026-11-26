@@ -83,6 +83,7 @@ const CLI: &[(&str, Chat)] = &[
     ("team add", Press(View::Team, Key::Char('M'), "manage")),
     ("team remove", Press(View::Team, Key::Char('M'), "manage")),
     ("team delete", Press(View::Team, Key::Char('D'), "delete")),
+    ("team repair", Exempt("repairs a stored team directory breaking the rules, which ants chat cannot read to show")),
     ("team list", Shown("the nav's teams, as a forest, each with how many ants it holds")),
     ("team show", Shown("a team's view, which a team of the nav opens: its header and members tree")),
     ("notes", Slash("notes")),
